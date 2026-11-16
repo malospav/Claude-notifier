@@ -113,7 +113,7 @@ Describe 's_001_02 · ConvertTo-NotifierEvent' {
         @{ Case = 'битый JSON'; Kind = 'stop'; Json = '{ not json' },
         @{ Case = 'JSON-массив'; Kind = 'stop'; Json = '[1,2]' },
         @{ Case = 'пустой stdin'; Kind = 'stop'; Json = '' },
-        @{ Case = 'неизвестный HookKind'; Kind = 'sessionend'; Json = '{}' }
+        @{ Case = 'неизвестный HookKind'; Kind = 'bogus'; Json = '{}' }
     ) {
         param($Case, $Kind, $Json)
         $root = Join-Path $TestDrive ([guid]::NewGuid().ToString())

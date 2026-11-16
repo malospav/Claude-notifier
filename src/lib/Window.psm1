@@ -188,4 +188,12 @@ function Set-SessionWindowFocus {
     return 'flashed'
 }
 
-Export-ModuleMember -Function Get-SessionWindow, Set-SessionWindowFocus
+function Test-SessionWindow {
+    <# .SYNOPSIS $true, если окно с таким hwnd существует. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][int64]$Hwnd)
+    if ($Hwnd -eq 0) { return $false }
+    try { return [bool](Test-Win32Window $Hwnd) } catch { return $false }
+}
+
+Export-ModuleMember -Function Get-SessionWindow, Set-SessionWindowFocus, Test-SessionWindow

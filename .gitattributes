@@ -1,0 +1,2 @@
+*.sh text eol=lf
+src/mac/*.js text eol=lf

@@ -1,0 +1,205 @@
+﻿Set-StrictMode -Version 2.0
+
+Import-Module (Join-Path $PSScriptRoot 'Log.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Config.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Window.psm1')
+
+# sessions.json — JSON-массив активных сеансов Claude. Пишет только трей (один процесс),
+# поэтому гонок записи нет. Поля: session_id, project, origin, device, state, since, updated, preview, window.
+# state: working | waiting | permission | error. Завершённые сеансы из списка удаляются.
+
+# Тип события → статус сеанса ($null — событие статус не меняет).
+$script:TypeToState = @{
+    start      = 'waiting'
+    working    = 'working'
+    done       = 'waiting'
+    permission = 'permission'
+    error      = 'error'
+}
+# Порядок в окне: сначала те, что ждут человека.
+$script:StateOrder = @{ permission = 0; error = 1; waiting = 2; working = 3 }
+$script:MaxIdleHours = 24
+
+function Get-SessionsPath([string]$DataRoot) { return (Join-Path $DataRoot 'sessions.json') }
+
+function ConvertTo-UtcTime([string]$Ts) {
+    $parsed = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($Ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) { return $parsed.UtcDateTime }
+    return $null
+}
+
+function Get-Prop($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -eq $p) { return $null }
+    return $p.Value
+}
+
+function Get-NotifierSessions {
+    <#
+    .SYNOPSIS
+    Читает sessions.json (сеансы выводятся в конвейер по одному; вызывающий оборачивает в @()).
+    Нет файла или файл повреждён → ничего (повреждённый файл удаляется, WARN в лог).
+    #>
+    [CmdletBinding()]
+    param([string]$DataRoot = (Get-NotifierDataRoot))
+    $path = Get-SessionsPath $DataRoot
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+    try { $parsed = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop }
+    catch {
+        try { Remove-Item -LiteralPath $path -Force } catch { }
+        Write-NotifierLog -Level WARN -Message 'sessions: sessions.json повреждён и удалён' -DataRoot $DataRoot
+        return
+    }
+    foreach ($x in @($parsed)) {
+        if ($x -is [System.Management.Automation.PSCustomObject] -and (Get-Prop $x 'session_id') -is [string]) { $x }
+    }
+}
+
+function Save-NotifierSessions {
+    <# .SYNOPSIS Атомарно записывает список сеансов в sessions.json. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions,
+        [string]$DataRoot = (Get-NotifierDataRoot)
+    )
+    if (-not (Test-Path -LiteralPath $DataRoot)) { New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null }
+    $path = Get-SessionsPath $DataRoot
+    $tmp = "$path.tmp-$PID"
+    $json = '[]'
+    if ($Sessions.Count -gt 0) { $json = ConvertTo-Json -InputObject @($Sessions) -Depth 6 -Compress }
+    [IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+function Update-NotifierSessionList {
+    <#
+    .SYNOPSIS
+    Применяет событие к списку сеансов и возвращает новый список (исходный не меняется).
+
+    .DESCRIPTION
+    end → сеанс удаляется. start/working/done/permission/error → сеанс создаётся или обновляется:
+    статус, время смены статуса (since), время события (updated), окно (если найдено).
+    done обновляет превью последнего ответа. Событие без session_id и limit список не меняют.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions,
+        [Parameter(Mandatory = $true)]$Event
+    )
+    $sid = Get-Prop $Event 'session_id'
+    $type = [string](Get-Prop $Event 'type')
+    if ($sid -isnot [string] -or $sid -eq '') { return , @($Sessions) }
+    $others = @($Sessions | Where-Object { [string](Get-Prop $_ 'session_id') -ne $sid })
+    if ($type -eq 'end') { return , $others }
+    if (-not $script:TypeToState.ContainsKey($type)) { return , @($Sessions) }
+
+    $ts = [string](Get-Prop $Event 'ts')
+    if ($ts -eq '') { $ts = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+    $old = @($Sessions | Where-Object { [string](Get-Prop $_ 'session_id') -eq $sid }) | Select-Object -First 1
+    $state = $script:TypeToState[$type]
+
+    $since = $ts
+    if ($old -and (Get-Prop $old 'state') -eq $state -and (Get-Prop $old 'since')) { $since = [string](Get-Prop $old 'since') }
+    $preview = ''
+    if ($old) { $preview = [string](Get-Prop $old 'preview') }
+    if ($type -eq 'done') { $preview = [string](Get-Prop $Event 'preview') }
+    $window = $null
+    if ($old) { $window = Get-Prop $old 'window' }
+    $evWindow = Get-Prop $Event 'window'
+    if ($evWindow -and [int64](Get-Prop $evWindow 'hwnd') -ne 0) {
+        $window = [pscustomobject][ordered]@{ hwnd = [int64](Get-Prop $evWindow 'hwnd'); pid = [int](Get-Prop $evWindow 'pid') }
+    }
+    $project = [string](Get-Prop $Event 'project')
+    if ($project -eq '' -and $old) { $project = [string](Get-Prop $old 'project') }
+    $origin = [string](Get-Prop $Event 'origin')
+    if ($origin -eq '' -and $old) { $origin = [string](Get-Prop $old 'origin') }
+    $device = [string](Get-Prop $Event 'device')   # '' — этот ПК; иначе id устройства из network.json
+
+    $session = [pscustomobject][ordered]@{
+        session_id = $sid
+        project    = $project
+        origin     = $origin
+        device     = $device
+        state      = $state
+        since      = $since
+        updated    = $ts
+        preview    = $preview
+        window     = $window
+    }
+    return , @($others + $session)
+}
+
+function Test-NotifierSessionAlive {
+    <#
+    .SYNOPSIS
+    Жив ли сеанс: процесс claude.exe (если известен pid) существует и окно (если известно) открыто.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Session)
+    $win = Get-Prop $Session 'window'
+    if ($null -eq $win) { return $true }
+    $procId = [int](Get-Prop $win 'pid')
+    if ($procId -gt 0) {
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if ($null -eq $proc -or $proc.ProcessName -notlike 'claude*') { return $false }
+    }
+    $hwnd = [int64](Get-Prop $win 'hwnd')
+    if ($hwnd -ne 0 -and -not (Test-SessionWindow -Hwnd $hwnd)) { return $false }
+    return $true
+}
+
+function Select-NotifierLiveSessions {
+    <#
+    .SYNOPSIS
+    Отбрасывает завершившиеся сеансы: процесс или окно закрыты либо событий не было MaxIdleHours часов.
+    Возвращает новый список.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions,
+        [datetime]$Now = [DateTime]::UtcNow,
+        [int]$MaxIdleHours = $script:MaxIdleHours
+    )
+    $live = @()
+    foreach ($s in $Sessions) {
+        $updated = ConvertTo-UtcTime ([string](Get-Prop $s 'updated'))
+        if ($null -ne $updated -and ($Now - $updated).TotalHours -ge $MaxIdleHours) { continue }
+        if (-not (Test-NotifierSessionAlive -Session $s)) { continue }
+        $live += $s
+    }
+    return , $live
+}
+
+function Get-NotifierSortedSessions {
+    <# .SYNOPSIS Порядок для окна: нужно разрешение, ошибка, ждёт ответа, работает; внутри — новые выше. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions)
+    $sorted = @($Sessions | Sort-Object -Property @(
+            @{ Expression = { $o = $script:StateOrder[[string](Get-Prop $_ 'state')]; if ($null -eq $o) { 9 } else { $o } } },
+            @{ Expression = { [string](Get-Prop $_ 'updated') }; Descending = $true }))
+    return , $sorted
+}
+
+function Format-NotifierElapsed {
+    <# .SYNOPSIS «только что», «5 мин», «2 ч 05 мин», «3 дн» — сколько прошло с Ts. #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Ts, [datetime]$Now = [DateTime]::UtcNow)
+    $t = ConvertTo-UtcTime $Ts
+    if ($null -eq $t) { return '' }
+    $span = $Now - $t
+    if ($span.TotalMinutes -lt 1) { return 'только что' }
+    if ($span.TotalHours -lt 1) { return "$([int][Math]::Floor($span.TotalMinutes)) мин" }
+    if ($span.TotalDays -lt 1) { return ('{0} ч {1:00} мин' -f [int][Math]::Floor($span.TotalHours), $span.Minutes) }
+    return "$([int][Math]::Floor($span.TotalDays)) дн"
+}
+
+function Get-NotifierSessionStateText {
+    <# .SYNOPSIS Русское название статуса сеанса. #>
+    param([string]$State)
+    $key = "state.$State"
+    if ($NotifierStrings.ContainsKey($key)) { return $NotifierStrings[$key] }
+    return $State
+}
+
+Export-ModuleMember -Function Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText

@@ -7,6 +7,10 @@ $script:KindToType = @{
     stop         = 'done'
     notification = 'permission'
     stopfailure  = 'error'
+    # Служебные события для окна «Сеансы»: без уведомления и без записи в историю.
+    sessionstart = 'start'
+    prompt       = 'working'
+    sessionend   = 'end'
 }
 
 function Get-InputString($Object, [string]$Name) {
@@ -100,10 +104,12 @@ function ConvertTo-NotifierEvent {
             $details = Get-InputString $hook 'error_details'
             $raw = (@($err, $details) | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join ': '
         }
+        default { $raw = '' }   # служебные события: текст запроса пользователя не передаётся
     }
 
     $project = Get-ProjectName (Get-InputString $hook 'cwd')
-    $title = Get-NotifierEventTitle -Type $type
+    if ($NotifierStrings.ContainsKey($type)) { $title = Get-NotifierEventTitle -Type $type }
+    else { $title = 'Сеанс' }
     if ($project -ne '') { $title = "$title $([char]0x00B7) $project" }
     $hostId = $null
     if (-not [string]::IsNullOrEmpty($HostSessionId)) { $hostId = $HostSessionId }

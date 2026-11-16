@@ -127,13 +127,13 @@ Describe 's_005_02 · меню «История» в трее' {
         Assert-MockCalled Start-NotifierFocusHandler -Scope It -Times 1 -Exactly -ParameterFilter { $Id -eq (New-Ev 7).id }
     }
 
-    It 'меню трея: «История» и «Выход»; история перечитывается при открытии' {
+    It 'меню трея: «Сеансы», «История» и «Выход»; история перечитывается при открытии' {
         $root = Join-Path $TestDrive 'traymenu'
         $icon = New-NotifierTrayIcon -OnExit { } -DataRoot $root
         try {
-            ($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'История,Выход'
+            ($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'Сеансы,История,Выход'
             Add-NotifierHistory -Event (New-Ev 3) -DataRoot $root | Out-Null
-            $hist = $icon.ContextMenuStrip.Items[0]
+            $hist = $icon.ContextMenuStrip.Items[1]
             $hist.ShowDropDown(); $hist.HideDropDown()
             $hist.DropDownItems[0].Tag | Should Be (New-Ev 3).id
         }

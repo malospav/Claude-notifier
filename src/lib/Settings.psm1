@@ -4,7 +4,11 @@
 $script:HookSpecs = @(
     @{ Event = 'Stop'; Matcher = $null; Kind = 'stop' },
     @{ Event = 'Notification'; Matcher = 'permission_prompt|elicitation_dialog|agent_needs_input'; Kind = 'notification' },
-    @{ Event = 'StopFailure'; Matcher = $null; Kind = 'stopfailure' }
+    @{ Event = 'StopFailure'; Matcher = $null; Kind = 'stopfailure' },
+    # Окно «Сеансы»: начало, новый запрос (статус «Работает»), завершение сеанса.
+    @{ Event = 'SessionStart'; Matcher = $null; Kind = 'sessionstart' },
+    @{ Event = 'UserPromptSubmit'; Matcher = $null; Kind = 'prompt' },
+    @{ Event = 'SessionEnd'; Matcher = $null; Kind = 'sessionend' }
 )
 $script:Marker = 'claude-notifier\app\hook-bridge.ps1'
 $script:StatusLineMarker = 'claude-notifier/app/statusline.ps1'
@@ -132,7 +136,7 @@ function Remove-NotifierHooks {
 function Add-NotifierHooks {
     <#
     .SYNOPSIS
-    Добавляет 3 хука claude-notifier (exec-форма, async) с путём к <AppRoot>\hook-bridge.ps1.
+    Добавляет хуки claude-notifier ($script:HookSpecs) (exec-форма, async) с путём к <AppRoot>\hook-bridge.ps1.
     Вызывайте после Remove-NotifierHooks, чтобы не было дублей.
     #>
     param(

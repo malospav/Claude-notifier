@@ -127,11 +127,11 @@ Describe 's_005_01 · обрезка рабочего набора в прост
 }
 
 Describe 's_005_01 · иконка и выход' {
-    It 'иконка: подсказка «Claude Notifier», меню «Выход», иконка из assets' {
+    It 'иконка: подсказка «Claude Notifier», меню «Сеансы/История/Выход», иконка из assets' {
         $icon = New-NotifierTrayIcon -OnExit { }
         try {
             $icon.Text | Should Be 'Claude Notifier'
-            @($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'История,Выход'
+            @($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'Сеансы,История,Выход'
             $icon.Icon.Width | Should Be 32
         }
         finally { $icon.Visible = $false; $icon.Dispose() }
@@ -182,7 +182,7 @@ Describe 's_005_01 · Start-NotifierTray в текущем процессе' {
             if (-not $script:sent) { $script:sent = Send-NotifierEvent -Event (New-Ev) -PipeName $script:testPipe -TimeoutMs 100 }
             elseif ($script:step -ge 6) {
                 $driver.Stop()
-                $script:TrayState.Icon.ContextMenuStrip.Items[1].PerformClick()
+                @($script:TrayState.Icon.ContextMenuStrip.Items | Where-Object { $_.Text -eq 'Выход' })[0].PerformClick()
             }
         })
         $driver.Start()

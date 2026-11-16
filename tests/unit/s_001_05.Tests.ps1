@@ -98,7 +98,7 @@ Describe 's_001_05 · install.ps1' {
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes | Out-Null
         $s = Read-Json $e.Settings
         $ours = Get-OurHooks $s
-        ($ours.Values | Measure-Object -Sum).Sum | Should Be 3
+        ($ours.Values | Measure-Object -Sum).Sum | Should Be 6
         @($s.hooks.Stop).Count | Should Be 2
     }
 

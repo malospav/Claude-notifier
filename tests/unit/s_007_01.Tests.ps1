@@ -1,0 +1,453 @@
+﻿$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
+Import-Module (Join-Path $repoRoot 'src\lib\Devices.psm1') -Force
+Import-Module (Join-Path $repoRoot 'src\lib\Server.psm1') -Force
+Import-Module (Join-Path $repoRoot 'src\lib\Sessions.psm1') -Force
+$tray = Join-Path $repoRoot 'src\ClaudeNotifier.Tray.ps1'
+. $tray
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Net.Http
+
+$sh = Get-Command sh -ErrorAction SilentlyContinue
+if (-not $sh) { $git = Get-Command git -ErrorAction SilentlyContinue; if ($git) { $cand = Join-Path (Split-Path (Split-Path $git.Source)) 'usr\bin\sh.exe'; if (Test-Path $cand) { $sh = Get-Item $cand } } }
+$shPath = if ($sh) { if ($sh.Source) { $sh.Source } else { $sh.FullName } } else { $null }
+$node = Get-Command node -ErrorAction SilentlyContinue
+
+function New-Ctx([string]$Root) {
+    New-Item -ItemType Directory -Path $Root -Force | Out-Null
+    return @{
+        Network = (Get-NotifierNetwork -DataRoot $Root); Pairing = (New-NotifierPairing); InstallCodes = @{}
+        Events = (New-Object System.Collections.ArrayList); NetworkDirty = $false; Paired = $null
+        DataRoot = $Root; Address = '192.168.1.50'; PcName = 'TESTPC'
+    }
+}
+
+function New-Req([string]$Method, [string]$Path, [string]$Body = '', [hashtable]$Headers = @{}, [hashtable]$Query = @{}) {
+    return @{ Method = $Method; Path = $Path; Body = $Body; Headers = $Headers; Query = $Query; TooLarge = $false; Remote = '192.168.1.60' }
+}
+
+function Get-CookieToken($Resp) {
+    $c = @($Resp.Headers | Where-Object { $_[0] -eq 'Set-Cookie' })[0][1]
+    return ($c -split ';')[0].Split('=', 2)[1]
+}
+
+function Connect-Device([hashtable]$Ctx, [string]$Agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)') {
+    $Ctx.Pairing = New-NotifierPairing
+    $r = Invoke-NotifierHttpRequest -Request (New-Req POST '/login' "pin=$($Ctx.Pairing.Pin)" @{ 'user-agent' = $Agent }) -Ctx $Ctx
+    return (Get-CookieToken $r)
+}
+
+Describe 's_007_01 · Devices.psm1' {
+    It 'network.json: по умолчанию выключено, порт 47600; запись и чтение; повреждённый → по умолчанию' {
+        $root = Join-Path $TestDrive 'net'
+        $n = Get-NotifierNetwork -DataRoot $root
+        $n.enabled | Should Be $false
+        $n.port | Should Be 47600
+        $added = Add-NotifierDevice -Network $n -Name 'iPhone'
+        $n.enabled = $true
+        Save-NotifierNetwork -Network $n -DataRoot $root
+        $raw = Get-Content (Join-Path $root 'network.json') -Raw
+        $raw | Should Not Match ([regex]::Escape($added.Token))   # хранится только хэш
+        $m = Get-NotifierNetwork -DataRoot $root
+        $m.enabled | Should Be $true
+        $m.devices.Count | Should Be 1
+        (Find-NotifierDeviceByToken -Network $m -Token $added.Token).name | Should Be 'iPhone'
+        Find-NotifierDeviceByToken -Network $m -Token 'wrong' | Should Be $null
+        Find-NotifierDeviceByToken -Network $m -Token '' | Should Be $null
+        [IO.File]::WriteAllText((Join-Path $root 'network.json'), '{bad', [Text.Encoding]::UTF8)
+        (Get-NotifierNetwork -DataRoot $root).devices.Count | Should Be 0
+    }
+
+    It 'второй токен устройства работает; отключение отзывает все токены' {
+        $n = Get-NotifierNetwork -DataRoot (Join-Path $TestDrive 'none')
+        $a = Add-NotifierDevice -Network $n -Name 'Mac'
+        $t2 = Add-NotifierDeviceToken -Device $a.Device
+        (Find-NotifierDeviceByToken -Network $n -Token $t2).id | Should Be $a.Device.id
+        Remove-NotifierDevice -Network $n -Id $a.Device.id | Should Be $true
+        Remove-NotifierDevice -Network $n -Id $a.Device.id | Should Be $false
+        Find-NotifierDeviceByToken -Network $n -Token $a.Token | Should Be $null
+        Find-NotifierDeviceByToken -Network $n -Token $t2 | Should Be $null
+    }
+
+    It 'токены случайные, 43 символа base64url' {
+        $a = New-NotifierToken; $b = New-NotifierToken
+        $a | Should Match '^[A-Za-z0-9_-]{43}$'
+        $a | Should Not Be $b
+    }
+
+    It 'PIN: верный один раз; неверный считает попытки; 5 ошибок → locked; истёк → expired' {
+        $now = [datetime]'2026-11-16T12:00:00'
+        $p = New-NotifierPairing -Now $now
+        $p.Pin | Should Match '^\d{6}$'
+        Test-NotifierPairingPin -Pairing $p -Pin '000000x' -Now $now | Should Be 'bad'
+        Test-NotifierPairingPin -Pairing $p -Pin ($p.Pin.Substring(0, 3) + ' ' + $p.Pin.Substring(3)) -Now $now | Should Be 'ok'
+        Test-NotifierPairingPin -Pairing $p -Pin $p.Pin -Now $now | Should Be 'none'
+        $q = New-NotifierPairing -Now $now
+        1..4 | ForEach-Object { Test-NotifierPairingPin -Pairing $q -Pin 'x' -Now $now } | Select-Object -Last 1 | Should Be 'bad'
+        Test-NotifierPairingPin -Pairing $q -Pin 'x' -Now $now | Should Be 'locked'
+        Test-NotifierPairingPin -Pairing $q -Pin $q.Pin -Now $now | Should Be 'locked'
+        $e = New-NotifierPairing -Now $now
+        Test-NotifierPairingPin -Pairing $e -Pin $e.Pin -Now $now.AddMinutes(11) | Should Be 'expired'
+        Test-NotifierPairingPin -Pairing $null -Pin '1' | Should Be 'none'
+    }
+
+    It 'имя по User-Agent: <Expected>' -TestCases @(
+        @{ Ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)'; Expected = 'iPhone' },
+        @{ Ua = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)'; Expected = 'iPad' },
+        @{ Ua = 'Mozilla/5.0 (Linux; Android 15; Pixel 9)'; Expected = 'Android' },
+        @{ Ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari'; Expected = 'Mac' },
+        @{ Ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'; Expected = 'Windows' },
+        @{ Ua = ''; Expected = 'Браузер' }
+    ) {
+        param($Ua, $Expected)
+        Get-NotifierDeviceNameFromAgent $Ua | Should Be $Expected
+    }
+
+    It 'Format-NotifierLastSeen' {
+        $now = [datetime]::Parse('2026-11-16T12:00:00Z').ToUniversalTime()
+        Format-NotifierLastSeen -Ts '2026-11-16T11:59:30Z' -Now $now | Should Be 'в сети'
+        Format-NotifierLastSeen -Ts '2026-11-16T11:45:00Z' -Now $now | Should Be '15 мин назад'
+        Format-NotifierLastSeen -Ts '2026-11-16T09:00:00Z' -Now $now | Should Be '3 ч назад'
+        Format-NotifierLastSeen -Ts '2026-11-10T09:00:00Z' -Now $now | Should Match '^\d\d\.\d\d$'
+        Format-NotifierLastSeen -Ts '' -Now $now | Should Be '—'
+    }
+
+    It 'адрес в локальной сети: частный IPv4 или $null' {
+        $a = Get-NotifierLanAddress
+        if ($null -ne $a) { $a | Should Match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)' }
+    }
+}
+
+Describe 's_007_01 · маршруты HTTP' {
+    It 'без cookie: / → страница входа с именем ПК; API → 401' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'r1')
+        $r = Invoke-NotifierHttpRequest -Request (New-Req GET '/') -Ctx $ctx
+        $r.Status | Should Be 200
+        $r.ContentType | Should Match 'text/html'
+        $r.Body | Should Match 'TESTPC'
+        $r.Body | Should Match 'name="pin"'
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/sessions') -Ctx $ctx).Status | Should Be 401
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{}' @{ authorization = 'Bearer nope' }) -Ctx $ctx).Status | Should Be 401
+    }
+
+    It 'вход: неверный PIN → 401 с числом попыток; верный → cookie, устройство по User-Agent, Paired' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'r2')
+        $bad = Invoke-NotifierHttpRequest -Request (New-Req POST '/login' 'pin=999999x') -Ctx $ctx
+        $bad.Status | Should Be 401
+        $bad.Body | Should Match 'Осталось попыток: 4'
+        $ok = Invoke-NotifierHttpRequest -Request (New-Req POST '/login' "pin=$($ctx.Pairing.Pin)" @{ 'user-agent' = 'Mozilla/5.0 (iPhone)' }) -Ctx $ctx
+        $ok.Status | Should Be 303
+        @($ok.Headers | Where-Object { $_[0] -eq 'Location' })[0][1] | Should Be '/'
+        $cookie = @($ok.Headers | Where-Object { $_[0] -eq 'Set-Cookie' })[0][1]
+        $cookie | Should Match '^cn_token=[A-Za-z0-9_-]{43}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax$'
+        $ctx.Network.devices.Count | Should Be 1
+        $ctx.Network.devices[0].name | Should Be 'iPhone'
+        $ctx.Paired.name | Should Be 'iPhone'
+        $ctx.NetworkDirty | Should Be $true
+        $again = Invoke-NotifierHttpRequest -Request (New-Req POST '/login' "pin=$($ctx.Pairing.Pin)") -Ctx $ctx
+        $again.Body | Should Match 'Код недействителен'
+    }
+
+    It 'с cookie: страница сеансов, /api/me, /api/sessions с сеансом этого ПК' {
+        $root = Join-Path $TestDrive 'r3'
+        $ctx = New-Ctx $root
+        $token = Connect-Device $ctx
+        $hdr = @{ cookie = "other=1; cn_token=$token" }
+        $page = Invoke-NotifierHttpRequest -Request (New-Req GET '/' '' $hdr) -Ctx $ctx
+        $page.Body | Should Match 'Сеансы Claude'
+        $me = (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/me' '' $hdr) -Ctx $ctx).Body | ConvertFrom-Json
+        $me.name | Should Be 'iPhone'
+        $me.hooks | Should Be $false
+        Save-NotifierSessions -Sessions @([pscustomobject]@{ session_id = 's'; project = 'proj'; origin = 'desktop'; device = ''; state = 'permission'; since = [DateTime]::UtcNow.ToString('o'); updated = [DateTime]::UtcNow.ToString('o'); preview = 'p'; window = $null }) -DataRoot $root
+        $data = (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/sessions' '' $hdr) -Ctx $ctx).Body | ConvertFrom-Json
+        $data.pc | Should Be 'TESTPC'
+        @($data.sessions).Count | Should Be 1
+        $data.sessions[0].device_name | Should Be 'Этот ПК'
+        $data.sessions[0].state_text | Should Be 'Нужно разрешение'
+        $data.sessions[0].elapsed | Should Be 'только что'
+        @($data.devices).Count | Should Be 1
+    }
+
+    It 'Mac: ссылка установки → скрипт с токеном (один раз) → hello → события с токеном хуков' {
+        $root = Join-Path $TestDrive 'r4'
+        $ctx = New-Ctx $root
+        $cookie = Connect-Device $ctx 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
+        $link = (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie" }) -Ctx $ctx).Body | ConvertFrom-Json
+        $link.command | Should Match '^curl -fsSL http://192\.168\.1\.50:47600/install/[A-Za-z0-9_-]{43} \| sh$'
+        $path = ($link.command -split ' ')[2] -replace '^http://[^/]+', ''
+        $script = (Invoke-NotifierHttpRequest -Request (New-Req GET $path) -Ctx $ctx).Body
+        $script | Should Match "BASE='http://192\.168\.1\.50:47600'"
+        $script | Should Match "CN_URL2='http://testpc\.local:47600'"
+        $script.Contains("`r") | Should Be $false
+        $hookToken = [regex]::Match($script, "CN_TOKEN='([^']+)'").Groups[1].Value
+        $hookToken | Should Match '^[A-Za-z0-9_-]{43}$'
+        (Invoke-NotifierHttpRequest -Request (New-Req GET $path) -Ctx $ctx).Body | Should Match 'устарела'
+        $bearer = @{ authorization = "Bearer $hookToken" }
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/hello' '{"name":"MacBook Pro Саши"}' $bearer) -Ctx $ctx).Status | Should Be 200
+        $d = $ctx.Network.devices[0]
+        $d.name | Should Be 'MacBook Pro Саши'
+        $d.kind | Should Be 'mac'
+        $d.hooks | Should Be $true
+        $ev = Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{"session_id":"m1","cwd":"/Users/a/dev/site","last_assistant_message":"Готово"}' $bearer @{ kind = 'stop'; entry = 'cli' }) -Ctx $ctx
+        $ev.Status | Should Be 200
+        $ctx.Events.Count | Should Be 1
+        $ctx.Events[0].type | Should Be 'done'
+        $ctx.Events[0].device | Should Be $d.id
+        $ctx.Events[0].project | Should Be 'site'
+        $ctx.Events[0].origin | Should Be 'cli'
+        $ctx.Events[0].title | Should Be "Готово $([char]0x00B7) site $([char]0x00B7) MacBook Pro Саши"
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{}' $bearer @{ kind = 'bogus' }) -Ctx $ctx).Status | Should Be 400
+    }
+
+    It 'просроченная ссылка установки не выдаёт токен' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'r5')
+        $a = Add-NotifierDevice -Network $ctx.Network -Name 'Mac'
+        $ctx.InstallCodes['abcdefgh12345678'] = @{ DeviceId = $a.Device.id; Expires = [DateTime]::UtcNow.AddMinutes(-1) }
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/install/abcdefgh12345678') -Ctx $ctx).Body | Should Match 'устарела'
+        @($a.Device.tokens).Count | Should Be 1
+    }
+
+    It 'файлы для Mac отдаются без авторизации и только с LF; 404; 413' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'r6')
+        foreach ($p in '/mac/hook.sh', '/mac/settings.js', '/mac/uninstall.sh') {
+            $r = Invoke-NotifierHttpRequest -Request (New-Req GET $p) -Ctx $ctx
+            $r.Status | Should Be 200
+            $r.Body.Contains("`r") | Should Be $false
+        }
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/mac/env') -Ctx $ctx).Status | Should Be 401
+        $token = Connect-Device $ctx
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/nope' '' @{ cookie = "cn_token=$token" }) -Ctx $ctx).Status | Should Be 404
+        $big = New-Req POST '/api/event'; $big.TooLarge = $true
+        (Invoke-NotifierHttpRequest -Request $big -Ctx $ctx).Status | Should Be 413
+    }
+
+    It 'отключённое устройство больше не принимается' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'r7')
+        $token = Connect-Device $ctx
+        [void](Remove-NotifierDevice -Network $ctx.Network -Id $ctx.Network.devices[0].id)
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/me' '' @{ cookie = "cn_token=$token" }) -Ctx $ctx).Status | Should Be 401
+    }
+}
+
+Describe 's_007_01 · настоящий HTTP на localhost' {
+    It 'запрос проходит через HttpListener: очередь → обработка → ответ клиенту' {
+        $root = Join-Path $TestDrive 'live'
+        $ctx = New-Ctx $root
+        $port = Get-Random -Minimum 49200 -Maximum 49900
+        $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $server = Start-NotifierHttpServer -Prefix "http://localhost:$port/" -Queue $q
+        $client = New-Object System.Net.Http.HttpClient
+        try {
+            $task = $client.GetAsync("http://localhost:$port/")
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            while (-not $task.IsCompleted -and [DateTime]::UtcNow -lt $deadline) {
+                $c = $null
+                if ($q.TryDequeue([ref]$c)) {
+                    Write-NotifierHttpResponse -Context $c -Response (Invoke-NotifierHttpRequest -Request (ConvertFrom-NotifierHttpContext -Context $c) -Ctx $ctx)
+                }
+                Start-Sleep -Milliseconds 20
+            }
+            $resp = $task.Result
+            [int]$resp.StatusCode | Should Be 200
+            $resp.Headers.GetValues('Cache-Control') | Should Be 'no-store'
+            $resp.Content.ReadAsStringAsync().Result | Should Match 'TESTPC'
+        }
+        finally {
+            $client.Dispose()
+            Stop-NotifierHttpServer -Server $server | Should Be $true
+        }
+    }
+
+    It 'hook.sh (через sh) отправляет событие хука на сервер' -Skip:(-not $shPath) {
+        $root = Join-Path $TestDrive 'hooksh'
+        $ctx = New-Ctx $root
+        $a = Add-NotifierDevice -Network $ctx.Network -Name 'MacBook'
+        $port = Get-Random -Minimum 49200 -Maximum 49900
+        $macHome = Join-Path $TestDrive 'machome'
+        New-Item -ItemType Directory -Path (Join-Path $macHome '.claude-notifier') -Force | Out-Null
+        $envText = "CN_URL='http://localhost:$port'`nCN_URL2=''`nCN_TOKEN='$($a.Token)'`n"
+        [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\env'), $envText, (New-Object Text.UTF8Encoding $false))
+        $stdin = Join-Path $TestDrive 'stdin.json'
+        [IO.File]::WriteAllText($stdin, '{"session_id":"mac-1","cwd":"/Users/a/dev/shop","message":"Разрешить?"}', (New-Object Text.UTF8Encoding $false))
+        $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $server = Start-NotifierHttpServer -Prefix "http://localhost:$port/" -Queue $q
+        $oldHome = $env:HOME
+        try {
+            $env:HOME = $macHome
+            $hook = (Join-Path $repoRoot 'src\mac\hook.sh')
+            $p = Start-Process -FilePath $shPath -ArgumentList @("`"$hook`"", 'notification') -RedirectStandardInput $stdin -NoNewWindow -PassThru
+            [void]$p.Handle   # иначе в PS 5.1 ExitCode после выхода пуст
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while (-not $p.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+                $c = $null
+                if ($q.TryDequeue([ref]$c)) {
+                    Write-NotifierHttpResponse -Context $c -Response (Invoke-NotifierHttpRequest -Request (ConvertFrom-NotifierHttpContext -Context $c) -Ctx $ctx)
+                }
+                Start-Sleep -Milliseconds 20
+            }
+            $p.WaitForExit(2000) | Out-Null
+            $p.ExitCode | Should Be 0
+            $ctx.Events.Count | Should Be 1
+            $ctx.Events[0].type | Should Be 'permission'
+            $ctx.Events[0].preview | Should Be 'Разрешить?'
+            $ctx.Events[0].project | Should Be 'shop'
+            $ctx.Events[0].device | Should Be $a.Device.id
+        }
+        finally {
+            $env:HOME = $oldHome
+            [void](Stop-NotifierHttpServer -Server $server)
+        }
+    }
+
+    It 'hook.sh: ПК недоступен → код 0 без вывода' -Skip:(-not $shPath) {
+        $macHome = Join-Path $TestDrive 'machome2'
+        New-Item -ItemType Directory -Path (Join-Path $macHome '.claude-notifier') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\env'), "CN_URL='http://127.0.0.1:9'`nCN_URL2=''`nCN_TOKEN='x'`n", (New-Object Text.UTF8Encoding $false))
+        $oldHome = $env:HOME
+        try {
+            $env:HOME = $macHome
+            $out = '{}' | & $shPath (Join-Path $repoRoot 'src\mac\hook.sh') stop 2>&1
+            $LASTEXITCODE | Should Be 0
+            "$out" | Should Be ''
+        }
+        finally { $env:HOME = $oldHome }
+    }
+
+    It 'скрипты для Mac проходят проверку синтаксиса sh -n' -Skip:(-not $shPath) {
+        $ctx = New-Ctx (Join-Path $TestDrive 'syntax')
+        $a = Add-NotifierDevice -Network $ctx.Network -Name 'Mac'
+        $ctx.InstallCodes['code12345678'] = @{ DeviceId = $a.Device.id; Expires = [DateTime]::UtcNow.AddMinutes(5) }
+        $install = Join-Path $TestDrive 'install.sh'
+        [IO.File]::WriteAllText($install, (Invoke-NotifierHttpRequest -Request (New-Req GET '/install/code12345678') -Ctx $ctx).Body, (New-Object Text.UTF8Encoding $false))
+        foreach ($f in @($install, (Join-Path $repoRoot 'src\mac\hook.sh'), (Join-Path $repoRoot 'src\mac\uninstall.sh'))) {
+            & $shPath -n $f 2>&1 | Out-Null
+            $LASTEXITCODE | Should Be 0
+        }
+    }
+}
+
+Describe 's_007_01 · settings.js (слияние хуков на Mac)' {
+    It 'install добавляет 6 хуков, чужие сохраняет, повтор без дублей; uninstall убирает только свои' -Skip:(-not $node) {
+        $js = (Join-Path $repoRoot 'src\mac\settings.js').Replace('\', '/')
+        $code = @"
+const { mergeHooks } = require('$js');
+const hook = '/Users/a b/.claude-notifier/hook.sh';
+let s = { model: 'opus', hooks: { Stop: [ { hooks: [ { type: 'command', command: '/my/stop.sh' } ] } ] } };
+s = mergeHooks(s, 'install', hook);
+s = mergeHooks(s, 'install', hook);
+const ours = Object.values(s.hooks).flat().flatMap(g => g.hooks).filter(h => h.command.includes('.claude-notifier/hook.sh'));
+const out = { events: Object.keys(s.hooks).sort(), ours: ours.length, stop: s.hooks.Stop.length,
+  cmd: s.hooks.UserPromptSubmit[0].hooks[0].command, async: ours.every(h => h.async === true),
+  matcher: s.hooks.Notification[0].matcher };
+const u = mergeHooks(s, 'uninstall', hook);
+out.after = JSON.stringify(u);
+console.log(JSON.stringify(out));
+"@
+        $r = node -e $code | ConvertFrom-Json
+        ($r.events -join ',') | Should Be 'Notification,SessionEnd,SessionStart,Stop,StopFailure,UserPromptSubmit'
+        $r.ours | Should Be 6
+        $r.stop | Should Be 2
+        $r.cmd | Should Be "'/Users/a b/.claude-notifier/hook.sh' prompt"
+        $r.async | Should Be $true
+        $r.matcher | Should Be 'permission_prompt|elicitation_dialog|agent_needs_input'
+        $r.after | Should Be '{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/my/stop.sh"}]}]}}'
+    }
+}
+
+Describe 's_007_01 · трей и устройства' {
+    BeforeEach {
+        $script:TrayDataRoot = Join-Path $TestDrive ('tray-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:TrayDataRoot -Force | Out-Null
+        Initialize-NotifierNet -DataRoot $script:TrayDataRoot
+    }
+
+    It 'событие с устройства: уведомления выключены → только статус; включены → показ; отключено → отброшено' {
+        $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $quiet = (Add-NotifierDevice -Network $script:Net.Network -Name 'MacQuiet').Device
+        $loud = (Add-NotifierDevice -Network $script:Net.Network -Name 'MacLoud').Device
+        $loud.notify = $true
+        Mock Show-NotifierToast { $true }
+        Mock Invoke-NotifierSound { $true }
+        foreach ($x in @(@('a', $quiet.id), @('b', $loud.id), @('c', 'dgone'))) {
+            $q.Enqueue([pscustomobject]@{ v = 1; id = [guid]::NewGuid().ToString(); ts = [DateTime]::UtcNow.ToString('o'); type = 'done'; title = 't'; preview = 'p'; session_id = $x[0]; origin = 'cli'; project = 'p'; device = $x[1]; window = $null })
+        }
+        Invoke-NotifierEventBatch -Queue $q -DataRoot $script:TrayDataRoot -NoOutput | Out-Null
+        $sessions = @(Get-NotifierSessions -DataRoot $script:TrayDataRoot)
+        ($sessions | ForEach-Object { $_.session_id } | Sort-Object) -join ',' | Should Be 'a,b'
+        @(Get-NotifierHistory -DataRoot $script:TrayDataRoot).Count | Should Be 1
+        Test-NotifierRemoteEventMuted -Event ([pscustomobject]@{ type = 'done' }) | Should Be 'show'
+    }
+
+    It 'отключение устройства удаляет его сеансы' {
+        $d = (Add-NotifierDevice -Network $script:Net.Network -Name 'Mac').Device
+        Save-NotifierSessions -Sessions @(
+            [pscustomobject]@{ session_id = 'local'; device = ''; updated = [DateTime]::UtcNow.ToString('o'); window = $null },
+            [pscustomobject]@{ session_id = 'remote'; device = $d.id; updated = [DateTime]::UtcNow.ToString('o'); window = $null }
+        ) -DataRoot $script:TrayDataRoot
+        Remove-NotifierDeviceAndSessions -Id $d.id | Should Be $true
+        (@(Get-NotifierSessions -DataRoot $script:TrayDataRoot) | ForEach-Object { $_.session_id }) -join ',' | Should Be 'local'
+        (Get-NotifierNetwork -DataRoot $script:TrayDataRoot).devices.Count | Should Be 0
+        Get-NotifierDeviceName $d.id | Should Be 'Отключено'
+        Get-NotifierDeviceName '' | Should Be 'Этот ПК'
+    }
+
+    It 'вкладка «Устройства»: строка доступа, таблица, число сеансов, пустой список' {
+        $ui = New-NotifierDevicesTab
+        Update-NotifierDevicesView -Ui $ui
+        $ui.NetButton.Text | Should Be 'Включить'
+        $ui.Empty.Visible | Should Be $true
+        $d = (Add-NotifierDevice -Network $script:Net.Network -Name 'MacBook').Device
+        $d.hooks = $true
+        Update-NotifierDevicesView -Ui $ui -Sessions @([pscustomobject]@{ device = $d.id }, [pscustomobject]@{ device = $d.id }, [pscustomobject]@{ device = '' })
+        $ui.Devices.Items.Count | Should Be 1
+        $ui.Devices.Items[0].SubItems[1].Text | Should Be 'Mac · сеансы видны здесь'
+        $ui.Devices.Items[0].SubItems[2].Text | Should Be 'в сети'
+        $ui.Devices.Items[0].SubItems[3].Text | Should Be '2'
+        $ui.Devices.Items[0].SubItems[4].Text | Should Be 'нет'
+        $ui.Empty.Visible | Should Be $false
+        $script:Net.Network.enabled = $true; $script:Net.Error = 'Access is denied'
+        Update-NotifierDevicesView -Ui $ui
+        $ui.NetLabel.Text | Should Match 'Access is denied'
+        $ui.NetButton.Text | Should Be 'Повторить'
+        $ui.Page.Dispose()
+    }
+
+    It 'окно сеансов с вкладкой «Устройства»; удалённый сеанс не пытается фокусировать окно' {
+        $d = (Add-NotifierDevice -Network $script:Net.Network -Name 'MacBook').Device
+        Save-NotifierSessions -Sessions @([pscustomobject]@{ session_id = 'r'; project = 'x'; device = $d.id; state = 'working'; since = ''; updated = [DateTime]::UtcNow.ToString('o'); preview = ''; window = $null }) -DataRoot $script:TrayDataRoot
+        $script:SessionsForm = New-NotifierSessionsForm
+        try {
+            $script:SessionsForm.Tag.Tabs.TabPages.Count | Should Be 2
+            [void](Invoke-NotifierSessionsRefresh)
+            $list = $script:SessionsForm.Tag.List
+            [void]$list.Handle
+            $list.Items[0].SubItems[1].Text | Should Be 'MacBook'
+            $list.Items[0].Selected = $true
+            Mock Set-SessionWindowFocus { 'focused' }
+            Invoke-NotifierSelectedSession -Action focus
+            Assert-MockCalled Set-SessionWindowFocus -Times 0 -Scope It
+            $script:SessionsForm.Tag.Status.Text | Should Be 'Этот сеанс идёт на устройстве «MacBook»'
+            $script:SessionsForm.Tag.Net.Devices.Items[0].SubItems[3].Text | Should Be '1'
+        }
+        finally { $script:SessionsForm.Dispose(); $script:SessionsForm = $null }
+    }
+
+    It 'HTTP-пакет трея: события устройств уходят в очередь трея, PIN-подключение сохраняется в network.json' {
+        $port = Get-Random -Minimum 49200 -Maximum 49900
+        $script:Net.Server = Start-NotifierHttpServer -Prefix "http://localhost:$port/" -Queue $script:Net.Queue
+        $script:Net.Pairing = New-NotifierPairing
+        $eventQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $client = New-Object System.Net.Http.HttpClient
+        try {
+            $content = New-Object System.Net.Http.StringContent("pin=$($script:Net.Pairing.Pin)", [Text.Encoding]::UTF8, 'application/x-www-form-urlencoded')
+            $task = $client.PostAsync("http://localhost:$port/login", $content)
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            while (-not $task.IsCompleted -and [DateTime]::UtcNow -lt $deadline) { [void](Invoke-NotifierHttpBatch -EventQueue $eventQueue); Start-Sleep -Milliseconds 20 }
+            $task.Result.Content.ReadAsStringAsync().Result | Should Match 'Сеансы Claude'   # 303 → / с cookie
+            (Get-NotifierNetwork -DataRoot $script:TrayDataRoot).devices.Count | Should Be 1
+        }
+        finally {
+            $client.Dispose()
+            Stop-NotifierNetServer
+        }
+        $script:Net.Server | Should Be $null
+    }
+}

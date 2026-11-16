@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-Удаляет claude-notifier: свои хуки из ~/.claude/settings.json и каталог app\.
+Удаляет claude-notifier: свои хуки из ~/.claude/settings.json, каталог app\ и (с запросом UAC) настройку доступа из сети.
 
 .DESCRIPTION
 Чужие хуки и настройки не трогаются. config.json, history.json и лог остаются,
@@ -42,6 +42,20 @@ try {
 
     if (Unregister-NotifierProtocol -ClassesRoot $ClassesRoot) { Write-Output 'URL-протокол claude-notifier: удалён' }
     if (Unregister-NotifierAumid -ClassesRoot $ClassesRoot) { Write-Output 'AppUserModelID ClaudeNotifier удалён' }
+
+    # Доступ из сети: резервация URL и правило брандмауэра снимаются с запросом UAC — только если
+    # доступ когда-либо включали (есть network.json) и настройка Windows действительно сделана.
+    if (Test-Path -LiteralPath (Join-Path $DataRoot 'network.json') -PathType Leaf) {
+        Import-Module (Join-Path $PSScriptRoot 'src\lib\Devices.psm1') -Force
+        Import-Module (Join-Path $PSScriptRoot 'src\lib\Server.psm1') -Force
+        $port = (Get-NotifierNetwork -DataRoot $DataRoot).port
+        if (Test-NotifierNetworkSetup -Port $port) {
+            $result = Invoke-NotifierNetworkSetup -Port $port -Remove -DataRoot $DataRoot
+            if ($result -eq 'ok') { Write-Output "Доступ из сети: правило брандмауэра и резервация порта $port удалены" }
+            else { Write-Output "Доступ из сети: правило брандмауэра «claude-notifier» не удалено ($result) — удалите его вручную" }
+        }
+        Write-Output 'На Mac хуки удаляются там же: ~/.claude-notifier/uninstall.sh'
+    }
 
     $target = Join-Path $DataRoot 'app'
     if ($Purge) { $target = $DataRoot }

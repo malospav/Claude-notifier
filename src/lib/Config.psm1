@@ -12,6 +12,11 @@ $NotifierStrings = @{
     permission = 'Нужно разрешение'
     error      = 'Ошибка'
     limit      = 'Лимит'
+    # Статусы сеанса в окне «Сеансы Claude»
+    'state.working'    = 'Работает'
+    'state.waiting'    = 'Ждёт ответа'
+    'state.permission' = 'Нужно разрешение'
+    'state.error'      = 'Ошибка'
 }
 
 function Get-NotifierDefaultConfig {

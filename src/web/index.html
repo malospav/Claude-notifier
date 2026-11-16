@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Сеансы Claude</title>
+<style>
+  :root { --bg: #f5f5f7; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --border: #e3e3e8; --accent: #0a64d6;
+          --working: #0066cc; --waiting: #107c10; --permission: #ca5010; --error: #c42b1c; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111113; --card: #1c1c1f; --text: #f2f2f4; --muted: #a1a1a6; --border: #2e2e33; --accent: #4c9bff;
+          --working: #4c9bff; --waiting: #4cc24c; --permission: #ff9a4c; --error: #ff6b5e; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 24px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .banner { background: var(--card); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 12px; padding: 16px; margin-bottom: 18px; }
+  .banner h2 { font-size: 16px; margin: 0 0 6px; }
+  .banner p { margin: 0 0 10px; color: var(--muted); }
+  .banner ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+  textarea { width: 100%; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 10px; border-radius: 8px; resize: none;
+             border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  button { font: inherit; font-weight: 600; padding: 9px 16px; border: 0; border-radius: 9px; background: var(--accent); color: #fff; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); padding: 9px 4px; }
+  .device { margin: 22px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .s { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .project { font-weight: 600; }
+  .state { font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }
+  .state::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+  .working { color: var(--working); } .waiting { color: var(--waiting); } .permission { color: var(--permission); } .error { color: var(--error); }
+  .meta { color: var(--muted); font-size: 13px; margin-left: auto; }
+  .preview { color: var(--muted); font-size: 14px; margin-top: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .empty { text-align: center; color: var(--muted); padding: 48px 0; }
+  .offline { color: var(--error); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Сеансы Claude</h1>
+    <span class="sub" id="status">ПК __PCNAME__</span>
+  </header>
+
+  <section class="banner" id="mac" hidden>
+    <h2>Показывать здесь сеансы этого Mac</h2>
+    <p>Установите хуки Claude Code на этот Mac — одна команда в Терминале.</p>
+    <div id="mac-step1"><button id="mac-get">Получить команду установки</button></div>
+    <div id="mac-step2" hidden>
+      <textarea id="mac-cmd" rows="2" readonly></textarea>
+      <div class="row" style="margin-top:8px"><button id="mac-copy">Скопировать</button><span class="sub" id="mac-copied"></span></div>
+      <ol>
+        <li>Откройте Терминал: ⌘ + Пробел, наберите «Терминал», Enter.</li>
+        <li>Вставьте команду (⌘ V) и нажмите Enter.</li>
+        <li>Команда действует 10 минут и только один раз.</li>
+      </ol>
+    </div>
+  </section>
+
+  <div id="list"></div>
+</main>
+<script>
+(function () {
+  var list = document.getElementById('list'), status = document.getElementById('status');
+  var me = null;
+
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
+  function render(data) {
+    list.textContent = '';
+    if (!data.sessions.length) { list.appendChild(el('div', 'empty', 'Активных сеансов нет')); return; }
+    var groups = {}, order = [];
+    data.sessions.forEach(function (s) {
+      var key = s.device || 'local';
+      if (!groups[key]) { groups[key] = { name: s.device_name, items: [] }; order.push(key); }
+      groups[key].items.push(s);
+    });
+    order.forEach(function (key) {
+      var g = groups[key];
+      list.appendChild(el('div', 'device', g.name));
+      g.items.forEach(function (s) {
+        var card = el('div', 's'), row = el('div', 'row');
+        row.appendChild(el('span', 'project', s.project || '(без проекта)'));
+        row.appendChild(el('span', 'state ' + s.state, s.state_text));
+        row.appendChild(el('span', 'meta', s.elapsed + (s.origin === 'desktop' ? ' · приложение' : ' · терминал')));
+        card.appendChild(row);
+        if (s.preview) card.appendChild(el('div', 'preview', s.preview));
+        list.appendChild(card);
+      });
+    });
+  }
+
+  function load() {
+    fetch('/api/sessions', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
+      if (r.status === 401) { location.reload(); return null; }
+      return r.json();
+    }).then(function (data) {
+      if (!data) return;
+      render(data);
+      status.className = 'sub';
+      status.textContent = 'ПК ' + data.pc + ' · обновлено ' + new Date().toLocaleTimeString('ru-RU');
+    }).catch(function () {
+      status.className = 'sub offline';
+      status.textContent = 'Нет связи с ПК — повторяю…';
+    });
+  }
+
+  function isMac() { return /Macintosh/.test(navigator.userAgent) && !(navigator.maxTouchPoints > 1); }
+
+  fetch('/api/me', { credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (m) {
+    me = m;
+    if (m && !m.hooks && isMac()) document.getElementById('mac').hidden = false;
+  });
+
+  document.getElementById('mac-get').onclick = function () {
+    fetch('/api/install-link', { method: 'POST', credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) {
+      document.getElementById('mac-cmd').value = d.command;
+      document.getElementById('mac-step1').hidden = true;
+      document.getElementById('mac-step2').hidden = false;
+      copy();
+    });
+  };
+
+  function copy() {
+    // По http:// (не https) navigator.clipboard недоступен — копируем через выделение.
+    var t = document.getElementById('mac-cmd'), done = false;
+    t.focus(); t.select();
+    try { done = document.execCommand('copy'); } catch (e) { }
+    document.getElementById('mac-copied').textContent = done ? 'Скопировано' : 'Выделите и скопируйте ⌘ C';
+  }
+  document.getElementById('mac-copy').onclick = copy;
+
+  load();
+  setInterval(load, 3000);
+})();
+</script>
+</body>
+</html>

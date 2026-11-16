@@ -4,7 +4,7 @@
 
 .DESCRIPTION
 Вызывается из ~/.claude/settings.json (exec-форма, async: true):
-  powershell.exe -NoProfile -NonInteractive -File hook-bridge.ps1 stop|notification|stopfailure
+  powershell.exe -NoProfile -NonInteractive -File hook-bridge.ps1 stop|notification|stopfailure|sessionstart|prompt|sessionend
 Никогда не мешает Claude Code: stdout пуст, код выхода всегда 0, ошибки только в лог.
 Превью и текст сообщений в лог не пишутся.
 #>
@@ -61,7 +61,7 @@ function Invoke-NotifierHookBridge {
         $config = Get-NotifierConfig -DataRoot $DataRoot
         $event = ConvertTo-NotifierEvent -HookKind $Kind -Json $InputJson -Config $config -DataRoot $DataRoot
         if ($null -eq $event) { return 'invalid' }
-        if (-not $config.events[$event.type].enabled) { return 'disabled' }
+        if ($config.events.ContainsKey($event.type) -and -not $config.events[$event.type].enabled) { return 'disabled' }
 
         $event.window = Get-SessionWindow -Origin $event.origin
         if (Send-NotifierEvent -Event $event) { return 'sent' }

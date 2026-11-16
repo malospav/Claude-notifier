@@ -51,7 +51,7 @@ try {
     [void](Unregister-NotifierAumid -ClassesRoot $ClassesRoot)
 
     Write-Output "claude-notifier установлен в $app"
-    Write-Output "Хуки Stop, Notification, StopFailure и строка статуса добавлены в $SettingsPath"
+    Write-Output "Хуки Stop, Notification, StopFailure, SessionStart, UserPromptSubmit, SessionEnd и строка статуса добавлены в $SettingsPath"
     if ($null -ne $previousStatusLine) { Write-Output 'Прежняя строка статуса сохранена в config.json (chainStatusLine) и будет показываться первой' }
     Write-Output 'URL-протокол claude-notifier: зарегистрирован'
     if ($backup) { Write-Output "Резервная копия настроек: $backup" }
