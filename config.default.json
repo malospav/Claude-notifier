@@ -1,0 +1,10 @@
+{
+  "events": {
+    "done":       { "enabled": true, "sound": "" },
+    "permission": { "enabled": true, "sound": "" },
+    "error":      { "enabled": true, "sound": "" },
+    "limit":      { "enabled": true, "sound": "" }
+  },
+  "limitThresholds": [80, 90],
+  "previewLength": 200
+}
