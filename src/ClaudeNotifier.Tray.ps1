@@ -26,6 +26,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib\Sound.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\History.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Window.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Sessions.psm1')
+. (Join-Path $PSScriptRoot 'ClaudeNotifier.Ui.ps1')        # окно «Сеансы», точка в трее, диалоги
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Network.ps1')   # доступ из сети, вкладка «Устройства»
 
 $script:EventTypes = @('done', 'permission', 'error', 'limit', 'start', 'working', 'end')
@@ -218,231 +219,6 @@ function Invoke-NotifierEventBatch {
     return $shown
 }
 
-# --- Окно «Сеансы Claude» ---
-
-$script:StateColors = @{
-    working    = @(0, 102, 204)
-    waiting    = @(16, 124, 16)
-    permission = @(202, 80, 16)
-    error      = @(196, 43, 28)
-}
-
-function Update-NotifierSessionsView {
-    <#
-    .SYNOPSIS
-    Заполняет таблицу сеансов: проект, устройство, статус (цветом), сколько в этом статусе, где запущен, последний ответ.
-    Выделенная строка сохраняется. Возвращает текст строки состояния.
-    #>
-    param(
-        [Parameter(Mandatory = $true)][System.Windows.Forms.ListView]$ListView,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions,
-        [datetime]$Now = [DateTime]::UtcNow
-    )
-    $selected = $null
-    if ($ListView.SelectedItems.Count -gt 0) { $selected = [string]$ListView.SelectedItems[0].Tag.session_id }
-    $ListView.BeginUpdate()
-    try {
-        $ListView.Items.Clear()
-        foreach ($s in (Get-NotifierSortedSessions -Sessions $Sessions)) {
-            $project = [string]$s.project
-            if ($project -eq '') { $project = '(без проекта)' }
-            $item = New-Object System.Windows.Forms.ListViewItem $project
-            $item.UseItemStyleForSubItems = $false
-            $deviceId = ''
-            if ($s.PSObject.Properties['device']) { $deviceId = [string]$s.device }
-            [void]$item.SubItems.Add((Get-NotifierDeviceName $deviceId))
-            $state = [string]$s.state
-            $sub = $item.SubItems.Add((Get-NotifierSessionStateText $state))
-            if ($script:StateColors.ContainsKey($state)) {
-                $c = $script:StateColors[$state]
-                $sub.ForeColor = [System.Drawing.Color]::FromArgb($c[0], $c[1], $c[2])
-            }
-            [void]$item.SubItems.Add((Format-NotifierElapsed -Ts ([string]$s.since) -Now $Now))
-            $where = 'Терминал'
-            if ([string]$s.origin -eq 'desktop') { $where = 'Приложение' }
-            [void]$item.SubItems.Add($where)
-            [void]$item.SubItems.Add([string]$s.preview)
-            $item.Tag = $s
-            [void]$ListView.Items.Add($item)
-            if ($selected -and [string]$s.session_id -eq $selected) { $item.Selected = $true }
-        }
-    }
-    finally { $ListView.EndUpdate() }
-    $count = $ListView.Items.Count
-    if ($count -eq 0) { return 'Активных сеансов нет' }
-    $need = @($Sessions | Where-Object { $_.state -eq 'permission' -or $_.state -eq 'error' }).Count
-    $text = "Активных сеансов: $count"
-    if ($need -gt 0) { $text += " $([char]0x00B7) требуют внимания: $need" }
-    return $text
-}
-
-function Invoke-NotifierSessionsRefresh {
-    <#
-    .SYNOPSIS
-    Перечитывает sessions.json, убирает завершившиеся сеансы (и сохраняет, если что-то убрано),
-    обновляет открытое окно. Возвращает список живых сеансов.
-    #>
-    param([string]$DataRoot = $script:TrayDataRoot)
-    $all = @(Get-NotifierSessions -DataRoot $DataRoot)
-    $live = Select-NotifierLiveSessions -Sessions $all   # уже массив; @() вложил бы его в ещё один
-    if ($live.Count -ne $all.Count) { Save-NotifierSessions -Sessions $live -DataRoot $DataRoot }
-    $script:SessionsDirty = $false
-    $script:SessionsRefreshedAt = [datetime]::UtcNow
-    $form = $script:SessionsForm
-    if ($form -and -not $form.IsDisposed) {
-        $form.Tag.Status.Text = Update-NotifierSessionsView -ListView $form.Tag.List -Sessions $live
-        if ($form.Tag.Net) { Update-NotifierDevicesView -Ui $form.Tag.Net -Sessions $live }
-    }
-    return , $live
-}
-
-function Remove-NotifierSession {
-    <# .SYNOPSIS Убирает сеанс из sessions.json по session_id. #>
-    param([Parameter(Mandatory = $true)][string]$SessionId, [string]$DataRoot = $script:TrayDataRoot)
-    $rest = @(Get-NotifierSessions -DataRoot $DataRoot | Where-Object { [string]$_.session_id -ne $SessionId })
-    Save-NotifierSessions -Sessions $rest -DataRoot $DataRoot
-    $script:SessionsDirty = $true
-}
-
-function Invoke-NotifierSessionFocus {
-    <#
-    .SYNOPSIS
-    Выводит на передний план окно сеанса. Если окно закрыто — сеанс убирается из списка.
-
-    .OUTPUTS
-    'focused' | 'flashed' | 'closed' | 'unknown' (окно сеанса не определено).
-    #>
-    param([Parameter(Mandatory = $true)]$Session, [string]$DataRoot = $script:TrayDataRoot)
-    $hwnd = [int64]0
-    $win = $Session.PSObject.Properties['window']
-    if ($win -and $win.Value -and $win.Value.PSObject.Properties['hwnd']) { $hwnd = [int64]$win.Value.hwnd }
-    if ($hwnd -eq 0) { return 'unknown' }
-    $result = Set-SessionWindowFocus -Hwnd $hwnd
-    if ($result -eq 'closed') { Remove-NotifierSession -SessionId ([string]$Session.session_id) -DataRoot $DataRoot }
-    return $result
-}
-
-function Invoke-NotifierSelectedSession {
-    # Действие над выделенной строкой окна: focus | remove.
-    param([Parameter(Mandatory = $true)][ValidateSet('focus', 'remove')][string]$Action)
-    $form = $script:SessionsForm
-    if ($null -eq $form -or $form.IsDisposed -or $form.Tag.List.SelectedItems.Count -eq 0) { return }
-    $session = $form.Tag.List.SelectedItems[0].Tag
-    if ($Action -eq 'remove') { Remove-NotifierSession -SessionId ([string]$session.session_id) }
-    elseif ($session.PSObject.Properties['device'] -and [string]$session.device -ne '') {
-        $form.Tag.Status.Text = "Этот сеанс идёт на устройстве «$(Get-NotifierDeviceName ([string]$session.device))»"
-        return
-    }
-    elseif ((Invoke-NotifierSessionFocus -Session $session) -eq 'unknown') {
-        $form.Tag.Status.Text = 'Окно этого сеанса не определено'
-        return
-    }
-    [void](Invoke-NotifierSessionsRefresh)
-}
-
-function New-NotifierSessionsForm {
-    <# .SYNOPSIS Окно «Сеансы Claude» (создаётся при открытии, уничтожается при закрытии). #>
-    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Сеансы Claude'
-    $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
-    $form.ClientSize = New-Object System.Drawing.Size(940, 360)
-    $form.MinimumSize = New-Object System.Drawing.Size(520, 200)
-    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-    $iconPath = Join-Path $PSScriptRoot 'assets\icon.ico'
-    if (Test-Path -LiteralPath $iconPath) { $form.Icon = New-Object System.Drawing.Icon $iconPath }
-
-    $list = New-Object System.Windows.Forms.ListView
-    $list.View = [System.Windows.Forms.View]::Details
-    $list.FullRowSelect = $true
-    $list.MultiSelect = $false
-    $list.HideSelection = $false
-    $list.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $list.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
-    foreach ($col in @(@('Проект', 140), @('Устройство', 120), @('Статус', 135), @('Сколько', 85), @('Где', 85), @('Последний ответ', 320))) {
-        [void]$list.Columns.Add($col[0], $col[1])
-    }
-    $list.add_DoubleClick({ Invoke-NotifierSelectedSession -Action focus })
-    $list.add_KeyDown({
-            param($sender, $e)
-            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { Invoke-NotifierSelectedSession -Action focus; $e.Handled = $true }
-            elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Delete) { Invoke-NotifierSelectedSession -Action remove; $e.Handled = $true }
-            elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::F5) { [void](Invoke-NotifierSessionsRefresh); $e.Handled = $true }
-        })
-    $list.add_Resize({
-            # Последняя колонка занимает оставшуюся ширину.
-            $rest = $this.ClientSize.Width
-            for ($i = 0; $i -lt $this.Columns.Count - 1; $i++) { $rest -= $this.Columns[$i].Width }
-            if ($rest -gt 120) { $this.Columns[$this.Columns.Count - 1].Width = $rest }
-        })
-
-    $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $go = New-Object System.Windows.Forms.ToolStripMenuItem 'Перейти к окну'
-    $go.Font = New-Object System.Drawing.Font($menu.Font, [System.Drawing.FontStyle]::Bold)
-    $go.add_Click({ Invoke-NotifierSelectedSession -Action focus })
-    [void]$menu.Items.Add($go)
-    $rm = New-Object System.Windows.Forms.ToolStripMenuItem 'Убрать из списка'
-    $rm.add_Click({ Invoke-NotifierSelectedSession -Action remove })
-    [void]$menu.Items.Add($rm)
-    $menu.add_Opening({
-            param($sender, $e)
-            if ($null -eq $script:SessionsForm -or $script:SessionsForm.Tag.List.SelectedItems.Count -eq 0) { $e.Cancel = $true }
-        })
-    $list.ContextMenuStrip = $menu
-
-    $strip = New-Object System.Windows.Forms.StatusStrip
-    $status = New-Object System.Windows.Forms.ToolStripStatusLabel ''
-    $status.Spring = $true
-    $status.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-    [void]$strip.Items.Add($status)
-    $hint = New-Object System.Windows.Forms.ToolStripStatusLabel 'Двойной клик — перейти к окну · Del — убрать'
-    $hint.ForeColor = [System.Drawing.SystemColors]::GrayText
-    [void]$strip.Items.Add($hint)
-
-    $tabs = New-Object System.Windows.Forms.TabControl
-    $tabs.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $sessionsPage = New-Object System.Windows.Forms.TabPage 'Сеансы'
-    $sessionsPage.Controls.Add($list)
-    [void]$tabs.TabPages.Add($sessionsPage)
-    $netUi = $null
-    if ($script:Net) {
-        $netUi = New-NotifierDevicesTab
-        [void]$tabs.TabPages.Add($netUi.Page)
-    }
-
-    $form.Controls.Add($tabs)
-    $form.Controls.Add($strip)
-    $form.Tag = @{ List = $list; Status = $status; Tabs = $tabs; Net = $netUi }
-    $form.add_FormClosed({ $script:SessionsForm = $null })
-    return $form
-}
-
-function Show-NotifierSessionsWindow {
-    <# .SYNOPSIS Открывает окно «Сеансы Claude» или выводит уже открытое на передний план. #>
-    try {
-        if ($null -eq $script:SessionsForm -or $script:SessionsForm.IsDisposed) {
-            $script:SessionsForm = New-NotifierSessionsForm
-            [void](Invoke-NotifierSessionsRefresh)
-            $script:SessionsForm.Show()
-        }
-        else {
-            [void](Invoke-NotifierSessionsRefresh)
-            if ($script:SessionsForm.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
-                $script:SessionsForm.WindowState = [System.Windows.Forms.FormWindowState]::Normal
-            }
-        }
-        $script:SessionsForm.Activate()
-    }
-    catch { Write-NotifierLog -Level ERROR -Message "tray: окно сеансов: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
-}
-
-function Test-SessionsRefreshDue {
-    <# .SYNOPSIS Пора ли обновить открытое окно: пришли события или прошло RefreshMs. #>
-    param([bool]$Dirty, [datetime]$LastRefresh, [datetime]$Now, [int]$RefreshMs = $script:SessionsRefreshMs)
-    return $Dirty -or (($Now - $LastRefresh).TotalMilliseconds -ge $RefreshMs)
-}
-
 function Stop-NotifierTray {
     <#
     .SYNOPSIS
@@ -460,26 +236,32 @@ function Stop-NotifierTray {
 }
 
 function New-NotifierTrayIcon {
-    <# .SYNOPSIS NotifyIcon «Claude Notifier»: меню «Сеансы» / «История ▸» / «Выход»; двойной клик — окно сеансов. #>
+    <#
+    .SYNOPSIS
+    Иконка трея — цветная точка статуса сеансов; меню «Сеансы» / «Устройства» / «История ▸» / «Выход»
+    в цветах темы Windows. Двойной клик — окно сеансов.
+    #>
     param([Parameter(Mandatory = $true)][scriptblock]$OnExit, [string]$DataRoot = (Get-NotifierDataRoot))
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    $theme = Get-NotifierTheme
     $icon = New-Object System.Windows.Forms.NotifyIcon
-    $iconPath = Join-Path $PSScriptRoot 'assets\icon.ico'
-    if (Test-Path -LiteralPath $iconPath) { $icon.Icon = New-Object System.Drawing.Icon $iconPath, 32, 32 }
-    else { $icon.Icon = [System.Drawing.SystemIcons]::Information }
-    $icon.Text = 'Claude Notifier'
-    $icon.add_DoubleClick({ Show-NotifierSessionsWindow })
-    $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $sessions = New-Object System.Windows.Forms.ToolStripMenuItem 'Сеансы'
-    $sessions.Font = New-Object System.Drawing.Font($menu.Font, [System.Drawing.FontStyle]::Bold)
-    $sessions.add_Click({ Show-NotifierSessionsWindow })
-    [void]$menu.Items.Add($sessions)
-    $history = New-Object System.Windows.Forms.ToolStripMenuItem 'История'
+    $icon.Icon = Get-NotifierDotIcon 'none'
+    $icon.Text = 'Claude · сеансов нет'
+    $icon.add_DoubleClick({ Show-NotifierSessionsWindow -Tab 0 })
+    $menu = New-NotifierMenu -Theme $theme -Items @(
+        @('Сеансы', { Show-NotifierSessionsWindow -Tab 0 }),
+        @('Устройства', { Show-NotifierSessionsWindow -Tab 1 }),
+        @('История', $null),
+        '-',
+        @('Выход', $OnExit)
+    )
+    $menu.Items[0].Font = [ClaudeNotifier.Ui.Fonts]::Semibold(9.5)
+    $history = $menu.Items[2]
     $history.Tag = $DataRoot   # обработчику нужен каталог данных: $this.Tag вместо замыкания
     [void]$history.DropDownItems.Add('(пусто)')   # чтобы у пункта была стрелка подменю
+    $history.DropDown.Renderer = $menu.Renderer
+    $history.DropDown.Font = $menu.Font
     $history.add_DropDownOpening({ Update-NotifierHistoryMenu -MenuItem $this -DataRoot $this.Tag })
-    [void]$menu.Items.Add($history)
-    [void]$menu.Items.Add('Выход', $null, $OnExit)
     $icon.ContextMenuStrip = $menu
     $icon.Visible = $true
     return $icon
@@ -495,6 +277,8 @@ function Start-NotifierTray {
     if ($null -eq $mutex) { return 0 }
 
     Add-Type -AssemblyName System.Windows.Forms
+    try { [void](Import-NotifierUi); [ClaudeNotifier.Ui.Native]::EnableDpiAwareness() }
+    catch { Write-NotifierLog -Level WARN -Message "tray: интерфейс не загружен: $($_.Exception.Message)" -DataRoot $DataRoot }
     try { Import-TrayNative } catch { Write-NotifierLog -Level WARN -Message "tray: нативный помощник не загружен: $($_.Exception.Message)" -DataRoot $DataRoot }   # компиляция при старте, а не на первом событии
     $script:TrayState = @{ Mutex = $mutex; Stopped = $false; Timer = $null; Server = $null; Icon = $null; Context = $null }
     $script:TrayQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
@@ -521,8 +305,8 @@ function Start-NotifierTray {
                 if ((Invoke-NotifierEventBatch -Queue $script:TrayQueue -DataRoot $script:TrayDataRoot -NoOutput:$script:TrayNoOutput) -gt 0) {
                     $script:LastActivity = $now
                 }
-                $form = $script:SessionsForm
-                if ($form -and -not $form.IsDisposed -and $form.Visible -and (Test-SessionsRefreshDue -Dirty $script:SessionsDirty -LastRefresh $script:SessionsRefreshedAt -Now $now)) {
+                # Раз в 5 с и сразу после событий: точка в трее и открытое окно.
+                if (Test-SessionsRefreshDue -Dirty $script:SessionsDirty -LastRefresh $script:SessionsRefreshedAt -Now $now) {
                     [void](Invoke-NotifierSessionsRefresh)
                 }
                 elseif (Test-IdleTrimDue -LastActivity $script:LastActivity -LastTrim $script:LastTrim -Now $now) {

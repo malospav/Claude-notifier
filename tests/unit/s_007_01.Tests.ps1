@@ -35,6 +35,13 @@ function Connect-Device([hashtable]$Ctx, [string]$Agent = 'Mozilla/5.0 (iPhone; 
     return (Get-CookieToken $r)
 }
 
+function Get-FreePort {
+    # Свободный порт: система выдаёт его для TcpListener на порту 0.
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $l.Start(); $port = $l.LocalEndpoint.Port; $l.Stop()
+    return $port
+}
+
 Describe 's_007_01 · Devices.psm1' {
     It 'network.json: по умолчанию выключено, порт 47600; запись и чтение; повреждённый → по умолчанию' {
         $root = Join-Path $TestDrive 'net'
@@ -231,7 +238,7 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
     It 'запрос проходит через HttpListener: очередь → обработка → ответ клиенту' {
         $root = Join-Path $TestDrive 'live'
         $ctx = New-Ctx $root
-        $port = Get-Random -Minimum 49200 -Maximum 49900
+        $port = (Get-FreePort)
         $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
         $server = Start-NotifierHttpServer -Prefix "http://localhost:$port/" -Queue $q
         $client = New-Object System.Net.Http.HttpClient
@@ -260,7 +267,7 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
         $root = Join-Path $TestDrive 'hooksh'
         $ctx = New-Ctx $root
         $a = Add-NotifierDevice -Network $ctx.Network -Name 'MacBook'
-        $port = Get-Random -Minimum 49200 -Maximum 49900
+        $port = (Get-FreePort)
         $macHome = Join-Path $TestDrive 'machome'
         New-Item -ItemType Directory -Path (Join-Path $macHome '.claude-notifier') -Force | Out-Null
         $envText = "CN_URL='http://localhost:$port'`nCN_URL2=''`nCN_TOKEN='$($a.Token)'`n"
@@ -389,24 +396,37 @@ Describe 's_007_01 · трей и устройства' {
         Get-NotifierDeviceName '' | Should Be 'Этот ПК'
     }
 
-    It 'вкладка «Устройства»: строка доступа, таблица, число сеансов, пустой список' {
-        $ui = New-NotifierDevicesTab
+    It 'вкладка «Устройства»: карточка доступа, карточки устройств, число сеансов, подзаголовок' {
+        $ui = New-NotifierDevicesPage -Theme (Get-NotifierTheme)
         Update-NotifierDevicesView -Ui $ui
-        $ui.NetButton.Text | Should Be 'Включить'
-        $ui.Empty.Visible | Should Be $true
+        $ui.NetTitle.Text | Should Be 'Доступ из сети'
+        $ui.NetSub.Text | Should Be 'Выключен — Mac и телефон не видят этот ПК'
+        $ui.NetSwitch.Checked | Should Be $false
+        $ui.Devices.Count | Should Be 1   # только строка «Подключить устройство…»
+        $ui.Devices[0].IsAction | Should Be $true
+        Format-NotifierDevicesSubtitle | Should Be "Нет подключённых устройств $([char]0x00B7) доступ из сети выключен"
         $d = (Add-NotifierDevice -Network $script:Net.Network -Name 'MacBook').Device
         $d.hooks = $true
         Update-NotifierDevicesView -Ui $ui -Sessions @([pscustomobject]@{ device = $d.id }, [pscustomobject]@{ device = $d.id }, [pscustomobject]@{ device = '' })
-        $ui.Devices.Items.Count | Should Be 1
-        $ui.Devices.Items[0].SubItems[1].Text | Should Be 'Mac · сеансы видны здесь'
-        $ui.Devices.Items[0].SubItems[2].Text | Should Be 'в сети'
-        $ui.Devices.Items[0].SubItems[3].Text | Should Be '2'
-        $ui.Devices.Items[0].SubItems[4].Text | Should Be 'нет'
-        $ui.Empty.Visible | Should Be $false
+        $ui.Devices.Count | Should Be 2
+        $ui.Devices[0].Section | Should Be 'Устройства'
+        $ui.Devices[0].Title | Should Be 'MacBook'
+        $ui.Devices[0].State | Should Be 'online'
+        $ui.Devices[0].StateText | Should Be 'В сети'
+        $ui.Devices[0].Meta | Should Be "Mac · сеансы видны здесь $([char]0x00B7) 2 сеанса"
+        $d.notify = $true; $d.last_seen = ''
+        Update-NotifierDevicesView -Ui $ui
+        $ui.Devices[0].StateText | Should Be 'Ещё не на связи'
+        $ui.Devices[0].HollowDot | Should Be $true
+        $ui.Devices[0].Meta | Should Match 'нет сеансов · уведомления на ПК$'
+        Format-NotifierDevicesSubtitle | Should Be "1 устройство $([char]0x00B7) доступ из сети выключен"
         $script:Net.Network.enabled = $true; $script:Net.Error = 'Access is denied'
         Update-NotifierDevicesView -Ui $ui
-        $ui.NetLabel.Text | Should Match 'Access is denied'
-        $ui.NetButton.Text | Should Be 'Повторить'
+        $ui.NetSub.Text | Should Be 'Сервер не запустился: Access is denied'
+        $ui.NetSwitch.Checked | Should Be $true
+        Format-NotifierSessionCount 3 | Should Be '3 сеанса'
+        Format-NotifierSessionCount 11 | Should Be '11 сеансов'
+        Format-NotifierSessionCount 21 | Should Be '21 сеанс'
         $ui.Page.Dispose()
     }
 
@@ -415,23 +435,25 @@ Describe 's_007_01 · трей и устройства' {
         Save-NotifierSessions -Sessions @([pscustomobject]@{ session_id = 'r'; project = 'x'; device = $d.id; state = 'working'; since = ''; updated = [DateTime]::UtcNow.ToString('o'); preview = ''; window = $null }) -DataRoot $script:TrayDataRoot
         $script:SessionsForm = New-NotifierSessionsForm
         try {
-            $script:SessionsForm.Tag.Tabs.TabPages.Count | Should Be 2
+            $script:SessionsForm.Tag.Net | Should Not Be $null
             [void](Invoke-NotifierSessionsRefresh)
-            $list = $script:SessionsForm.Tag.List
-            [void]$list.Handle
-            $list.Items[0].SubItems[1].Text | Should Be 'MacBook'
-            $list.Items[0].Selected = $true
+            $cards = $script:SessionsForm.Tag.Cards
+            $cards[0].Meta | Should Be 'Терминал'
+            $cards[0].Section | Should Be 'MacBook'
+            $cards.Select(0)
             Mock Set-SessionWindowFocus { 'focused' }
             Invoke-NotifierSelectedSession -Action focus
             Assert-MockCalled Set-SessionWindowFocus -Times 0 -Scope It
-            $script:SessionsForm.Tag.Status.Text | Should Be 'Этот сеанс идёт на устройстве «MacBook»'
-            $script:SessionsForm.Tag.Net.Devices.Items[0].SubItems[3].Text | Should Be '1'
+            $script:SessionsForm.Tag.Subtitle.Text | Should Be 'Этот сеанс идёт на устройстве «MacBook»'
+            $script:SessionsForm.Tag.Net.Devices[0].Meta | Should Match '1 сеанс'
+            $script:SessionsForm.Tag.Tabs.SelectedIndex = 1
+            $script:SessionsForm.Tag.Title.Text | Should Be 'Устройства'
         }
         finally { $script:SessionsForm.Dispose(); $script:SessionsForm = $null }
     }
 
     It 'HTTP-пакет трея: события устройств уходят в очередь трея, PIN-подключение сохраняется в network.json' {
-        $port = Get-Random -Minimum 49200 -Maximum 49900
+        $port = (Get-FreePort)
         $script:Net.Server = Start-NotifierHttpServer -Prefix "http://localhost:$port/" -Queue $script:Net.Queue
         $script:Net.Pairing = New-NotifierPairing
         $eventQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'

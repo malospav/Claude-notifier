@@ -5,6 +5,13 @@ $tray = Join-Path $repoRoot 'src\ClaudeNotifier.Tray.ps1'
 . $tray
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
+function Get-FreePort {
+    # Свободный порт: система выдаёт его для TcpListener на порту 0.
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $l.Start(); $port = $l.LocalEndpoint.Port; $l.Stop()
+    return $port
+}
+
 Describe 's_007_02 · настройка Windows (netsh подменён)' {
     It 'setup-network.ps1: резервация URL и правило брандмауэра только из локальной подсети; -Remove удаляет' {
         $global:netshCalls = New-Object System.Collections.ArrayList
@@ -60,7 +67,7 @@ Describe 's_007_02 · включение доступа и окно подклю
         $script:TrayDataRoot = Join-Path $TestDrive ('ui-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $script:TrayDataRoot -Force | Out-Null
         Initialize-NotifierNet -DataRoot $script:TrayDataRoot
-        $script:Net.Network.port = Get-Random -Minimum 49200 -Maximum 49900
+        $script:Net.Network.port = (Get-FreePort)
         $script:Net.Address = '192.168.1.50'
     }
 
@@ -96,10 +103,8 @@ Describe 's_007_02 · включение доступа и окно подклю
             $f | Should Not Be $null
             $pin1 = $script:Net.Pairing.Pin
             $f.Tag.Pin.Text | Should Be ($pin1.Substring(0, 3) + ' ' + $pin1.Substring(3))
-            $all = @($f.Controls[0].Controls) + @($f.Controls[0].Controls | ForEach-Object { @($_.Controls) })
-            (($all | ForEach-Object { $_.Text }) -join "`n") | Should Match ([regex]::Escape("http://192.168.1.50:$($script:Net.Network.port)"))
-            $newPin = @($all | Where-Object { $_.Text -eq 'Новый код' })[0]
-            $newPin.PerformClick()
+            $f.Tag.Url.Text | Should Be "http://192.168.1.50:$($script:Net.Network.port)"
+            $f.Tag.NewPin.PerformClick()
             $script:Net.Pairing.Pin | Should Match '^\d{6}$'
             Update-NotifierConnectStatus -Device ([pscustomobject]@{ name = 'iPhone'; hooks = $false })
             $f.Tag.Status.Text | Should Match 'Подключено: iPhone$'
@@ -134,11 +139,12 @@ Describe 's_007_02 · кнопки вкладки «Устройства»' {
         try {
             [void](Invoke-NotifierSessionsRefresh)
             $list = $script:SessionsForm.Tag.Net.Devices
-            [void]$list.Handle
-            $list.Items[0].Selected = $true
+            Invoke-NotifierDeviceAction -Action notify   # ничего не выделено → ничего не происходит
+            $script:Net.Network.devices[0].notify | Should Be $false
+            $list.Select(0)
             Invoke-NotifierDeviceAction -Action notify
             (Get-NotifierNetwork -DataRoot $script:TrayDataRoot).devices[0].notify | Should Be $true
-            $script:SessionsForm.Tag.Net.Devices.Items[0].SubItems[4].Text | Should Be 'да'
+            $script:SessionsForm.Tag.Net.Devices[0].Meta | Should Match 'уведомления на ПК$'
             Get-NotifierDeviceKindText ([pscustomobject]@{ hooks = $false; name = 'Mac' }) | Should Be 'Браузер · хуки не установлены'
             Get-NotifierDeviceKindText ([pscustomobject]@{ hooks = $false; name = 'iPhone' }) | Should Be 'Браузер · только просмотр'
         }
