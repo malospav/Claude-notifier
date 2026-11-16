@@ -219,7 +219,7 @@ function New-NotifierDevicesPage {
     $netSub = New-NotifierLabel -Theme $t -Text '' -Muted -Width $t.S(360)
     $netSub.Font = [ClaudeNotifier.Ui.Fonts]::Text(9.5)
     $netSub.Location = New-Object System.Drawing.Point($t.S(16), ($netTitle.Bottom))
-    $netSub.Anchor = 'Top, Left, Right'
+    $netSub.Anchor = 'Top, Left'
     $switch = New-Object ClaudeNotifier.Ui.Switch
     $switch.ApplyTheme($t)
     $switch.Anchor = 'Top, Right'
@@ -232,8 +232,19 @@ function New-NotifierDevicesPage {
             else { Disable-NotifierNetworkAccess }
             [void](Invoke-NotifierSessionsRefresh)
         })
-    $card.add_Layout({ $sw = @($this.Controls | Where-Object { $_ -is [ClaudeNotifier.Ui.Switch] })[0]; if ($sw) { $sw.Left = $this.ClientSize.Width - $sw.Width - $this.Tag.S(16) } })
+    # Тумблер прижат к правому краю; подписи занимают место только до него (иначе подпись перекрывает тумблер).
+    $card.add_Layout({
+            $th = $this.Tag
+            $sw = @($this.Controls | Where-Object { $_ -is [ClaudeNotifier.Ui.Switch] })[0]
+            if ($null -eq $sw) { return }
+            $sw.Left = $this.ClientSize.Width - $sw.Width - $th.S(16)
+            $sw.Top = [int](($this.ClientSize.Height - $sw.Height) / 2)
+            foreach ($l in @($this.Controls | Where-Object { $_ -is [ClaudeNotifier.Ui.Label2] })) {
+                $l.Width = [Math]::Max($th.S(40), $sw.Left - $l.Left - $th.S(12))
+            }
+        })
     foreach ($c in @($netTitle, $netSub, $switch)) { $c.BackColor = $t.Surface; $card.Controls.Add($c) }
+    $switch.BringToFront()
 
     $spacer = New-Object System.Windows.Forms.Panel
     $spacer.Dock = [System.Windows.Forms.DockStyle]::Top
