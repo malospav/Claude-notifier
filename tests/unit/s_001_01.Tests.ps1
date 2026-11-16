@@ -66,8 +66,15 @@ Describe 's_001_01 · Write-NotifierLog' {
         { Write-NotifierLog -Level ERROR -Message 'x' -DataRoot $root } | Should Not Throw
     }
 
-    It 'по умолчанию использует %LOCALAPPDATA%\claude-notifier' {
-        Get-NotifierDataRoot | Should Be (Join-Path $env:LOCALAPPDATA 'claude-notifier')
+    It 'по умолчанию — %USERPROFILE%\.claude-notifier (AppData виртуализирует пакет Claude); CLAUDE_NOTIFIER_HOME переопределяет' {
+        $old = $env:CLAUDE_NOTIFIER_HOME
+        try {
+            $env:CLAUDE_NOTIFIER_HOME = $null
+            Get-NotifierDataRoot | Should Be (Join-Path $env:USERPROFILE '.claude-notifier')
+            $env:CLAUDE_NOTIFIER_HOME = 'C:\x\cn'
+            Get-NotifierDataRoot | Should Be 'C:\x\cn'
+        }
+        finally { $env:CLAUDE_NOTIFIER_HOME = $old }
     }
 }
 

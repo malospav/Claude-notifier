@@ -1,7 +1,7 @@
 ﻿Set-StrictMode -Version 2.0
 
 # Элементы интерфейса в стиле Windows 11 (исходник — Ui.cs рядом). Скомпилированная сборка кэшируется в
-# %LOCALAPPDATA%\claude-notifier\cache по хэшу исходника: компилятор C# вызывается только после обновления.
+# <каталог claude-notifier>\cache по хэшу исходника: компилятор C# вызывается только после обновления.
 $script:UiSourcePath = Join-Path $PSScriptRoot 'Ui.cs'
 
 function Import-NotifierUi {
@@ -10,7 +10,7 @@ function Import-NotifierUi {
     Загружает типы ClaudeNotifier.Ui.*. Возвращает 'loaded' | 'cache' | 'compiled' | 'inline'.
     #>
     [CmdletBinding()]
-    param([string]$CacheDir = (Join-Path $env:LOCALAPPDATA 'claude-notifier\cache'))
+    param([string]$CacheDir = (Join-Path $(if ($env:CLAUDE_NOTIFIER_HOME) { $env:CLAUDE_NOTIFIER_HOME } else { Join-Path $env:USERPROFILE '.claude-notifier' }) 'cache'))
     if ('ClaudeNotifier.Ui.Theme' -as [type]) { return 'loaded' }
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     $source = [IO.File]::ReadAllText($script:UiSourcePath, [Text.Encoding]::UTF8)

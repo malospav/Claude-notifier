@@ -15,7 +15,8 @@ runspace и кладёт события в очередь; таймер WinForms
 #>
 param(
     [switch]$NoOutput,
-    [string]$MutexName = 'Local\claude-notifier'
+    [string]$MutexName = 'Local\claude-notifier',
+    [switch]$Show   # запуск ярлыком: открыть окно «Сеансы» (если трей уже работает — попросить его)
 )
 
 Import-Module (Join-Path $PSScriptRoot 'lib\Log.psm1')
@@ -26,10 +27,11 @@ Import-Module (Join-Path $PSScriptRoot 'lib\Sound.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\History.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Window.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Sessions.psm1')
+Import-Module (Join-Path $PSScriptRoot 'lib\Shortcut.psm1')
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Ui.ps1')        # окно «Сеансы», точка в трее, диалоги
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Network.ps1')   # доступ из сети, вкладка «Устройства»
 
-$script:EventTypes = @('done', 'permission', 'error', 'limit', 'start', 'working', 'end')
+$script:EventTypes = @('done', 'permission', 'error', 'limit', 'start', 'working', 'end', 'show')
 # Служебные события (SessionStart, UserPromptSubmit, SessionEnd): только для окна «Сеансы».
 $script:SilentTypes = @('start', 'working', 'end')
 $script:SessionsRefreshMs = 5000
@@ -185,6 +187,7 @@ function Invoke-NotifierEventBatch {
                 Write-NotifierLog -Level WARN -Message 'tray: отброшено событие неверного формата' -DataRoot $DataRoot
                 continue
             }
+            if ($event.type -eq 'show') { Show-NotifierSessionsWindow; $shown++; continue }   # щелчок по ярлыку
             $remote = Test-NotifierRemoteEventMuted -Event $event   # show | quiet | drop (события других устройств)
             if ($remote -eq 'drop') { continue }
             # Статус сеанса обновляется для любого события, даже если уведомление этого типа выключено.
@@ -217,6 +220,24 @@ function Invoke-NotifierEventBatch {
         catch { Write-NotifierLog -Level ERROR -Message "tray: sessions.json не записан: $($_.Exception.Message)" -DataRoot $DataRoot }
     }
     return $shown
+}
+
+function New-NotifierShowEvent {
+    <# .SYNOPSIS Служебное событие «открыть окно Сеансы» (ярлык → трей). #>
+    return [pscustomobject]@{ v = 1; type = 'show'; title = 'show'; preview = '' }
+}
+
+function Request-NotifierShowWindow {
+    <#
+    .SYNOPSIS
+    Трей уже работает: разрешить ему вывести окно на передний план (право есть у процесса,
+    запущенного щелчком по ярлыку) и передать команду «показать окно» по pipe. Возвращает $true, если доставлено.
+    #>
+    param([string]$DataRoot = (Get-NotifierDataRoot), [string]$PipeName = (Get-NotifierPipeName))
+    try { [void](Import-NotifierUi); [void][ClaudeNotifier.Ui.Native]::AllowForeground() } catch { }
+    $ok = Send-NotifierEvent -Event (New-NotifierShowEvent) -PipeName $PipeName
+    if (-not $ok) { Write-NotifierLog -Level WARN -Message 'tray: окно не открыто — трей не ответил' -DataRoot $DataRoot }
+    return $ok
 }
 
 function Stop-NotifierTray {
@@ -272,12 +293,19 @@ function Start-NotifierTray {
     .SYNOPSIS
     Главный цикл трея. Возвращает код выхода: 0 — нормальное завершение или уже запущен.
     #>
-    param([string]$MutexName, [switch]$NoOutput, [string]$DataRoot = (Get-NotifierDataRoot))
+    param([string]$MutexName, [switch]$NoOutput, [string]$DataRoot = (Get-NotifierDataRoot), [switch]$Show)
     $mutex = Enter-NotifierMutex -Name $MutexName
-    if ($null -eq $mutex) { return 0 }
+    if ($null -eq $mutex) {
+        if ($Show) { [void](Request-NotifierShowWindow -DataRoot $DataRoot) }
+        return 0
+    }
 
     Add-Type -AssemblyName System.Windows.Forms
-    try { [void](Import-NotifierUi); [ClaudeNotifier.Ui.Native]::EnableDpiAwareness() }
+    try {
+        [void](Import-NotifierUi)
+        [ClaudeNotifier.Ui.Native]::EnableDpiAwareness()
+        [void][ClaudeNotifier.Ui.Native]::SetAppId((Get-NotifierAppId))   # иконка и имя приложения на панели задач
+    }
     catch { Write-NotifierLog -Level WARN -Message "tray: интерфейс не загружен: $($_.Exception.Message)" -DataRoot $DataRoot }
     try { Import-TrayNative } catch { Write-NotifierLog -Level WARN -Message "tray: нативный помощник не загружен: $($_.Exception.Message)" -DataRoot $DataRoot }   # компиляция при старте, а не на первом событии
     $script:TrayState = @{ Mutex = $mutex; Stopped = $false; Timer = $null; Server = $null; Icon = $null; Context = $null }
@@ -318,6 +346,7 @@ function Start-NotifierTray {
         })
         $timer.Start()
         $script:TrayState.Timer = $timer
+        if ($Show) { $script:TrayQueue.Enqueue((New-NotifierShowEvent)) }
         Write-NotifierLog -Level INFO -Message "tray: запущен (pid $PID)" -DataRoot $DataRoot
         [System.Windows.Forms.Application]::Run($script:TrayState.Context)
         return 0
@@ -333,5 +362,5 @@ function Start-NotifierTray {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    exit (Start-NotifierTray -MutexName $MutexName -NoOutput:$NoOutput)
+    exit (Start-NotifierTray -MutexName $MutexName -NoOutput:$NoOutput -Show:$Show)
 }

@@ -213,6 +213,7 @@ Describe 's_005_01 · трей как процесс' {
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $psi.EnvironmentVariables['LOCALAPPDATA'] = $lad
+        $psi.EnvironmentVariables['CLAUDE_NOTIFIER_HOME'] = (Join-Path $lad 'claude-notifier')
         $psi.EnvironmentVariables['USERNAME'] = $user
         return [System.Diagnostics.Process]::Start($psi)
     }

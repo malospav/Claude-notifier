@@ -112,6 +112,7 @@ Describe 's_001_04 · кэш сборки Win32 (ускорение bridge)' {
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true
         $psi.EnvironmentVariables['LOCALAPPDATA'] = $LocalAppData
+        $psi.EnvironmentVariables['CLAUDE_NOTIFIER_HOME'] = (Join-Path $LocalAppData 'claude-notifier')
         $p = [System.Diagnostics.Process]::Start($psi)
         $out = $p.StandardOutput.ReadToEnd().Trim()
         $p.WaitForExit()
@@ -147,6 +148,7 @@ Describe 's_001_04 · процесс bridge целиком' {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.EnvironmentVariables['LOCALAPPDATA'] = $LocalAppData
+        $psi.EnvironmentVariables['CLAUDE_NOTIFIER_HOME'] = (Join-Path $LocalAppData 'claude-notifier')
         $psi.EnvironmentVariables['USERNAME'] = 'cn-test-' + [guid]::NewGuid().ToString('N')  # свой pipe: трея нет
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $p = [System.Diagnostics.Process]::Start($psi)

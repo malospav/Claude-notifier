@@ -114,6 +114,7 @@ Describe 's_004_02 · statusline.ps1 как процесс' {
             $psi.RedirectStandardOutput = $true
             $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
             $psi.EnvironmentVariables['LOCALAPPDATA'] = $lad
+        $psi.EnvironmentVariables['CLAUDE_NOTIFIER_HOME'] = (Join-Path $lad 'claude-notifier')
             $psi.EnvironmentVariables['USERNAME'] = 'cn-sl-' + [guid]::NewGuid().ToString('N')
             $p = [System.Diagnostics.Process]::Start($psi)
             $b = (New-Object System.Text.UTF8Encoding $false).GetBytes($case.In)
@@ -138,27 +139,27 @@ Describe 's_004_02 · statusLine в установщике' {
 
     It 'install без прежнего statusLine → наш; uninstall удаляет ключ' {
         $e = New-Env
-        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes | Out-Null
+        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $sl = (Read-Json $e.Settings).statusLine
         $sl.type | Should Be 'command'
         $sl.command | Should Be ((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe').Replace('\', '/') + ' -NoProfile -NonInteractive -File "' + (Join-Path $e.Data 'app\statusline.ps1').Replace('\', '/') + '"')
         Test-Path (Join-Path $e.Data 'config.json') | Should Be $false
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $null -eq (Read-Json $e.Settings).PSObject.Properties['statusLine'] | Should Be $true
     }
 
     It 'прежний statusLine → в config.json (chainStatusLine); повторная установка его не теряет; uninstall восстанавливает' {
         $e = New-Env
         '{ "statusLine": { "type": "command", "command": "~/.claude/my.sh", "padding": 1 }, "model": "opus" }' | Set-Content $e.Settings -Encoding UTF8
-        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes | Out-Null
+        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $cfg = Read-Json (Join-Path $e.Data 'config.json')
         $cfg.chainStatusLine.command | Should Be '~/.claude/my.sh'
         Test-NotifierStatusLine (Read-Json $e.Settings).statusLine | Should Be $true
 
-        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes | Out-Null
+        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         (Read-Json (Join-Path $e.Data 'config.json')).chainStatusLine.command | Should Be '~/.claude/my.sh'
 
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $s = Read-Json $e.Settings
         $s.statusLine.command | Should Be '~/.claude/my.sh'
         $s.statusLine.padding | Should Be 1
@@ -171,7 +172,7 @@ Describe 's_004_02 · statusLine в установщике' {
         New-Item -ItemType Directory -Path $e.Data -Force | Out-Null
         '{ "previewLength": 120 }' | Set-Content (Join-Path $e.Data 'config.json') -Encoding UTF8
         '{ "statusLine": { "type": "command", "command": "old" } }' | Set-Content $e.Settings -Encoding UTF8
-        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes | Out-Null
+        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $cfg = Read-Json (Join-Path $e.Data 'config.json')
         $cfg.previewLength | Should Be 120
         $cfg.chainStatusLine.command | Should Be 'old'
@@ -183,7 +184,7 @@ Describe 's_004_02 · statusLine в установщике' {
         Set-Content (Join-Path $e.Data 'config.json') '{ broken'
         $orig = '{ "statusLine": { "type": "command", "command": "old" } }'
         [IO.File]::WriteAllText($e.Settings, $orig)
-        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -ErrorAction SilentlyContinue 2>$null | Out-Null
+        & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -ErrorAction SilentlyContinue 2>$null | Out-Null
         $LASTEXITCODE | Should Be 1
         [IO.File]::ReadAllText($e.Settings) | Should Be $orig
     }

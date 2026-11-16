@@ -5,11 +5,17 @@ $script:MaxLogBytes = 1MB
 function Get-NotifierDataRoot {
     <#
     .SYNOPSIS
-    Возвращает каталог данных claude-notifier: %LOCALAPPDATA%\claude-notifier.
+    Возвращает каталог claude-notifier: %USERPROFILE%\.claude-notifier (или $env:CLAUDE_NOTIFIER_HOME).
+
+    .DESCRIPTION
+    Не %LOCALAPPDATA%: приложение Claude для Windows — пакет MSIX, и всё, что его процессы (хуки, установщик,
+    запущенный из Claude) пишут в AppData, Windows перенаправляет в личную папку пакета. Такую копию не видят
+    «Пуск», Проводник и Claude Code CLI. Папку профиля Windows не виртуализирует — как и ~\.claude.
     #>
     [CmdletBinding()]
     param()
-    return (Join-Path $env:LOCALAPPDATA 'claude-notifier')
+    if ($env:CLAUDE_NOTIFIER_HOME) { return $env:CLAUDE_NOTIFIER_HOME }
+    return (Join-Path $env:USERPROFILE '.claude-notifier')
 }
 
 function Write-NotifierLog {

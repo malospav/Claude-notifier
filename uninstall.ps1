@@ -4,7 +4,7 @@
 
 .DESCRIPTION
 Чужие хуки и настройки не трогаются. config.json, history.json и лог остаются,
-если не указан -Purge (тогда удаляется весь %LOCALAPPDATA%\claude-notifier).
+если не указан -Purge (тогда удаляется весь %USERPROFILE%\.claude-notifier).
 
 .EXAMPLE
 powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1 -Purge
@@ -12,8 +12,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1 -Purge
 [CmdletBinding()]
 param(
     [string]$SettingsPath = (Join-Path $env:USERPROFILE '.claude\settings.json'),
-    [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'claude-notifier'),
+    [string]$DataRoot = $(if ($env:CLAUDE_NOTIFIER_HOME) { $env:CLAUDE_NOTIFIER_HOME } else { Join-Path $env:USERPROFILE '.claude-notifier' }),
     [string]$ClassesRoot = 'HKCU:\Software\Classes',
+    [string]$StartMenuDir = ([Environment]::GetFolderPath('Programs')),
+    [string]$DesktopDir = ([Environment]::GetFolderPath('DesktopDirectory')),
     [switch]$Purge
 )
 
@@ -21,6 +23,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'src\lib\Settings.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'src\lib\Registration.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'src\lib\Config.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'src\lib\Shortcut.psm1') -Force
 
 try {
     $settings = Read-ClaudeSettings -Path $SettingsPath
@@ -42,6 +45,8 @@ try {
 
     if (Unregister-NotifierProtocol -ClassesRoot $ClassesRoot) { Write-Output 'URL-протокол claude-notifier: удалён' }
     if (Unregister-NotifierAumid -ClassesRoot $ClassesRoot) { Write-Output 'AppUserModelID ClaudeNotifier удалён' }
+    $removedLinks = Remove-NotifierShortcuts -StartMenuDir $StartMenuDir -DesktopDir $DesktopDir
+    if ($removedLinks -gt 0) { Write-Output "Ярлыков Claude Notifier удалено: $removedLinks" }
 
     # Доступ из сети: резервация URL и правило брандмауэра снимаются с запросом UAC — только если
     # доступ когда-либо включали (есть network.json) и настройка Windows действительно сделана.

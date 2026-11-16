@@ -34,3 +34,8 @@ ADR-004 предполагал: AUMID «ClaudeNotifier» в HKCU + `activationTy
 - **Свой exe с COM-активатором (C#/.NET):** единственный штатный путь, но неподписанный exe блокирует Smart App Control (ADR-001).
 - **COM LocalServer32 = powershell.exe + скрипт:** не реализует `INotificationActivationCallback`, поведение не гарантировано; отложено.
 - **Store-пакет / MSIX:** требует подписи и упаковки — вне рамок утилиты.
+
+# Update 2026-11-17: ярлык с AppUserModelID
+- Установщик создаёт ярлык «Claude Notifier» в меню «Пуск» (и на рабочем столе) с `PKEY_AppUserModel_ID = ClaudeNotifier.App` и иконкой приложения; трей вызывает `SetCurrentProcessExplicitAppUserModelID` с тем же ID.
+- Проверено вживую: уведомление от `ClaudeNotifier.App` **без** `launch` подписано «Claude Notifier» с нашей иконкой, клик закрывает его. С `launch="claude-notifier:…"` и `activationType="protocol"` клик по-прежнему открывает окно Store — exe-активатор всё так же нужен.
+- Решение: уведомления идут от `ClaudeNotifier.App`, если ярлык есть (иначе — AUMID PowerShell), без действия по клику. Последствие «подпись Windows PowerShell» снято; переход к сессии — через окно «Сеансы» и «Историю».

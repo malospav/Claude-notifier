@@ -1,12 +1,24 @@
 ﻿Set-StrictMode -Version 2.0
 
 Import-Module (Join-Path $PSScriptRoot 'Log.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Shortcut.psm1')
 
-# AUMID Windows PowerShell (ADR-006). Windows 11 доставляет клик по уведомлению только приложению
-# с исполняемым COM-активатором; для зарегистрированного в реестре AUMID без exe клик открывает
-# окно Microsoft Store («нет программы»). С AUMID PowerShell клик просто закрывает уведомление,
-# а переход к сессии делается через «Историю» в трее.
-$script:AppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+# ADR-006: Windows 11 доставляет клик по уведомлению (launch/protocol) только приложению с исполняемым
+# COM-активатором; без него клик открывает окно Microsoft Store. Поэтому у уведомлений нет действия по клику,
+# а переход к сессии — через окно «Сеансы» и «Историю» в трее.
+$script:PowerShellAppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+
+function Get-NotifierToastAppId {
+    <#
+    .SYNOPSIS
+    От чьего имени показывать уведомления. Есть ярлык «Claude Notifier» в меню «Пуск» → свой AppUserModelID:
+    подпись «Claude Notifier» и иконка приложения (проверено вживую 2026-11-17: клик закрывает уведомление,
+    Store не открывается). Нет ярлыка → AUMID Windows PowerShell, иначе Windows не показала бы уведомление.
+    #>
+    param([string]$StartMenuDir = ([Environment]::GetFolderPath('Programs')))
+    if (Test-NotifierShortcutInstalled -StartMenuDir $StartMenuDir) { return (Get-NotifierAppId) }
+    return $script:PowerShellAppId
+}
 
 function ConvertTo-XmlText([AllowNull()][string]$Text) {
     # Экранирует & < > " ' для текста и атрибутов XML.
@@ -58,7 +70,7 @@ function Show-NotifierToast {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]$Event,
-        [string]$AppId = $script:AppId,
+        [string]$AppId = (Get-NotifierToastAppId),
         [string]$DataRoot = (Get-NotifierDataRoot)
     )
     try {
@@ -71,4 +83,4 @@ function Show-NotifierToast {
     }
 }
 
-Export-ModuleMember -Function New-NotifierToastXml, Show-NotifierToast
+Export-ModuleMember -Function New-NotifierToastXml, Show-NotifierToast, Get-NotifierToastAppId

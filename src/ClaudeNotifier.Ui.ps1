@@ -253,7 +253,8 @@ function New-NotifierForm {
     $f.Font = [ClaudeNotifier.Ui.Fonts]::Text(9.5)
     $f.ClientSize = New-Object System.Drawing.Size($Theme.S($Width), $Theme.S($Height))
     $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-    try { $f.Icon = Get-NotifierDotIcon 'working' } catch { }
+    $appIcon = Join-Path $PSScriptRoot 'assets\icon.ico'
+    if (Test-Path -LiteralPath $appIcon) { $f.Icon = New-Object System.Drawing.Icon $appIcon }   # иконка приложения в заголовке и на панели задач
     $f.Tag = @{ Theme = $Theme }
     $f.add_HandleCreated({ [ClaudeNotifier.Ui.Native]::StyleWindow($this.Handle, $this.Tag.Theme) })
     [ClaudeNotifier.Ui.Native]::FadeIn($f, 180)   # окно открывают редко — плавное появление уместно

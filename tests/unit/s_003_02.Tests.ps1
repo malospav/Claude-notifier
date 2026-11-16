@@ -154,6 +154,7 @@ Describe 's_003_02 · focus-handler.ps1 как процесс' {
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true
         $psi.EnvironmentVariables['LOCALAPPDATA'] = $lad
+        $psi.EnvironmentVariables['CLAUDE_NOTIFIER_HOME'] = (Join-Path $lad 'claude-notifier')
         $p = [System.Diagnostics.Process]::Start($psi)
         $out = $p.StandardOutput.ReadToEnd()
         $p.WaitForExit()

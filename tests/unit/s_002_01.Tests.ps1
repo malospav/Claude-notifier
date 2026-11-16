@@ -48,10 +48,18 @@ Describe 's_002_01 · New-NotifierToastXml' {
 Describe 's_002_01 · Show-NotifierToast' {
     It 'передаёт XML и AppId в WinRT и возвращает $true' {
         Mock -ModuleName Toast Invoke-ToastShow { }
-        Show-NotifierToast -Event (New-TestEvent) -DataRoot $TestDrive | Should Be $true
+        Show-NotifierToast -Event (New-TestEvent) -AppId 'Test.App' -DataRoot $TestDrive | Should Be $true
         Assert-MockCalled -ModuleName Toast Invoke-ToastShow -Scope It -Times 1 -Exactly -ParameterFilter {
-            $AppId -eq '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe' -and $Xml -like '*Тесты проходят*'
+            $AppId -eq 'Test.App' -and $Xml -like '*Тесты проходят*'
         }
+    }
+
+    It 'AppId: есть ярлык в «Пуске» → ClaudeNotifier.App; нет → Windows PowerShell' {
+        $dir = Join-Path $TestDrive 'programs'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Get-NotifierToastAppId -StartMenuDir $dir | Should Be '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+        [IO.File]::WriteAllText((Join-Path $dir 'Claude Notifier.lnk'), 'x')
+        Get-NotifierToastAppId -StartMenuDir $dir | Should Be 'ClaudeNotifier.App'
     }
 
     It 'ошибка WinRT → $false и ERROR в логе, без исключения' {
@@ -90,7 +98,7 @@ Describe 's_002_01 · AUMID' {
         $data = Join-Path $TestDrive "data-$id\claude-notifier"
         try {
             Register-NotifierAumid -AppRoot 'C:\old' -ClassesRoot $classes
-            & $install -SettingsPath $settings -DataRoot $data -ClassesRoot $classes | Out-Null
+            & $install -SettingsPath $settings -DataRoot $data -ClassesRoot $classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
             $LASTEXITCODE | Should Be 0
             Test-Path (Join-Path $classes 'AppUserModelId\ClaudeNotifier') | Should Be $false
             Test-Path (Join-Path $data 'app\assets\icon.ico') | Should Be $true
@@ -98,12 +106,12 @@ Describe 's_002_01 · AUMID' {
         finally { Remove-Item $classes -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    It 'icon.ico содержит кадры 32, 64 и 256 px' {
+    It 'icon.ico читается декодером Windows: кадры от 16 до 256 px' {
         Add-Type -AssemblyName PresentationCore
         $fs = [IO.File]::OpenRead((Join-Path $repoRoot 'src\assets\icon.ico'))
         try {
             $dec = New-Object System.Windows.Media.Imaging.IconBitmapDecoder $fs, ([System.Windows.Media.Imaging.BitmapCreateOptions]::None), ([System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
-            (($dec.Frames | ForEach-Object { $_.PixelWidth }) -join ',') | Should Be '32,64,256'
+            (($dec.Frames | ForEach-Object { $_.PixelWidth }) -join ',') | Should Be '16,20,24,32,40,48,64,128,256'
         }
         finally { $fs.Close() }
     }

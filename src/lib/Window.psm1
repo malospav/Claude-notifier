@@ -63,10 +63,10 @@ namespace ClaudeNotifier {
 
 function Import-Win32Type {
     # Загружает ClaudeNotifier.Win32. Скомпилированная сборка кэшируется в
-    # %LOCALAPPDATA%\claude-notifier\cache (имя содержит хэш исходника), чтобы не вызывать
+    # <каталог claude-notifier>\cache (имя содержит хэш исходника), чтобы не вызывать
     # компилятор C# при каждом запуске хука (≈ 100 мс). При любой ошибке кэша — обычный Add-Type.
     # Возвращает 'loaded' | 'cache' | 'compiled' | 'inline'.
-    param([string]$CacheDir = (Join-Path $env:LOCALAPPDATA 'claude-notifier\cache'))
+    param([string]$CacheDir = (Join-Path $(if ($env:CLAUDE_NOTIFIER_HOME) { $env:CLAUDE_NOTIFIER_HOME } else { Join-Path $env:USERPROFILE '.claude-notifier' }) 'cache'))
     if ('ClaudeNotifier.Win32' -as [type]) { return 'loaded' }
     try {
         $sha = [System.Security.Cryptography.SHA256]::Create()

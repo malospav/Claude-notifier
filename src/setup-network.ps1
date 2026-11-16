@@ -13,7 +13,7 @@
 param(
     [int]$Port = 47600,
     [string]$User = '',
-    [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'claude-notifier'),
+    [string]$DataRoot = $(if ($env:CLAUDE_NOTIFIER_HOME) { $env:CLAUDE_NOTIFIER_HOME } else { Join-Path $env:USERPROFILE '.claude-notifier' }),
     [switch]$Remove
 )
 

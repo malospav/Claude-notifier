@@ -160,7 +160,17 @@ namespace ClaudeNotifier.Ui {
         [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+        [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int pid);
+
         public static void EnableDpiAwareness() { try { SetProcessDPIAware(); } catch { } }
+
+        // AppUserModelID процесса: окна трея группируются на панели задач под ярлыком «Claude Notifier»
+        // (его иконка и имя), а не под powershell.exe. Вызывать до создания окон.
+        public static bool SetAppId(string appId) { try { return SetCurrentProcessExplicitAppUserModelID(appId) == 0; } catch { return false; } }
+
+        // Разрешает любому процессу (трею) вывести своё окно на передний план — после щелчка по ярлыку.
+        public static bool AllowForeground() { try { return AllowSetForegroundWindow(-1); } catch { return false; } }
 
         // Заголовок окна в цвет фона (как в macOS — без видимой полосы), тёмный режим, скруглённые углы.
         public static void StyleWindow(IntPtr hwnd, Theme t) {
