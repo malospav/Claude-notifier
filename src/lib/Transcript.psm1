@@ -280,9 +280,9 @@ function Get-NotifierJournalWriteTime {
     Когда журнал сеанса последний раз менялся (UTC): сам журнал и журналы его субагентов
     (<журнал без .jsonl>\subagents\*.jsonl) — пока работает субагент, основной журнал молчит.
     #>
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param([Parameter(Mandatory = $true)][string]$Path, [switch]$SubagentsOnly)
     $t = [datetime]::MinValue
-    try { if ([IO.File]::Exists($Path)) { $t = [IO.File]::GetLastWriteTimeUtc($Path) } } catch { }
+    if (-not $SubagentsOnly) { try { if ([IO.File]::Exists($Path)) { $t = [IO.File]::GetLastWriteTimeUtc($Path) } } catch { } }
     $sub = Join-Path ([IO.Path]::ChangeExtension($Path, $null).TrimEnd('.')) 'subagents'
     try {
         if ([IO.Directory]::Exists($sub)) {

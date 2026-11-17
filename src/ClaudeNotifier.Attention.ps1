@@ -186,6 +186,8 @@ function Update-NotifierLiveContext {
     Сеанс «Ждёт ответа», в журнале которого появился новый ответ Claude (продолжил сам — например,
     после отчёта субагента; хук UserPromptSubmit при этом не срабатывает), снова становится «Работает»:
     в очередь идёт служебное событие working, оно же убирает кнопки быстрого ответа.
+    То же, если после «Готово» пишут журналы субагентов: Claude запустил агентов в фоне и продолжит сам,
+    когда они закончат, — отвечать ему не нужно.
     #>
     param([datetime]$Now = [DateTime]::UtcNow, [string]$DataRoot = $script:TrayDataRoot, [switch]$Force)
     if ($null -eq $script:TrayQueue) { return }
@@ -222,7 +224,17 @@ function Update-NotifierLiveContext {
         $since = [DateTimeOffset]::MinValue
         $waiting = [string]$s.state -eq 'waiting' -and [DateTimeOffset]::TryParse([string]$s.since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$since)
         $touched = $false
-        if ($waiting) { try { $touched = [IO.File]::GetLastWriteTimeUtc($tp) -gt $since.UtcDateTime.AddSeconds(1) } catch { } }
+        $agents = $false
+        if ($waiting) {
+            try { $touched = [IO.File]::GetLastWriteTimeUtc($tp) -gt $since.UtcDateTime.AddSeconds(1) } catch { }
+            # Фоновые агенты: их журналы пишутся после «Готово» (запас 5 с — последние строки обычных субагентов).
+            $agents = (Get-NotifierJournalWriteTime -Path $tp -SubagentsOnly) -gt $since.UtcDateTime.AddSeconds(5)
+        }
+        if ($agents) {
+            $script:TrayQueue.Enqueue([pscustomobject]@{ v = 1; type = 'working'; title = 'working'; preview = ''; session_id = [string]$s.session_id
+                    ts = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture) })
+            $waiting = $false   # повторно по ответу в журнале — не нужно
+        }
         if ([string]$s.state -ne 'working' -and -not $touched -and $old -and $old.PSObject.Properties['window']) { continue }
         try { $st = Get-NotifierTranscriptStats -Path $tp -StateDir $stateDir } catch { continue }
         if ($null -eq $st) { continue }

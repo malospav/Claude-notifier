@@ -177,6 +177,32 @@ Describe 's_013_01 · завис или упал, «Готово» после д
         Test-NotifierApiErrorDue -Session $s -ErrorTs (Iso $now.AddMinutes(-1)) -Now $now.AddMinutes(1) | Should Be $false
     }
 
+    It 'после «Готово» работают фоновые агенты (пишут свои журналы) — сеанс «Работает», быстрый ответ убран' {
+        $script:TrayDataRoot = Join-Path $TestDrive 'bg'
+        New-Item -ItemType Directory (Join-Path $script:TrayDataRoot 'requests') -Force | Out-Null
+        $script:TrayQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $now = [DateTime]::UtcNow
+        $tr = Join-Path $TestDrive 'bg.jsonl'
+        Write-Lines $tr @("{`"type`":`"assistant`",`"timestamp`":`"$(Iso $now.AddMinutes(-10))`",`"message`":{`"model`":`"claude-opus-5-5`",`"id`":`"msg_1`",`"content`":[],`"usage`":{`"input_tokens`":1,`"output_tokens`":1}}}")
+        (Get-Item $tr).LastWriteTimeUtc = $now.AddMinutes(-10)
+        $sub = Join-Path $TestDrive 'bg\subagents'
+        New-Item -ItemType Directory $sub -Force | Out-Null
+        $agent = Join-Path $sub 'agent-1.jsonl'
+        Write-Lines $agent @('{}')
+        (Get-Item $agent).LastWriteTimeUtc = $now.AddMinutes(-10).AddSeconds(2)   # обычный субагент закончил до «Готово»
+        Save-NotifierSessions -DataRoot $script:TrayDataRoot -Sessions @([pscustomobject]@{ session_id = 'B'; project = 'shop'; origin = 'desktop'; device = ''; state = 'waiting'; since = (Iso $now.AddMinutes(-10)); updated = ''; preview = ''; transcript = $tr; window = $null
+                stats = [pscustomobject]@{ context = 1; window = 200000; percent = 1; output = 1; tools = 0; prompts = 0 } })
+        [void](New-NotifierReplyWait -SessionId 'B' -Minutes 30 -DataRoot $script:TrayDataRoot)
+        Update-NotifierLiveContext -Force -Now $now
+        @($script:TrayQueue.ToArray() | Where-Object { $_.type -eq 'working' }).Count | Should Be 0
+        (Get-Item $agent).LastWriteTimeUtc = $now.AddMinutes(-1)   # фоновый агент пишет после «Готово»
+        Update-NotifierLiveContext -Force -Now $now
+        @($script:TrayQueue.ToArray() | Where-Object { $_.type -eq 'working' }).Count | Should Be 1
+        Invoke-NotifierEventBatch -Queue $script:TrayQueue -DataRoot $script:TrayDataRoot -NoOutput | Out-Null
+        (@(Get-NotifierSessions -DataRoot $script:TrayDataRoot)[0]).state | Should Be 'working'
+        (Get-NotifierPendingRequests -DataRoot $script:TrayDataRoot).Replies.ContainsKey('B') | Should Be $false
+    }
+
     It 'сеанс помнит, с какого момента занят задачей: «Нужно разрешение» — та же задача, после ожидания — новая' {
         $ev = { param($type, $ts) [pscustomobject]@{ type = $type; session_id = 'b'; ts = $ts } }
         $l = Update-NotifierSessionList -Sessions @() -Event (& $ev 'working' '2026-11-17T07:00:00Z')
