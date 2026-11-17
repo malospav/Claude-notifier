@@ -19,14 +19,15 @@ $script:RxToolName = [regex]'"name":"([^"]+)"'
 $script:RxFilePath = [regex]'"(?:file_path|notebook_path)":"((?:[^"\\]|\\.)*)"'
 $script:RxCommand = [regex]'"command":"((?:[^"\\]|\\.)*)"'
 $script:RxPreTokens = [regex]'"preTokens":(\d+)'
+$script:RxText = [regex]'"text":"((?:[^"\\]|\\.)*)"'
 $script:EditTools = @('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 $script:ShellTools = @('Bash', 'PowerShell')
 $script:MaxFiles = 500
 $script:KeepCommands = 5
 
 function New-TranscriptState {
-    return [ordered]@{ v = 2; offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
-        model = ''; maxCtx = [int64]0; compactions = 0; files = @(); toolCounts = @{}; commands = @() }
+    return [ordered]@{ v = 3; offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
+        model = ''; maxCtx = [int64]0; compactions = 0; files = @(); toolCounts = @{}; commands = @(); lastActivity = ''; apiError = ''; apiErrorText = '' }
 }
 
 function ConvertFrom-JsonString([string]$Escaped) {
@@ -105,6 +106,22 @@ function Update-TranscriptState {
         if ($Line.Contains('"tool_use"')) { Add-ToolUses $State $Line }
         $mm = $script:RxModel.Match($Line)
         if ($mm.Success) { $State.model = $mm.Groups[1].Value }
+        # Ошибка API (перегрузка, лимит, обрыв связи): Claude Code пишет её как ответ с isApiErrorMessage.
+        if ($Line.Contains('"isApiErrorMessage":true') -and -not $Line.Contains('"isSidechain":true')) {
+            $te = $script:RxTimestamp.Match($Line)
+            if ($te.Success) { $State.apiError = $te.Groups[1].Value }
+            $tx = $script:RxText.Match($Line)
+            $text = 'API Error'
+            if ($tx.Success) { $text = ((ConvertFrom-JsonString $tx.Groups[1].Value) -split "`n")[0].Trim() }
+            if ($text.Length -gt 160) { $text = $text.Substring(0, 159) + [char]0x2026 }
+            $State.apiErrorText = $text
+            return
+        }
+        # Время последнего ответа Claude (без субагентов): по нему трей видит, что сеанс снова работает.
+        if (-not $Line.Contains('"isSidechain":true')) {
+            $ta = $script:RxTimestamp.Match($Line)
+            if ($ta.Success -and $ta.Groups[1].Value -gt [string]$State.lastActivity) { $State.lastActivity = $ta.Groups[1].Value }
+        }
         # Ответы субагентов (isSidechain) — их собственный контекст, не контекст сеанса.
         if ($Line.Contains('"usage"') -and -not $Line.Contains('"isSidechain":true')) {
             $id = $script:RxMsgId.Match($Line)
@@ -148,7 +165,7 @@ function Get-NotifierTranscriptStats {
     if (Test-Path -LiteralPath $statePath) {
         try {
             $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8)) -ErrorAction Stop
-            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 2) { throw 'old state' }   # прежний формат: перечитать журнал целиком
+            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 3) { throw 'old state' }   # прежний формат: перечитать журнал целиком
             foreach ($k in @($state.Keys)) { if ($saved.PSObject.Properties[$k]) { $state[$k] = $saved.$k } }
             $state.offset = [int64]$state.offset; $state.output = [int64]$state.output; $state.lastOut = [int64]$state.lastOut; $state.context = [int64]$state.context
             $state.maxCtx = [int64]$state.maxCtx
@@ -194,6 +211,9 @@ function Get-NotifierTranscriptStats {
         prompts     = [int]$state.prompts
         model       = [string]$state.model
         compactions = [int]$state.compactions
+        lastActivity = [string]$state.lastActivity
+        apiError    = [string]$state.apiError
+        apiErrorText = [string]$state.apiErrorText
         files       = [int]@($state.files).Count
         recentFiles = @(@($state.files) | Select-Object -Last 3 | ForEach-Object { [IO.Path]::GetFileName($_) })
         topTools    = $top
@@ -254,4 +274,34 @@ function Format-NotifierSessionDetails {
     return ($lines -join "`n")
 }
 
-Export-ModuleMember -Function Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Get-NotifierContextWindow
+function Get-NotifierJournalWriteTime {
+    <#
+    .SYNOPSIS
+    Когда журнал сеанса последний раз менялся (UTC): сам журнал и журналы его субагентов
+    (<журнал без .jsonl>\subagents\*.jsonl) — пока работает субагент, основной журнал молчит.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $t = [datetime]::MinValue
+    try { if ([IO.File]::Exists($Path)) { $t = [IO.File]::GetLastWriteTimeUtc($Path) } } catch { }
+    $sub = Join-Path ([IO.Path]::ChangeExtension($Path, $null).TrimEnd('.')) 'subagents'
+    try {
+        if ([IO.Directory]::Exists($sub)) {
+            foreach ($f in [IO.Directory]::GetFiles($sub, '*.jsonl')) { $w = [IO.File]::GetLastWriteTimeUtc($f); if ($w -gt $t) { $t = $w } }
+        }
+    }
+    catch { }
+    return $t
+}
+
+function Format-NotifierApiError {
+    <# .SYNOPSIS Текст ошибки API из журнала → понятная фраза. #>
+    param([AllowEmptyString()][string]$Text)
+    if ($Text -match '(?i)overloaded|\b529\b') { return 'Серверы Anthropic перегружены (529). Повторите запрос чуть позже.' }
+    if ($Text -match '(?i)rate.?limit|\b429\b') { return 'Достигнут лимит запросов. Подождите и повторите.' }
+    if ($Text -match '(?i)usage limit|limit reached|resets') { return "Исчерпан лимит Claude: $Text" }
+    if ($Text -match '(?i)timed? ?out|timeout|ECONNRESET|socket|network|fetch failed|connection') { return "Связь с сервером прервалась: $Text" }
+    if ($Text -match '(?i)\b5\d\d\b|internal server error|api_error') { return "Ошибка на стороне сервера: $Text" }
+    return $Text
+}
+
+Export-ModuleMember -Function Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError

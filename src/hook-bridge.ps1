@@ -64,7 +64,8 @@ function Add-NotifierEventDetails {
         }
         if ($Kind -eq 'prompt' -and $Config.showPrompt) {
             $pr = $hook.PSObject.Properties['prompt']
-            if ($pr -and $pr.Value -is [string]) {
+            # Служебные «сообщения» (отчёт субагента, уведомление о задаче) — не ваш запрос.
+            if ($pr -and $pr.Value -is [string] -and $pr.Value.TrimStart() -notmatch '^<(agent-message|task-notification|system-reminder|command-|local-command)') {
                 $Event | Add-Member -NotePropertyName prompt -NotePropertyValue (Format-NotifierPreview -Text $pr.Value -MaxLength $Config.previewLength) -Force
             }
         }

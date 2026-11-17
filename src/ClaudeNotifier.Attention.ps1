@@ -16,6 +16,10 @@ $script:TrayAlert = $false           # есть запрос, который ж�
 $script:BlinkFrame = ''
 $script:HotKey = $null
 $script:HotKeyText = ''
+$script:StallNotified = @{}          # session_id → с какого момента молчит журнал (о чём уже предупредили)
+$script:ApiErrorNotified = @{}       # session_id → время ошибки API из журнала, о которой уже сообщили
+$script:ApiErrorGraceSec = 20        # столько ждём хука StopFailure, прежде чем сообщить об ошибке из журнала
+$script:ExpandedGroups = @{}         # группы сеансов одного проекта, раскрытые в списке
 
 function Get-NotifierSessionName {
     <# .SYNOPSIS Имя сеанса для уведомлений и карточек: своё (из настроек сеанса) или имя проекта. #>
@@ -75,11 +79,113 @@ function Get-NotifierContextAlerts {
     return $events
 }
 
+# --- «Готово» только после долгих задач ---
+
+function Test-NotifierQuickTask {
+    <#
+    .SYNOPSIS
+    $true — «Готово» не стоит показывать: Claude работал меньше longTasks.minutes минут, а вы за компьютером
+    (ввод был меньше минуты назад). Неизвестно, сколько шла работа, — уведомление показывается.
+    #>
+    param($Session, [Parameter(Mandatory = $true)]$Event, [Parameter(Mandatory = $true)]$Config, [double]$IdleSeconds = 0, [datetime]$Now = [DateTime]::UtcNow)
+    if (-not $Config.longTasks.enabled -or $null -eq $Session) { return $false }
+    if ($IdleSeconds -ge 60) { return $false }
+    $busy = ''
+    if ($Session.PSObject.Properties['busySince']) { $busy = [string]$Session.busySince }
+    if ($busy -eq '' -and [string]$Session.state -eq 'working') { $busy = [string]$Session.since }
+    $start = ConvertTo-NotifierUtc $busy
+    if ($null -eq $start) { return $false }
+    $end = $Now
+    if ($Event.PSObject.Properties['ts']) { $e = ConvertTo-NotifierUtc ([string]$Event.ts); if ($null -ne $e) { $end = $e } }
+    return (($end - $start).TotalMinutes -lt [int]$Config.longTasks.minutes)
+}
+
+# --- Сеанс завис или упал ---
+
+function ConvertTo-NotifierUtc([string]$Ts) {
+    $p = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($Ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$p)) { return $p.UtcDateTime }
+    return $null
+}
+
+function Get-NotifierStallStart {
+    <#
+    .SYNOPSIS
+    Сеанс «Работает», но журнал (и журналы субагентов) не меняется Minutes минут: возвращает момент, с которого тишина
+    (UTC), иначе $null. Отсчёт — не раньше начала работы: «Работает» без записей в журнале тоже считается.
+    #>
+    param([Parameter(Mandatory = $true)]$Session, [datetime]$LastWrite, [int]$Minutes, [datetime]$Now = [DateTime]::UtcNow)
+    if ([string]$Session.state -ne 'working' -or $Minutes -le 0) { return $null }
+    $from = $LastWrite
+    $since = ConvertTo-NotifierUtc ([string]$Session.since)
+    if ($null -ne $since -and $since -gt $from) { $from = $since }
+    if ($from -eq [datetime]::MinValue) { return $null }
+    if (($Now - $from).TotalMinutes -ge $Minutes) { return $from }
+    return $null
+}
+
+function New-NotifierStallEvent {
+    param([Parameter(Mandatory = $true)]$Session, [datetime]$From, [hashtable]$Prefs = @{}, [datetime]$Now = [DateTime]::UtcNow)
+    $name = Get-NotifierSessionName -Session $Session -Prefs $Prefs
+    $mins = [int][Math]::Floor(($Now - $From).TotalMinutes)
+    return [pscustomobject][ordered]@{
+        v          = 1
+        id         = [guid]::NewGuid().ToString()
+        ts         = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        type       = 'error'
+        option     = 'stalled'     # включается своим тумблером, а не тумблером «Ошибка»
+        notifyOnly = $true         # статус сеанса не меняется: если Claude оживёт, карточка сама вернётся к «Работает»
+        session_id = [string]$Session.session_id
+        origin     = [string]$Session.origin
+        project    = [string]$Session.project
+        title      = "Сеанс, похоже, остановился $([char]0x00B7) $name"
+        preview    = "Журнал сеанса не меняется $mins мин. Возможно, Claude завис, оборвалась связь или долго выполняется команда."
+        window     = $Session.window
+    }
+}
+
+function New-NotifierApiErrorEvent {
+    param([Parameter(Mandatory = $true)]$Session, [string]$Text, [hashtable]$Prefs = @{}, [datetime]$Now = [DateTime]::UtcNow)
+    $name = Get-NotifierSessionName -Session $Session -Prefs $Prefs
+    return [pscustomobject][ordered]@{
+        v          = 1
+        id         = [guid]::NewGuid().ToString()
+        ts         = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        type       = 'error'
+        apiError   = $true
+        session_id = [string]$Session.session_id
+        origin     = [string]$Session.origin
+        project    = [string]$Session.project
+        title      = "Ошибка $([char]0x00B7) $name"
+        preview    = (Format-NotifierApiError $Text)
+        window     = $Session.window
+    }
+}
+
+function Test-NotifierApiErrorDue {
+    <#
+    .SYNOPSIS
+    В журнале работающего сеанса — ошибка API после начала работы, о которой ещё не сообщали, и хук StopFailure
+    за ApiErrorGraceSec секунд о ней не сообщил (иначе сеанс уже был бы в статусе «Ошибка»).
+    #>
+    param([Parameter(Mandatory = $true)]$Session, [AllowEmptyString()][string]$ErrorTs, [datetime]$Now = [DateTime]::UtcNow)
+    if ([string]$Session.state -ne 'working' -or $ErrorTs -eq '') { return $false }
+    $sid = [string]$Session.session_id
+    if ($script:ApiErrorNotified[$sid] -eq $ErrorTs) { return $false }
+    $err = ConvertTo-NotifierUtc $ErrorTs
+    $since = ConvertTo-NotifierUtc ([string]$Session.since)
+    if ($null -eq $err -or ($null -ne $since -and $err -le $since)) { return $false }
+    return (($Now - $err).TotalSeconds -ge $script:ApiErrorGraceSec)
+}
+
 function Update-NotifierLiveContext {
     <#
     .SYNOPSIS
     Раз в 15 с: для работающих сеансов этого ПК дочитывает журнал (только новую часть) и обновляет
     заполненность контекста в sessions.json; переход порога — уведомление в очередь трея.
+    Сеанс «Ждёт ответа», в журнале которого появился новый ответ Claude (продолжил сам — например,
+    после отчёта субагента; хук UserPromptSubmit при этом не срабатывает), снова становится «Работает»:
+    в очередь идёт служебное событие working, оно же убирает кнопки быстрого ответа.
     #>
     param([datetime]$Now = [DateTime]::UtcNow, [string]$DataRoot = $script:TrayDataRoot, [switch]$Force)
     if ($null -eq $script:TrayQueue) { return }
@@ -89,18 +195,48 @@ function Update-NotifierLiveContext {
     if ($sessions.Count -eq 0) { return }
     $changed = $false
     $stateDir = Join-Path $DataRoot 'stats'
+    $config = Get-NotifierConfig -DataRoot $DataRoot
+    $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot
     foreach ($s in $sessions) {
         $tp = ''
         if ($s.PSObject.Properties['transcript']) { $tp = [string]$s.transcript }
         $device = ''
         if ($s.PSObject.Properties['device']) { $device = [string]$s.device }
         if ($tp -eq '' -or $device -ne '') { continue }
+        # «Работает», а журнал молчит: отметка на карточке и одно уведомление на каждый такой период тишины.
+        $sid = [string]$s.session_id
+        $from = $null
+        if ($config.stalled.enabled) { $from = Get-NotifierStallStart -Session $s -LastWrite (Get-NotifierJournalWriteTime -Path $tp) -Minutes ([int]$config.stalled.minutes) -Now $Now }
+        if ($null -ne $from) {
+            $mark = $from.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+            if (-not $s.PSObject.Properties['stalledSince'] -or [string]$s.stalledSince -ne $mark) { $s | Add-Member -NotePropertyName stalledSince -NotePropertyValue $mark -Force; $changed = $true }
+            if ($script:StallNotified[$sid] -ne $mark) {
+                $script:StallNotified[$sid] = $mark
+                $script:TrayQueue.Enqueue((New-NotifierStallEvent -Session $s -From $from -Prefs $prefs -Now $Now))
+            }
+        }
+        elseif ($s.PSObject.Properties['stalledSince']) { $s.PSObject.Properties.Remove('stalledSince'); $changed = $true }
         $old = $null
         if ($s.PSObject.Properties['stats']) { $old = $s.stats }
-        # Работающий сеанс — каждый раз; остальные — пока у них нет данных о контексте.
-        if ([string]$s.state -ne 'working' -and $old -and $old.PSObject.Properties['window']) { continue }
+        # Работающий сеанс — каждый раз; ждущий — если журнал менялся после «Готово»; остальные — пока нет данных о контексте.
+        $since = [DateTimeOffset]::MinValue
+        $waiting = [string]$s.state -eq 'waiting' -and [DateTimeOffset]::TryParse([string]$s.since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$since)
+        $touched = $false
+        if ($waiting) { try { $touched = [IO.File]::GetLastWriteTimeUtc($tp) -gt $since.UtcDateTime.AddSeconds(1) } catch { } }
+        if ([string]$s.state -ne 'working' -and -not $touched -and $old -and $old.PSObject.Properties['window']) { continue }
         try { $st = Get-NotifierTranscriptStats -Path $tp -StateDir $stateDir } catch { continue }
         if ($null -eq $st) { continue }
+        if (Test-NotifierApiErrorDue -Session $s -ErrorTs ([string]$st.apiError) -Now $Now) {
+            $script:ApiErrorNotified[$sid] = [string]$st.apiError
+            $script:TrayQueue.Enqueue((New-NotifierApiErrorEvent -Session $s -Text ([string]$st.apiErrorText) -Prefs $prefs -Now $Now))
+        }
+        if ($waiting -and $st.lastActivity -ne '') {
+            $last = [DateTimeOffset]::MinValue
+            if ([DateTimeOffset]::TryParse($st.lastActivity, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$last) -and $last -gt $since) {
+                $script:TrayQueue.Enqueue([pscustomobject]@{ v = 1; type = 'working'; title = 'working'; preview = ''; session_id = [string]$s.session_id
+                        ts = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture) })
+            }
+        }
         if ($old -and $old.PSObject.Properties['window'] -and [int64]$old.context -eq $st.context -and [int64]$old.output -eq $st.output -and [int]$old.tools -eq $st.tools) { continue }
         $s | Add-Member -NotePropertyName stats -NotePropertyValue ([pscustomobject]$st) -Force
         $changed = $true
@@ -109,8 +245,6 @@ function Update-NotifierLiveContext {
         Save-NotifierSessions -Sessions $sessions -DataRoot $DataRoot
         $script:SessionsDirty = $true
     }
-    $config = Get-NotifierConfig -DataRoot $DataRoot
-    $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot
     foreach ($ev in (Get-NotifierContextAlerts -Sessions $sessions -Config $config -Prefs $prefs)) { $script:TrayQueue.Enqueue($ev) }
 }
 

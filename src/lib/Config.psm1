@@ -44,6 +44,9 @@ function Get-NotifierDefaultConfig {
         showPrompt      = $false  # хранить начало запроса пользователя для подробностей сеанса (по умолчанию нет — приватность)
         context         = @{ enabled = $true; warnPercent = 85 }   # уведомление «контекст почти заполнен» (скоро автосжатие)
         hotkey          = @{ enabled = $true }                     # Win+Shift+C — мини-окно у трея
+        stalled         = @{ enabled = $true; minutes = 10 }       # «Работает», но журнал молчит столько минут — «сеанс, похоже, остановился»
+        longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
+        groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
     }
 }
 
@@ -234,6 +237,9 @@ function Get-NotifierConfig {
     Merge-OptionSection $config $user 'approvals' @{ waitSeconds = @(10, 3600); cliWaitSeconds = @(0, 3600); remindMinutes = @(0, 120) } $DataRoot
     Merge-OptionSection $config $user 'context' @{ warnPercent = @(50, 99) } $DataRoot
     Merge-OptionSection $config $user 'hotkey' @{} $DataRoot
+    Merge-OptionSection $config $user 'stalled' @{ minutes = @(3, 120) } $DataRoot
+    Merge-OptionSection $config $user 'longTasks' @{ minutes = @(1, 60) } $DataRoot
+    Merge-OptionSection $config $user 'groups' @{ minSessions = @(2, 20) } $DataRoot
     Merge-OptionSection $config $user 'quickReplies' @{ minutes = @(1, 240) } $DataRoot
     $showPrompt = Get-JsonProperty $user 'showPrompt'
     if ($showPrompt.found) {

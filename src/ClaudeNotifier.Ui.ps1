@@ -68,6 +68,12 @@ function ConvertTo-NotifierSessionCard {
     if ($Session.PSObject.Properties['device']) { $deviceId = [string]$Session.device }
     $card.Section = Get-NotifierDeviceName $deviceId   # группа списка — устройство, как в Настройках iOS
     $card.Right = Format-NotifierElapsed -Ts ([string]$Session.since) -Now $Now
+    # «Работает», но журнал давно молчит — красная точка и сколько уже тишина.
+    if ([string]$Session.state -eq 'working' -and $Session.PSObject.Properties['stalledSince'] -and [string]$Session.stalledSince -ne '') {
+        $card.State = 'error'
+        $card.StateText = 'Похоже, остановился'
+        $card.Right = Format-NotifierElapsed -Ts ([string]$Session.stalledSince) -Now $Now
+    }
     $card.Preview = [string]$Session.preview
     $card.Tag = $Session
     $card.Details = Format-NotifierSessionDetails -Session $Session -Now $Now
@@ -95,14 +101,99 @@ function Update-NotifierSessionsView {
         $warn = [int]$cfg.context.warnPercent
         $script:RemindMinutes = [int]$cfg.approvals.remindMinutes
     }
+    $minGroup = 4
+    if ($script:TrayDataRoot) { $minGroup = 0; if ($cfg.groups.enabled) { $minGroup = [int]$cfg.groups.minSessions } }
     $pinned = @($prefs.Keys | Where-Object { $prefs[$_].pinned })
     $cardsSorted = @(foreach ($x in (Get-NotifierSortedSessions -Sessions $Sessions -Pinned $pinned)) { ConvertTo-NotifierSessionCard -Session $x -Now $Now -Prefs $prefs -ContextWarn $warn })
-    $order = New-Object System.Collections.ArrayList
-    foreach ($c in $cardsSorted) { if (-not $order.Contains($c.Section)) { [void]$order.Add($c.Section) } }
-    $list = New-Object 'System.Collections.Generic.List[ClaudeNotifier.Ui.CardItem]'
-    foreach ($section in $order) { foreach ($c in $cardsSorted) { if ($c.Section -eq $section) { $list.Add($c) } } }
-    $Cards.SetItems($list)
+    $Cards.SetItems((Get-NotifierGroupedCards -Cards $cardsSorted -MinSessions $minGroup))
     return (Format-NotifierSessionsSubtitle -Sessions $Sessions)
+}
+
+function Get-NotifierCardSession {
+    <# .SYNOPSIS Сеанс карточки (у карточки с запросом Tag = @{ Session; Request }); у строки-группы — $null. #>
+    param([Parameter(Mandatory = $true)]$Card)
+    $s = $Card.Tag
+    if ($s -is [hashtable]) { if ($s.ContainsKey('Session')) { return $s.Session }; return $null }
+    return $s
+}
+
+function Format-NotifierSessionCount([int]$N) {
+    $w = 'сеансов'
+    if ($N % 10 -eq 1 -and $N % 100 -ne 11) { $w = 'сеанс' }
+    elseif (@(2, 3, 4) -contains ($N % 10) -and @(12, 13, 14) -notcontains ($N % 100)) { $w = 'сеанса' }
+    return "$N $w"
+}
+
+function New-NotifierGroupCard {
+    <# .SYNOPSIS Строка-группа: проект, сколько сеансов и в каких статусах; точка — самый срочный статус. #>
+    param([string]$Key, [string]$Section, [string]$Project, [object[]]$Members, [bool]$Open)
+    $g = New-Object ClaudeNotifier.Ui.CardItem
+    $g.Id = "group:$Key"
+    $g.Section = $Section
+    $g.Title = $Project
+    $g.IsGroup = $true
+    $g.GroupOpen = $Open
+    $g.Tag = @{ Group = $Key }
+    $states = @($Members | ForEach-Object { [string]$_.State })
+    foreach ($st in @('permission', 'error', 'waiting', 'working')) { if ($states -contains $st) { $g.State = $st; break } }
+    $g.StateText = Format-NotifierSessionCount $Members.Count
+    $parts = @()
+    foreach ($st in @('permission', 'error', 'waiting', 'working')) {
+        $n = @($Members | Where-Object { [string]$_.State -eq $st }).Count
+        if ($n -gt 0) { $parts += "$(Get-NotifierSessionStateText $st) $n" }
+    }
+    $g.Meta = $parts -join " $([char]0x00B7) "
+    return $g
+}
+
+function Get-NotifierGroupedCards {
+    <#
+    .SYNOPSIS
+    Карточки по группам-устройствам; если сеансов не меньше MinSessions, сеансы одного проекта на одном устройстве
+    сворачиваются в строку-группу. Свёрнутая группа всё равно показывает сеансы, которые ждут решения (запрос, ошибка);
+    закреплённые сеансы в группы не попадают. MinSessions = 0 — без групп.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Cards, [int]$MinSessions = 4, [hashtable]$Expanded = $script:ExpandedGroups)
+    if ($null -eq $Expanded) { $Expanded = @{} }
+    $list = New-Object 'System.Collections.Generic.List[ClaudeNotifier.Ui.CardItem]'
+    $order = New-Object System.Collections.ArrayList
+    foreach ($c in $Cards) { if (-not $order.Contains($c.Section)) { [void]$order.Add($c.Section) } }
+    $grouping = $MinSessions -gt 0 -and $Cards.Count -ge $MinSessions
+    $keyOf = { param($c) $s = Get-NotifierCardSession $c; if ($null -eq $s -or $c.Pinned -or [string]$s.project -eq '') { return '' }; return "$($c.Section)|$([string]$s.project)" }
+    $members = @{}
+    if ($grouping) {
+        foreach ($c in $Cards) {
+            $k = & $keyOf $c
+            if ($k -eq '') { continue }
+            if (-not $members.ContainsKey($k)) { $members[$k] = New-Object System.Collections.ArrayList }
+            [void]$members[$k].Add($c)
+        }
+    }
+    foreach ($section in $order) {
+        $done = @{}
+        foreach ($c in $Cards) {
+            if ($c.Section -ne $section) { continue }
+            $k = ''
+            if ($grouping) { $k = & $keyOf $c }
+            if ($k -eq '' -or $members[$k].Count -lt 2) { $list.Add($c); continue }
+            if ($done.ContainsKey($k)) { continue }
+            $done[$k] = $true
+            $open = $Expanded.ContainsKey($k)
+            $list.Add((New-NotifierGroupCard -Key $k -Section $section -Project ([string](Get-NotifierCardSession $c).project) -Members @($members[$k]) -Open $open))
+            foreach ($m in $members[$k]) {
+                $needs = $m.ForceExpand -or @('permission', 'error') -contains [string]$m.State
+                if ($open -or $needs) { $m.Child = $true; $list.Add($m) }
+            }
+        }
+    }
+    return , $list
+}
+
+function Switch-NotifierSessionGroup {
+    <# .SYNOPSIS Щелчок по строке-группе: раскрыть или свернуть. #>
+    param([Parameter(Mandatory = $true)]$Item)
+    $k = [string]$Item.Tag.Group
+    if ($script:ExpandedGroups.ContainsKey($k)) { $script:ExpandedGroups.Remove($k) } else { $script:ExpandedGroups[$k] = $true }
 }
 
 function Format-NotifierSessionsSubtitle {
@@ -512,9 +603,12 @@ function New-NotifierSessionsForm {
                     if ($notice) { Show-NotifierNotice $notice }
                     [void](Invoke-NotifierSessionsRefresh)
                 }
-                'open' { Invoke-NotifierSelectedSession -Action focus }
-                'delete' { Invoke-NotifierSelectedSession -Action remove }
-                'context' { Show-NotifierSessionMenu -Menu $script:SessionsForm.Tag.Menu -Cards $sender -Item $e.Item -Location $e.Location }
+                'open' {
+                    if ($e.Item.IsGroup) { Switch-NotifierSessionGroup -Item $e.Item; [void](Invoke-NotifierSessionsRefresh) }
+                    else { Invoke-NotifierSelectedSession -Action focus }
+                }
+                'delete' { if (-not $e.Item.IsGroup) { Invoke-NotifierSelectedSession -Action remove } }
+                'context' { if (-not $e.Item.IsGroup) { Show-NotifierSessionMenu -Menu $script:SessionsForm.Tag.Menu -Cards $sender -Item $e.Item -Location $e.Location } }
             }
         })
 

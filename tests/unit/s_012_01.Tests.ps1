@@ -137,6 +137,42 @@ Describe 's_012_01 · контекст, подробности, напомина
         $script:TrayQueue.IsEmpty | Should Be $true
     }
 
+    It 'сеанс «Ждёт ответа», который продолжил сам (новый ответ в журнале), снова «Работает», быстрые ответы убираются' {
+        $script:TrayDataRoot = Join-Path $TestDrive 'resume'
+        New-Item -ItemType Directory (Join-Path $script:TrayDataRoot 'requests') -Force | Out-Null
+        $script:TrayQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $tr = Join-Path $TestDrive 'resume.jsonl'
+        Write-Lines $tr $script:T1   # последний ответ — 07:03
+        $sess = { param($since) [pscustomobject]@{ session_id = 'R'; project = 'shop'; origin = 'desktop'; device = ''; state = 'waiting'; since = $since; updated = $since; transcript = $tr; window = $null } }
+        # Ждёт по-настоящему: «Готово» в 07:03:30, журнал после этого не менялся по смыслу.
+        (Get-Item $tr).LastWriteTimeUtc = [datetime]'2026-11-17T07:03:30Z'
+        Save-NotifierSessions -DataRoot $script:TrayDataRoot -Sessions @(& $sess '2026-11-17T07:03:30.000Z')
+        Update-NotifierLiveContext -Force
+        @($script:TrayQueue.ToArray() | Where-Object { $_.type -eq 'working' }).Count | Should Be 0
+        # Журнал дописан после «Готово», но новых ответов нет (служебная строка) — по-прежнему ждёт.
+        Write-Lines $tr @('{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-17T07:03:31.000Z"}') -Append
+        Update-NotifierLiveContext -Force
+        @($script:TrayQueue.ToArray() | Where-Object { $_.type -eq 'working' }).Count | Should Be 0
+        # Claude продолжил: новый ответ после «Готово».
+        Write-Lines $tr @('{"type":"assistant","timestamp":"2026-11-17T07:05:00.000Z","message":{"model":"claude-sonnet-4-5","id":"msg_9","content":[],"usage":{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":3}}}') -Append
+        [void](New-NotifierReplyWait -SessionId 'R' -Minutes 5 -DataRoot $script:TrayDataRoot)
+        Update-NotifierLiveContext -Force
+        Invoke-NotifierEventBatch -Queue $script:TrayQueue -DataRoot $script:TrayDataRoot -NoOutput | Out-Null
+        (@(Get-NotifierSessions -DataRoot $script:TrayDataRoot)[0]).state | Should Be 'working'
+        (Get-NotifierPendingRequests -DataRoot $script:TrayDataRoot).Replies.ContainsKey('R') | Should Be $false
+    }
+
+    It 'служебное сообщение (отчёт субагента) не сохраняется как «ваш запрос»' {
+        $root = Join-Path $TestDrive 'pr'
+        New-Item -ItemType Directory $root -Force | Out-Null
+        $cfg = Get-NotifierConfig -DataRoot $root; $cfg.showPrompt = $true
+        $ev = [pscustomobject]@{ type = 'working' }
+        Add-NotifierEventDetails -Event $ev -Kind prompt -InputJson '{"session_id":"x","prompt":"<agent-message from=\"a1\"> [Subagent hand-back] report"}' -Config $cfg -DataRoot $root
+        $null -eq $ev.PSObject.Properties['prompt'] | Should Be $true
+        Add-NotifierEventDetails -Event $ev -Kind prompt -InputJson '{"session_id":"x","prompt":"Сделай <b>жирным</b>"}' -Config $cfg -DataRoot $root
+        $ev.prompt | Should Be 'Сделай <b>жирным</b>'
+    }
+
     It 'напоминания: через remindMinutes, не чаще раза в remindMinutes, не больше 3 раз; мигание точки' {
         $script:Reminders = @{}
         $cfg = Get-NotifierDefaultConfig

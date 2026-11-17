@@ -66,10 +66,24 @@ namespace ClaudeNotifier {
     public static class TrayNative {
         [System.Runtime.InteropServices.DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(System.IntPtr h);
         [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct LastInput { public uint cbSize; public uint dwTime; }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LastInput info);
+        // Сколько секунд не было ввода с клавиатуры и мыши.
+        public static double IdleSeconds() {
+            LastInput i = new LastInput(); i.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(i);
+            if (!GetLastInputInfo(ref i)) return 0;
+            return unchecked((uint)System.Environment.TickCount - i.dwTime) / 1000.0;
+        }
     }
 }
 '@
     }
+}
+
+function Get-NotifierIdleSeconds {
+    <# .SYNOPSIS Сколько секунд пользователь не трогал клавиатуру и мышь (0 — не удалось узнать). #>
+    try { Import-TrayNative; return [ClaudeNotifier.TrayNative]::IdleSeconds() } catch { return 0 }
 }
 
 function Invoke-AllowForeground {
@@ -203,10 +217,16 @@ function Invoke-NotifierEventBatch {
                 try { Remove-NotifierReplyWait -SessionId ([string]$event.session_id) -DataRoot $DataRoot } catch { }
             }
             if ($remote -eq 'drop') { continue }
-            # Статус сеанса обновляется для любого события, даже если уведомление этого типа выключено.
+            # Статус сеанса обновляется для любого события, даже если уведомление этого типа выключено
+            # (кроме notifyOnly — «сеанс, похоже, остановился»: статус не меняется).
+            $notifyOnly = $event.PSObject.Properties['notifyOnly'] -and $event.notifyOnly
+            $before = $null
             try {
                 if ($null -eq $sessions) { $sessions = @(Get-NotifierSessions -DataRoot $DataRoot) }
-                $sessions = Update-NotifierSessionList -Sessions $sessions -Event $event
+                if ($event.PSObject.Properties['session_id'] -and $event.session_id) {
+                    $before = @($sessions | Where-Object { [string]$_.session_id -eq [string]$event.session_id }) | Select-Object -First 1
+                }
+                if (-not $notifyOnly) { $sessions = Update-NotifierSessionList -Sessions $sessions -Event $event }
             }
             catch { Write-NotifierLog -Level ERROR -Message "tray: статус сеанса не обновлён: $($_.Exception.Message)" -DataRoot $DataRoot }
             if ($event.type -eq 'request') { $event.type = 'permission' }   # уведомление, звук и история — как «Нужно разрешение»
@@ -217,12 +237,22 @@ function Invoke-NotifierEventBatch {
                 if ($null -eq $prefs) { $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot }
                 if (Test-NotifierSessionMuted ([string]$event.session_id) $prefs) { $shown++; continue }
             }
-            # Предупреждение о контексте включается своим тумблером, а не тумблером «Лимит».
-            $isContext = $event.PSObject.Properties['context'] -and $event.context
-            if (-not $isContext -and -not $config.events[$event.type].enabled) { continue }
+            # Предупреждение о контексте и «сеанс остановился» включаются своими тумблерами, а не тумблерами типа.
+            $option = ''
+            if ($event.PSObject.Properties['option']) { $option = [string]$event.option }
+            elseif ($event.PSObject.Properties['context'] -and $event.context) { $option = 'context' }
+            if ($option -ne '') { if (-not $config[$option].enabled) { continue } }
+            elseif (-not $config.events[$event.type].enabled) { continue }
+            # «Готово» после короткой задачи, пока вы за компьютером, — без уведомления и звука (в истории остаётся).
+            $quiet = $event.type -eq 'done' -and (Test-NotifierQuickTask -Session $before -Event $event -Config $config -IdleSeconds (Get-NotifierIdleSeconds))
             # В историю — до показа: клик по toast сразу ищет событие в history.json.
             try { [void](Add-NotifierHistory -Event $event -DataRoot $DataRoot) }
             catch { Write-NotifierLog -Level ERROR -Message "tray: история не записана: $($_.Exception.Message)" -DataRoot $DataRoot }
+            if ($quiet) {
+                $shown++
+                Write-NotifierLog -Level INFO -Message "tray: 'done' без уведомления — короткая задача" -DataRoot $DataRoot
+                continue
+            }
             if (-not $NoOutput) {
                 [void](Show-NotifierToast -Event $event -DataRoot $DataRoot)
                 [void](Invoke-NotifierSound -Type $event.type -Config $config -DataRoot $DataRoot)

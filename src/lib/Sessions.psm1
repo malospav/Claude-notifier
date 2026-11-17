@@ -131,6 +131,10 @@ function Update-NotifierSessionList {
     $transcript = ''
     if ($old) { $transcript = [string](Get-Prop $old 'transcript') }
     if (Get-Prop $Event 'transcript') { $transcript = [string](Get-Prop $Event 'transcript') }
+    # С какого момента Claude занят задачей: начало работы после ожидания (переходы «работает» ↔ «нужно разрешение» — та же задача).
+    $busy = ''
+    if ($old) { $busy = [string](Get-Prop $old 'busySince') }
+    if ($state -eq 'working' -and ($busy -eq '' -or -not $old -or @('working', 'permission') -notcontains [string](Get-Prop $old 'state'))) { $busy = $ts }
     $prompt = ''
     if ($old) { $prompt = [string](Get-Prop $old 'prompt') }
     if (Get-Prop $Event 'prompt') { $prompt = [string](Get-Prop $Event 'prompt') }
@@ -144,6 +148,7 @@ function Update-NotifierSessionList {
         since      = $since
         updated    = $ts
         started    = $started
+        busySince  = $busy
         preview    = $preview
         prompt     = $prompt
         stats      = $stats

@@ -338,6 +338,9 @@ namespace ClaudeNotifier.Ui {
         public bool Pinned;              // закреплён сверху — значок булавки
         public bool Muted;               // без уведомлений — значок «без звука»
         public bool Urgent;              // запрос давно ждёт ответа — точка пульсирует сильнее
+        public bool IsGroup;             // строка-группа (сеансы одного проекта): стрелка справа, щелчок раскрывает или сворачивает
+        public bool GroupOpen;           // группа раскрыта — стрелка вниз
+        public bool Child;               // сеанс внутри раскрытой группы — с отступом
         public object Tag;
     }
 
@@ -421,7 +424,7 @@ namespace ClaudeNotifier.Ui {
             Raise("act:" + actionId, Point.Empty);
         }
 
-        bool IsExpanded(int i) { return items[i].ForceExpand || (ExpandSelected && i == selected && !items[i].IsAction); }
+        bool IsExpanded(int i) { return items[i].ForceExpand || (ExpandSelected && i == selected && !items[i].IsAction && !items[i].IsGroup); }
 
         int TextWidth() { return Math.Max(theme.S(120), ClientSize.Width - theme.S(2) - theme.S(16) * 2 - theme.S(22)); }
 
@@ -568,7 +571,8 @@ namespace ClaudeNotifier.Ui {
                 Draw.Fill(g, new RectangleF(r.X + inset, r.Y + inset * 0.6f, r.Width - 2 * inset, r.Height - inset * 1.2f), theme.S(8), fill);
             }
             int pad = theme.S(16);
-            int textX = r.X + pad + theme.S(22);
+            int indent = it.Child ? theme.S(18) : 0;
+            int textX = r.X + pad + indent + theme.S(22);
             Color title = active ? theme.AccentText : theme.Text;
             Color muted = active ? Color.FromArgb(215, theme.AccentText) : theme.Muted;
 
@@ -582,7 +586,7 @@ namespace ClaudeNotifier.Ui {
             } else {
                 int line1 = r.Y + theme.S(10), lh = theme.S(19);
                 Color dot = theme.State(it.State);
-                float dcx = r.X + pad + theme.S(5), dcy = line1 + lh / 2f, dd = theme.S(9);
+                float dcx = r.X + pad + indent + theme.S(5), dcy = line1 + lh / 2f, dd = theme.S(9);
                 if ((it.State == "working" || it.Urgent) && pulseTimer.Enabled) {
                     // Мягкий «пульс»: кольцо расходится и тает за 1,6 с. Давно ждущий запрос — вдвое чаще и шире.
                     float ph = it.Urgent ? (pulse * 2f) % 1f : pulse;
@@ -594,6 +598,14 @@ namespace ClaudeNotifier.Ui {
                 if (active && !it.HollowDot) using (Pen ring = new Pen(theme.AccentText, 1.4f)) g.DrawEllipse(ring, dcx - dd / 2, dcy - dd / 2, dd, dd);
                 int rightW = Draw.Width(g, it.Right, fSmall);
                 int rightX = r.Right - pad - rightW;
+                if (it.IsGroup) {
+                    // Стрелка группы: вправо — свёрнута, вниз — раскрыта (Segoe Fluent Icons: ChevronRight / ChevronDown).
+                    int cw = theme.S(16);
+                    rightX -= cw + (rightW > 0 ? theme.S(6) : 0);
+                    TextRenderer.DrawText(g, it.GroupOpen ? "\uE70D" : "\uE76C", fIcon, new Rectangle(r.Right - pad - cw, line1, cw, lh), muted,
+                        TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    if (rightW > 0) rightX = r.Right - pad - cw - theme.S(6) - rightW;
+                }
                 // Значки «закреплён» и «без уведомлений» — перед временем.
                 string icons = (it.Pinned ? "" : "") + (it.Muted ? "" : "");
                 int iconsX = rightX;
@@ -731,7 +743,7 @@ namespace ClaudeNotifier.Ui {
                 return;
             }
             int h = HitTest(e.Location);
-            bool action = pressed >= 0 && h == pressed && e.Button == MouseButtons.Left && items[h].IsAction;
+            bool action = pressed >= 0 && h == pressed && e.Button == MouseButtons.Left && (items[h].IsAction || items[h].IsGroup);
             pressed = -1; Invalidate();
             if (action) Raise("open", e.Location);   // строка-действие срабатывает одним щелчком
         }
@@ -740,7 +752,7 @@ namespace ClaudeNotifier.Ui {
             base.OnMouseDoubleClick(e);
             if (HitButton(e.Location) != null) return;
             int h = HitTest(e.Location);
-            if (e.Button == MouseButtons.Left && h >= 0 && !items[h].IsAction) Raise("open", e.Location);
+            if (e.Button == MouseButtons.Left && h >= 0 && !items[h].IsAction && !items[h].IsGroup) Raise("open", e.Location);
         }
 
         protected override void OnMouseWheel(MouseEventArgs e) {

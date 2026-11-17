@@ -72,7 +72,9 @@ function New-NotifierPopover {
                 if ($notice -and $script:Popover -and -not $script:Popover.IsDisposed) { $script:Popover.Tag.Sub.Text = $notice; $script:PopoverNoticeUntil = [datetime]::UtcNow.AddSeconds(4) }
                 [void](Invoke-NotifierSessionsRefresh)
             }
+            elseif ($e.Action -eq 'open' -and $e.Item.IsGroup) { Switch-NotifierSessionGroup -Item $e.Item; [void](Invoke-NotifierSessionsRefresh) }
             elseif ($e.Action -eq 'open') { Close-NotifierPopover; Show-NotifierSessionsWindow -Tab 0 }
+            elseif ($e.Action -eq 'context' -and $e.Item.IsGroup) { }
             elseif ($e.Action -eq 'context') { Show-NotifierSessionMenu -Menu $script:Popover.Tag.Menu -Cards $sender -Item $e.Item -Location $e.Location -Source popover }
         })
 

@@ -209,6 +209,7 @@ function Get-NotifierSessionsPayload {
         if ($s.PSObject.Properties['device']) { $dev = [string]$s.device }
         $devName = $names[$dev]
         if ($null -eq $devName) { $devName = 'Устройство отключено' }
+        $stalled = [string]$s.state -eq 'working' -and $s.PSObject.Properties['stalledSince'] -and [string]$s.stalledSince -ne ''
         $items += [ordered]@{
             device      = $dev
             device_name = $devName
@@ -216,9 +217,9 @@ function Get-NotifierSessionsPayload {
             title       = $(if ($prefs.ContainsKey([string]$s.session_id) -and $prefs[[string]$s.session_id].title) { [string]$prefs[[string]$s.session_id].title } else { [string]$s.project })
             pinned      = ($prefs.ContainsKey([string]$s.session_id) -and [bool]$prefs[[string]$s.session_id].pinned)
             context     = $(if ($s.PSObject.Properties['stats'] -and $s.stats -and $s.stats.PSObject.Properties['window']) { [int]$s.stats.percent } else { -1 })
-            state       = [string]$s.state
-            state_text  = (Get-NotifierSessionStateText ([string]$s.state))
-            elapsed     = (Format-NotifierElapsed -Ts ([string]$s.since) -Now $Now)
+            state       = $(if ($stalled) { 'error' } else { [string]$s.state })
+            state_text  = $(if ($stalled) { 'Похоже, остановился' } else { Get-NotifierSessionStateText ([string]$s.state) })
+            elapsed     = $(if ($stalled) { Format-NotifierElapsed -Ts ([string]$s.stalledSince) -Now $Now } else { Format-NotifierElapsed -Ts ([string]$s.since) -Now $Now })
             origin      = [string]$s.origin
             preview     = [string]$s.preview
             id          = [string]$s.session_id

@@ -105,6 +105,7 @@ function ConvertTo-NotifierStatsCards {
             $c.HollowDot = $true
             $c.StateText = Format-NotifierDuration ([int64]$p.seconds)
             $c.Meta = "запросов $([int]$p.prompts)"
+            if ($p.PSObject.Properties['cost'] -and [double]$p.cost -gt 0) { $c.Meta += "  $([char]0x00B7)  $(Format-NotifierCost ([double]$p.cost))" }
             $c.Right = "$(Format-NotifierTokensShort ([int64]$p.tokens)) токенов"
             $list.Add($c)
         }
@@ -146,7 +147,7 @@ function New-NotifierStatsPage {
     $list.ExpandSelected = $false
     $list.EmptyTitle = 'Пока нет данных'
     $list.EmptyHint = 'Статистика появится после первых ответов Claude на этом ПК.'
-    $list.Footer = 'Из журналов Claude Code на этом ПК (CLI и приложение Claude). Токены — ответы Claude; время — пока сеанс активен, паузы дольше 5 минут не считаются.'
+    $list.Footer = 'Из журналов Claude Code на этом ПК (CLI и приложение Claude). Токены — ответы Claude; время — пока сеанс активен, паузы дольше 5 минут не считаются. Стоимость — примерная, по ценам API Anthropic (вход, кэш и ответы); с подпиской Claude вы платите по её тарифу.'
     $page.Controls.Add($list); $page.Controls.Add($gap); $page.Controls.Add($card)
     return @{ Page = $page; Chart = $chart; Summary = $summary; SummarySub = $sub; List = $list }
 }
@@ -155,7 +156,9 @@ function Format-NotifierStatsSubtitle {
     $s = $script:ActivitySummary
     if ($null -eq $s) { return 'Токены и время работы по проектам' }
     $today = @($s.Days)[-1]
-    return "Сегодня: $(Format-NotifierTokensShort ([int64]$today.tokens)) токенов $([char]0x00B7) $(Format-NotifierDuration ([int64]$today.seconds))"
+    $text = "Сегодня: $(Format-NotifierTokensShort ([int64]$today.tokens)) токенов $([char]0x00B7) $(Format-NotifierDuration ([int64]$today.seconds))"
+    if ($today.PSObject.Properties['cost'] -and [double]$today.cost -gt 0) { $text += " $([char]0x00B7) $([char]0x2248) $(Format-NotifierCost ([double]$today.cost))" }
+    return $text
 }
 
 function Update-NotifierStatsView {
@@ -172,6 +175,7 @@ function Update-NotifierStatsView {
     $c = ConvertTo-NotifierStatsChart -Summary $s
     $ui.Chart.SetData($c.Values, $c.Labels, $c.ValueLabels, $c.Highlight)
     $ui.Summary.Text = "За 7 дней: $(Format-NotifierTokensShort ([int64]$s.Total.tokens)) токенов $([char]0x00B7) $(Format-NotifierDuration ([int64]$s.Total.seconds))"
+    if ($s.Total.PSObject.Properties['cost'] -and [double]$s.Total.cost -gt 0) { $ui.Summary.Text += " $([char]0x00B7) $([char]0x2248) $(Format-NotifierCost ([double]$s.Total.cost))" }
     $ui.SummarySub.Text = "Запросов $([int]$s.Total.prompts) $([char]0x00B7) проектов $(@($s.Week).Count) $([char]0x00B7) обновлено в $($s.Updated.ToString('HH:mm'))"
     $ui.List.SetItems((ConvertTo-NotifierStatsCards -Summary $s))
     if ($form.Tag.Tabs.SelectedIndex -eq 3 -and [datetime]::UtcNow -ge $script:NoticeUntil) { $form.Tag.Subtitle.Text = Format-NotifierStatsSubtitle }
