@@ -35,6 +35,37 @@ function Get-NotifierDefaultConfig {
         limitThresholds = @(80, 90)
         previewLength   = 200
         chainStatusLine = $null   # прежний statusLine пользователя (объект из settings.json), вызывается перед нашим
+        # Ответы из приложения: запросы разрешения (хук PermissionRequest ждёт решения до waitSeconds)
+        # и быстрые ответы после «Готово» (хук Stop с asyncRewake ждёт до minutes минут).
+        # cliWaitSeconds: в CLI хук может выполняться до показа диалога — по умолчанию не ждём, чтобы не задерживать его.
+        # remindMinutes: запрос висит без ответа — повторить уведомление через столько минут (до 3 раз; 0 — не напоминать).
+        approvals       = @{ enabled = $true; waitSeconds = 600; cliWaitSeconds = 0; remindMinutes = 3 }
+        quickReplies    = @{ enabled = $true; minutes = 60 }
+        showPrompt      = $false  # хранить начало запроса пользователя для подробностей сеанса (по умолчанию нет — приватность)
+        context         = @{ enabled = $true; warnPercent = 85 }   # уведомление «контекст почти заполнен» (скоро автосжатие)
+        hotkey          = @{ enabled = $true }                     # Win+Shift+C — мини-окно у трея
+    }
+}
+
+function Merge-OptionSection($Config, $User, [string]$Name, [hashtable]$Ranges, [string]$DataRoot) {
+    # Раздел-объект с полем enabled (bool) и целыми полями из Ranges: @{ поле = @(min, max) }.
+    $sec = Get-JsonProperty $User $Name
+    if (-not $sec.found) { return }
+    if ($sec.value -isnot [System.Management.Automation.PSCustomObject]) {
+        Write-NotifierLog -Level WARN -Message "config.json: '$Name' должно быть объектом; используются значения по умолчанию" -DataRoot $DataRoot
+        return
+    }
+    $enabled = Get-JsonProperty $sec.value 'enabled'
+    if ($enabled.found) {
+        if ($enabled.value -is [bool]) { $Config[$Name].enabled = $enabled.value }
+        else { Write-NotifierLog -Level WARN -Message "config.json: '$Name.enabled' должно быть true/false" -DataRoot $DataRoot }
+    }
+    foreach ($field in $Ranges.Keys) {
+        $v = Get-JsonProperty $sec.value $field
+        if (-not $v.found) { continue }
+        $r = $Ranges[$field]
+        if ((Test-IsInteger $v.value) -and $v.value -ge $r[0] -and $v.value -le $r[1]) { $Config[$Name][$field] = [int]$v.value }
+        else { Write-NotifierLog -Level WARN -Message "config.json: '$Name.$field' должно быть целым от $($r[0]) до $($r[1])" -DataRoot $DataRoot }
     }
 }
 
@@ -80,7 +111,8 @@ function Get-NotifierEventTitle {
         [ValidateSet('done', 'permission', 'error', 'limit')]
         [string]$Type
     )
-    return $NotifierStrings[$Type]
+    # Своя таблица, а не $NotifierStrings: переменная модуля бывает пустой, если модуль перезагружают с -Force.
+    switch ($Type) { 'done' { return 'Готово' } 'permission' { return 'Нужно разрешение' } 'error' { return 'Ошибка' } 'limit' { return 'Лимит' } }
 }
 
 function Test-IsInteger($Value) {
@@ -197,6 +229,16 @@ function Get-NotifierConfig {
         else {
             Write-NotifierLog -Level WARN -Message "config.json: 'chainStatusLine' должно быть объектом с полем command; прежняя строка статуса не вызывается" -DataRoot $DataRoot
         }
+    }
+
+    Merge-OptionSection $config $user 'approvals' @{ waitSeconds = @(10, 3600); cliWaitSeconds = @(0, 3600); remindMinutes = @(0, 120) } $DataRoot
+    Merge-OptionSection $config $user 'context' @{ warnPercent = @(50, 99) } $DataRoot
+    Merge-OptionSection $config $user 'hotkey' @{} $DataRoot
+    Merge-OptionSection $config $user 'quickReplies' @{ minutes = @(1, 240) } $DataRoot
+    $showPrompt = Get-JsonProperty $user 'showPrompt'
+    if ($showPrompt.found) {
+        if ($showPrompt.value -is [bool]) { $config.showPrompt = $showPrompt.value }
+        else { Write-NotifierLog -Level WARN -Message "config.json: 'showPrompt' должно быть true/false" -DataRoot $DataRoot }
     }
 
     return $config

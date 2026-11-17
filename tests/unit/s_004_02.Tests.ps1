@@ -144,7 +144,7 @@ Describe 's_004_02 · statusLine в установщике' {
         $sl.type | Should Be 'command'
         $sl.command | Should Be ((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe').Replace('\', '/') + ' -NoProfile -NonInteractive -File "' + (Join-Path $e.Data 'app\statusline.ps1').Replace('\', '/') + '"')
         Test-Path (Join-Path $e.Data 'config.json') | Should Be $false
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $null -eq (Read-Json $e.Settings).PSObject.Properties['statusLine'] | Should Be $true
     }
 
@@ -159,7 +159,7 @@ Describe 's_004_02 · statusLine в установщике' {
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         (Read-Json (Join-Path $e.Data 'config.json')).chainStatusLine.command | Should Be '~/.claude/my.sh'
 
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $s = Read-Json $e.Settings
         $s.statusLine.command | Should Be '~/.claude/my.sh'
         $s.statusLine.padding | Should Be 1

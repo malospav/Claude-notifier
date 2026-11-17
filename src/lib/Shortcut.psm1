@@ -114,21 +114,47 @@ function Get-NotifierLauncherCommand {
     Что запускает ярлык: conhost --headless powershell … ClaudeNotifier.Tray.ps1 -Show. Окна консоли нет;
     если трей уже работает, он просто откроет окно «Сеансы».
     #>
-    param([Parameter(Mandatory = $true)][string]$AppRoot)
+    param([Parameter(Mandatory = $true)][string]$AppRoot, [switch]$Background)
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $tray = Join-Path $AppRoot 'ClaudeNotifier.Tray.ps1'
+    $show = ' -Show'
+    if ($Background) { $show = '' }   # автозапуск: только точка в трее, без окна
     return @{
         Target    = (Join-Path $env:SystemRoot 'System32\conhost.exe')
-        Arguments = "--headless `"$ps`" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tray`" -Show"
+        Arguments = "--headless `"$ps`" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tray`"$show"
     }
+}
+
+function Get-NotifierAutostartPath {
+    param([string]$StartupDir = ([Environment]::GetFolderPath('Startup')))
+    return (Join-Path $StartupDir $script:LinkName)
+}
+
+function Test-NotifierAutostart {
+    <# .SYNOPSIS Включён ли запуск при входе в Windows (ярлык в папке «Автозагрузка»). #>
+    param([string]$StartupDir = ([Environment]::GetFolderPath('Startup')))
+    return (Test-Path -LiteralPath (Get-NotifierAutostartPath -StartupDir $StartupDir))
+}
+
+function Set-NotifierAutostart {
+    <# .SYNOPSIS Включает или выключает запуск при входе в Windows: ярлык в «Автозагрузке» запускает трей без окна. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][bool]$Enabled,
+        [Parameter(Mandatory = $true)][string]$AppRoot,
+        [string]$StartupDir = ([Environment]::GetFolderPath('Startup'))
+    )
+    $path = Get-NotifierAutostartPath -StartupDir $StartupDir
+    if ($Enabled) { New-NotifierShortcut -Path $path -AppRoot $AppRoot -Background }
+    elseif (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
 
 function New-NotifierShortcut {
     <# .SYNOPSIS Создаёт ярлык Claude Notifier (иконка приложения, AppUserModelID) по пути Path. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$AppRoot)
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$AppRoot, [switch]$Background)
     Import-NotifierShellLink
-    $cmd = Get-NotifierLauncherCommand -AppRoot $AppRoot
+    $cmd = Get-NotifierLauncherCommand -AppRoot $AppRoot -Background:$Background
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     [ClaudeNotifier.ShellLink]::Create($Path, $cmd.Target, $cmd.Arguments, $AppRoot, (Join-Path $AppRoot 'assets\icon.ico'),
@@ -193,4 +219,4 @@ function Test-NotifierShortcutInstalled {
     return (Test-Path -LiteralPath (Join-Path $StartMenuDir $script:LinkName))
 }
 
-Export-ModuleMember -Function Get-NotifierAppId, Get-NotifierLauncherCommand, New-NotifierShortcut, Read-NotifierShortcut, Get-NotifierShortcutPaths, Install-NotifierShortcuts, Remove-NotifierShortcuts, Test-NotifierShortcutInstalled
+Export-ModuleMember -Function Get-NotifierAutostartPath, Test-NotifierAutostart, Set-NotifierAutostart, Get-NotifierAppId, Get-NotifierLauncherCommand, New-NotifierShortcut, Read-NotifierShortcut, Get-NotifierShortcutPaths, Install-NotifierShortcuts, Remove-NotifierShortcuts, Test-NotifierShortcutInstalled

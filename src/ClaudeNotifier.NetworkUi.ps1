@@ -254,7 +254,7 @@ function New-NotifierDevicesPage {
     $devices = New-Object ClaudeNotifier.Ui.CardList
     $devices.ApplyTheme($t)
     $devices.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $devices.Footer = 'Mac и телефон должны быть в той же сети Wi-Fi. Сеансы Mac появятся во вкладке «Сеансы», а с телефона их можно смотреть в браузере.'
+    $devices.Footer = 'Mac и телефон должны быть в той же сети Wi-Fi. Сеансы Mac появятся в списке сеансов, а с телефона их можно смотреть в браузере.'
     $devices.EmptyTitle = 'Устройств пока нет'
     $menu = New-NotifierMenu -Theme $t -Items @(
         @('Переименовать', { Invoke-NotifierDeviceAction -Action rename }),

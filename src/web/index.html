@@ -35,6 +35,16 @@
   .preview { color: var(--muted); font-size: 14px; margin-top: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .empty { text-align: center; color: var(--muted); padding: 48px 0; }
   .offline { color: var(--error); }
+  .details { color: var(--muted); font-size: 13px; margin-top: 6px; white-space: pre-line; }
+  .req { margin-top: 10px; padding: 12px; border-radius: 12px; background: var(--bg); }
+  .req-title { font-weight: 600; }
+  .req-detail { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); margin-top: 4px; white-space: pre-wrap; word-break: break-word; max-height: 5.6em; overflow: hidden; }
+  .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .acts button { padding: 7px 14px; border-radius: 999px; font-size: 14px; }
+  .acts .sec { background: var(--border); color: var(--text); }
+  .acts .danger { background: var(--border); color: var(--error); }
+  .reply { display: flex; gap: 8px; margin-top: 8px; }
+  .reply input { flex: 1; min-width: 0; font: inherit; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -83,15 +93,63 @@
       list.appendChild(el('div', 'device', g.name));
       g.items.forEach(function (s) {
         var card = el('div', 's'), row = el('div', 'row');
-        row.appendChild(el('span', 'project', s.project || '(без проекта)'));
+        row.appendChild(el('span', 'project', (s.pinned ? '\uD83D\uDCCC ' : '') + (s.title || s.project || '(без проекта)')));
         row.appendChild(el('span', 'state ' + s.state, s.state_text));
-        row.appendChild(el('span', 'meta', s.elapsed + (s.origin === 'desktop' ? ' · приложение' : ' · терминал')));
+        row.appendChild(el('span', 'meta', s.elapsed + (s.origin === 'desktop' ? ' · приложение' : ' · терминал') +
+          (s.context >= 0 ? ' · контекст ' + s.context + ' %' : '')));
         card.appendChild(row);
         if (s.preview) card.appendChild(el('div', 'preview', s.preview));
+        if (s.details) card.appendChild(el('div', 'details', s.details));
+        if (s.request) card.appendChild(requestBox(s));
+        else if (s.can_reply) card.appendChild(replyBox(s));
         list.appendChild(card);
       });
     });
   }
+
+  function post(url, body, done) {
+    fetch(url, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { if (r.status === 410) alert('Уже решено в Claude'); if (done) done(); load(); });
+  }
+  function btn(text, cls, onclick) { var b = el('button', cls, text); b.onclick = onclick; return b; }
+
+  // Запрос разрешения, вопрос Claude или утверждение плана — кнопками.
+  function requestBox(s) {
+    var r = s.request, box = el('div', 'req'), acts = el('div', 'acts');
+    box.appendChild(el('div', 'req-title', r.title));
+    if (r.detail) box.appendChild(el('div', 'req-detail', r.detail));
+    function decide(behavior, answer) { return function () { post('/api/decision', { id: r.id, behavior: behavior, answer: answer || '' }); }; }
+    if (r.kind === 'question') {
+      r.options.forEach(function (o, i) { acts.appendChild(btn(o, i === 0 ? '' : 'sec', decide('allow', o))); });
+      acts.appendChild(btn('Свой ответ…', 'sec', function () { var t = prompt(r.title); if (t) decide('allow', t)(); }));
+    } else if (r.kind === 'plan') {
+      acts.appendChild(btn('Утвердить', '', decide('allow')));
+      acts.appendChild(btn('Отклонить', 'danger', decide('deny')));
+    } else if (r.kind === 'tool') {
+      acts.appendChild(btn('Разрешить', '', decide('allow')));
+      if (r.can_always) acts.appendChild(btn('Разрешать всегда', 'sec', decide('always')));
+      acts.appendChild(btn('Запретить', 'danger', decide('deny')));
+    }
+    box.appendChild(acts);
+    return box;
+  }
+
+  // Быстрый ответ сеансу, который закончил и ждёт вас.
+  function replyBox(s) {
+    var box = el('div', 'req'), acts = el('div', 'acts'), row = el('div', 'reply');
+    box.appendChild(el('div', 'req-title', 'Быстрый ответ'));
+    ['Продолжай', 'Да', 'Нет'].forEach(function (q) { acts.appendChild(btn(q, 'sec', function () { post('/api/reply', { session: s.id, text: q }); })); });
+    var input = document.createElement('input'); input.placeholder = 'Ответить Claude…';
+    var send = btn('Отправить', '', function () { if (input.value.trim()) post('/api/reply', { session: s.id, text: input.value }); });
+    input.onkeydown = function (e) { if (e.key === 'Enter') send.onclick(); };
+    row.appendChild(input); row.appendChild(send);
+    box.appendChild(acts); box.appendChild(row);
+    return box;
+  }
+
+  var typing = false;
+  document.addEventListener('focusin', function (e) { typing = e.target.tagName === 'INPUT'; });
+  document.addEventListener('focusout', function () { typing = false; });
 
   function load() {
     fetch('/api/sessions', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
@@ -134,7 +192,7 @@
   document.getElementById('mac-copy').onclick = copy;
 
   load();
-  setInterval(load, 3000);
+  setInterval(function () { if (!typing) load(); }, 3000);
 })();
 </script>
 </body>

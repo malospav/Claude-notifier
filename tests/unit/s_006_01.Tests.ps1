@@ -168,15 +168,22 @@ Describe 's_006_01 · новые хуки' {
         $e.title | Should Be "Сеанс $([char]0x00B7) proj"
     }
 
-    It 'установщик ставит 6 хуков, в том числе SessionStart, UserPromptSubmit, SessionEnd' {
+    It 'установщик ставит 8 хуков: уведомления, сеансы, запрос разрешения (синхронный), быстрый ответ (asyncRewake)' {
         $s = [pscustomobject]@{}
         Add-NotifierHooks -Settings $s -AppRoot 'C:\x\claude-notifier\app'
-        @($s.hooks.PSObject.Properties).Count | Should Be 6
+        @($s.hooks.PSObject.Properties).Count | Should Be 7
         (@(@($s.hooks.SessionStart)[0].hooks)[0].args)[-1] | Should Be 'sessionstart'
         (@(@($s.hooks.UserPromptSubmit)[0].hooks)[0].args)[-1] | Should Be 'prompt'
         (@(@($s.hooks.SessionEnd)[0].hooks)[0].args)[-1] | Should Be 'sessionend'
         @(@($s.hooks.UserPromptSubmit)[0].hooks)[0].async | Should Be $true
-        Remove-NotifierHooks -Settings $s | Should Be 6
+        $perm = @(@($s.hooks.PermissionRequest)[0].hooks)[0]
+        $perm.args[-1] | Should Be 'permreq'
+        $null -eq $perm.PSObject.Properties['async'] | Should Be $true   # синхронный: Claude ждёт решения
+        $perm.timeout | Should Be 3700
+        $rewake = @(@($s.hooks.Stop)[1].hooks)[0]
+        $rewake.args[-1] | Should Be 'replywait'
+        $rewake.asyncRewake | Should Be $true
+        Remove-NotifierHooks -Settings $s | Should Be 8
     }
 }
 

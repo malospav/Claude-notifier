@@ -130,7 +130,7 @@ Describe 's_005_01 · иконка и выход' {
     It 'иконка: подсказка «Claude Notifier», меню «Сеансы/История/Выход», иконка из assets' {
         $icon = New-NotifierTrayIcon -OnExit { }
         try {
-                        @($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'Сеансы,Устройства,История,,Выход'
+                        @($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'Сеансы,Устройства,Настройки,Статистика,История,,Выход'
             $icon.Icon.Width | Should Be ([System.Windows.Forms.SystemInformation]::SmallIconSize.Width)   # точка статуса
             $icon.Text | Should Be 'Claude · сеансов нет'
         }

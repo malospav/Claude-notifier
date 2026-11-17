@@ -75,7 +75,7 @@ try {
     $links = @(Install-NotifierShortcuts -AppRoot $app -NoDesktop:$NoDesktopShortcut -StartMenuDir $StartMenuDir -DesktopDir $DesktopDir)
 
     Write-Output "claude-notifier установлен в $app"
-    Write-Output "Хуки Stop, Notification, StopFailure, SessionStart, UserPromptSubmit, SessionEnd и строка статуса добавлены в $SettingsPath"
+    Write-Output "Хуки Stop, Notification, StopFailure, SessionStart, UserPromptSubmit, SessionEnd, PermissionRequest и строка статуса добавлены в $SettingsPath"
     if ($null -ne $previousStatusLine) { Write-Output 'Прежняя строка статуса сохранена в config.json (chainStatusLine) и будет показываться первой' }
     Write-Output 'URL-протокол claude-notifier: зарегистрирован'
     Write-Output "Ярлыки Claude Notifier: $($links -join ', ')"

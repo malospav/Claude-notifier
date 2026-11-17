@@ -14,6 +14,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib\Log.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Config.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Ipc.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Limits.psm1')
+Import-Module (Join-Path $PSScriptRoot 'lib\Usage.psm1')
 
 $script:ChainTimeoutMs = 3000
 $script:Sep = " $([char]0x00B7) "
@@ -106,6 +107,12 @@ function Invoke-ChainedStatusLine {
 function Send-NotifierLimitEvents {
     # Отправляет события о пересечении порогов; трей не запускается (statusLine вызывается часто).
     param([AllowEmptyString()][string]$StdinText, [string]$DataRoot)
+    # Расход для полос в окне: строка статуса CLI — второй источник после сервера Anthropic.
+    try {
+        $rl = (ConvertFrom-Json -InputObject $StdinText -ErrorAction Stop).rate_limits
+        if ($rl) { [void](Save-NotifierUsage -Windows (ConvertFrom-NotifierUsageWindows -Object $rl -PercentField used_percentage) -Source cli -DataRoot $DataRoot) }
+    }
+    catch { }
     foreach ($r in @(Test-NotifierLimits -StatusJson $StdinText -DataRoot $DataRoot)) {
         if ($null -eq $r) { continue }
         $event = New-NotifierLimitEvent -Result $r -StatusJson $StdinText

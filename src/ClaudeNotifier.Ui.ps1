@@ -51,21 +51,27 @@ function Update-NotifierTrayStatus {
 
 function ConvertTo-NotifierSessionCard {
     <# .SYNOPSIS Сеанс → карточка: проект, статус цветом, где идёт, сколько, превью ответа. #>
-    param([Parameter(Mandatory = $true)]$Session, [datetime]$Now = [DateTime]::UtcNow)
+    param([Parameter(Mandatory = $true)]$Session, [datetime]$Now = [DateTime]::UtcNow, [hashtable]$Prefs = @{}, [int]$ContextWarn = 85)
     $card = New-Object ClaudeNotifier.Ui.CardItem
     $card.Id = [string]$Session.session_id
-    $card.Title = [string]$Session.project
-    if ($card.Title -eq '') { $card.Title = 'Без проекта' }
+    $card.Title = Get-NotifierSessionName -Session $Session -Prefs $Prefs
     $card.State = [string]$Session.state
     $card.StateText = Get-NotifierSessionStateText ([string]$Session.state)
     $card.Meta = 'Терминал'
     if ([string]$Session.origin -eq 'desktop') { $card.Meta = 'Приложение' }
+    # Сеанс переименован — имя проекта остаётся видно во второй строке.
+    if ($card.Title -ne [string]$Session.project -and [string]$Session.project -ne '') { $card.Meta += " $([char]0x00B7) $([string]$Session.project)" }
+    if ($Prefs.ContainsKey($card.Id)) { $card.Pinned = [bool]$Prefs[$card.Id].pinned; $card.Muted = [bool]$Prefs[$card.Id].muted }
+    $card.ContextWarn = $ContextWarn
+    if ($Session.PSObject.Properties['stats'] -and $Session.stats -and $Session.stats.PSObject.Properties['window']) { $card.ContextPercent = [int]$Session.stats.percent }
     $deviceId = ''
     if ($Session.PSObject.Properties['device']) { $deviceId = [string]$Session.device }
     $card.Section = Get-NotifierDeviceName $deviceId   # группа списка — устройство, как в Настройках iOS
     $card.Right = Format-NotifierElapsed -Ts ([string]$Session.since) -Now $Now
     $card.Preview = [string]$Session.preview
     $card.Tag = $Session
+    $card.Details = Format-NotifierSessionDetails -Session $Session -Now $Now
+    if ($deviceId -eq '') { Add-NotifierCardRequest -Card $card -Session $Session }   # ответы — для сеансов этого ПК
     return $card
 }
 
@@ -81,7 +87,16 @@ function Update-NotifierSessionsView {
     )
     # Группы по устройствам: сначала группа, где самый «срочный» сеанс; внутри группы — порядок срочности.
     # foreach, а не конвейер: Get-NotifierSortedSessions возвращает массив одним объектом.
-    $cardsSorted = @(foreach ($x in (Get-NotifierSortedSessions -Sessions $Sessions)) { ConvertTo-NotifierSessionCard -Session $x -Now $Now })
+    $prefs = @{}
+    $warn = 85
+    if ($script:TrayDataRoot) {
+        $prefs = Get-NotifierSessionPrefs -DataRoot $script:TrayDataRoot
+        $cfg = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+        $warn = [int]$cfg.context.warnPercent
+        $script:RemindMinutes = [int]$cfg.approvals.remindMinutes
+    }
+    $pinned = @($prefs.Keys | Where-Object { $prefs[$_].pinned })
+    $cardsSorted = @(foreach ($x in (Get-NotifierSortedSessions -Sessions $Sessions -Pinned $pinned)) { ConvertTo-NotifierSessionCard -Session $x -Now $Now -Prefs $prefs -ContextWarn $warn })
     $order = New-Object System.Collections.ArrayList
     foreach ($c in $cardsSorted) { if (-not $order.Contains($c.Section)) { [void]$order.Add($c.Section) } }
     $list = New-Object 'System.Collections.Generic.List[ClaudeNotifier.Ui.CardItem]'
@@ -118,18 +133,24 @@ function Invoke-NotifierSessionsRefresh {
     Возвращает список живых сеансов.
     #>
     param([string]$DataRoot = $script:TrayDataRoot)
+    try { [void](Update-NotifierPending -DataRoot $DataRoot) } catch { }
     $all = @(Get-NotifierSessions -DataRoot $DataRoot)
     $live = Select-NotifierLiveSessions -Sessions $all   # уже массив; @() вложил бы его в ещё один
     if ($live.Count -ne $all.Count) { Save-NotifierSessions -Sessions $live -DataRoot $DataRoot }
+    try { Invoke-NotifierReminders -Sessions $live -DataRoot $DataRoot } catch { Write-NotifierLog -Level WARN -Message "tray: напоминания: $($_.Exception.Message)" -DataRoot $DataRoot }
     $script:SessionsDirty = $false
     $script:SessionsRefreshedAt = [datetime]::UtcNow
     try { [void](Update-NotifierTrayStatus -Sessions $live) } catch { }
+    try { Update-NotifierPopover -Sessions $live } catch { }
+    try { Update-NotifierUsageViews } catch { }
     $form = $script:SessionsForm
     if ($form -and -not $form.IsDisposed) {
         $subtitle = Update-NotifierSessionsView -Cards $form.Tag.Cards -Sessions $live
         if ($form.Tag.Net) {
             Update-NotifierDevicesView -Ui $form.Tag.Net -Sessions $live
             if ($form.Tag.Tabs.SelectedIndex -eq 1) { $subtitle = Format-NotifierDevicesSubtitle }
+            if ($form.Tag.Tabs.SelectedIndex -eq 2) { $subtitle = 'Уведомления, ответы из приложения и запуск' }
+            if ($form.Tag.Tabs.SelectedIndex -eq 3) { $subtitle = Format-NotifierStatsSubtitle }
         }
         if ([datetime]::UtcNow -ge $script:NoticeUntil) { $form.Tag.Subtitle.Text = $subtitle }
     }
@@ -170,6 +191,7 @@ function Invoke-NotifierSelectedSession {
     $item = $form.Tag.Cards.SelectedItem
     if ($null -eq $item) { return }
     $session = $item.Tag
+    if ($session -is [hashtable]) { $session = $session.Session }   # у карточки с запросом Tag = @{ Session; Request }
     if ($Action -eq 'remove') { Remove-NotifierSession -SessionId ([string]$session.session_id) }
     elseif ($session.PSObject.Properties['device'] -and [string]$session.device -ne '') {
         Show-NotifierNotice "Этот сеанс идёт на устройстве «$(Get-NotifierDeviceName ([string]$session.device))»"
@@ -242,10 +264,76 @@ function New-NotifierButton {
     return $b
 }
 
+function New-NotifierIconButton {
+    <# .SYNOPSIS Круглая кнопка-иконка (Segoe Fluent Icons) с подсказкой. #>
+    param([Parameter(Mandatory = $true)]$Theme, [Parameter(Mandatory = $true)][string]$Glyph, [string]$Tip = '', [scriptblock]$OnClick)
+    $b = New-Object ClaudeNotifier.Ui.IconButton
+    $b.ApplyTheme($Theme)
+    $b.Glyph = $Glyph
+    $b.BackColor = $Theme.Window
+    if ($Tip) { $tt = New-Object System.Windows.Forms.ToolTip; $tt.SetToolTip($b, $Tip); $b.Tag = $tt }
+    if ($OnClick) { $b.add_Click($OnClick) }
+    return $b
+}
+
+function Switch-NotifierPage {
+    <# .SYNOPSIS Иконка в заголовке: открыть страницу; повторный щелчок — вернуться к сеансам. #>
+    param([Parameter(Mandatory = $true)][int]$Index)
+    $form = $script:SessionsForm
+    if ($null -eq $form -or $form.IsDisposed) { return }
+    if ($form.Tag.Tabs.SelectedIndex -eq $Index) { $form.Tag.Tabs.SelectedIndex = 0 } else { $form.Tag.Tabs.SelectedIndex = $Index }
+}
+
+function New-NotifierUsagePanel {
+    <#
+    .SYNOPSIS
+    Карточка внизу окна: две полосы расхода — пятичасовой и недельный лимиты. Возвращает @{ Panel; Five; Week }.
+    #>
+    param([Parameter(Mandatory = $true)]$Theme, [switch]$Compact)
+    $t = $Theme
+    $outer = New-Object System.Windows.Forms.Panel
+    $outer.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $outer.BackColor = $t.Window
+    $outer.Padding = New-Object System.Windows.Forms.Padding(0, $t.S(14), 0, 0)
+    $card = New-NotifierGroupPanel -Theme $t -Height 96
+    $card.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $card.Padding = New-Object System.Windows.Forms.Padding($t.S(16), $t.S(12), $t.S(16), $t.S(10))
+    $five = New-Object ClaudeNotifier.Ui.UsageBar
+    $five.ApplyTheme($t); $five.Label = '5 часов'; $five.BackColor = $t.Surface; $five.Dock = [System.Windows.Forms.DockStyle]::Top
+    $gap = New-Object System.Windows.Forms.Panel
+    $gap.Height = $t.S(8); $gap.Dock = [System.Windows.Forms.DockStyle]::Top; $gap.BackColor = $t.Surface
+    $week = New-Object ClaudeNotifier.Ui.UsageBar
+    $week.ApplyTheme($t); $week.Label = 'Неделя'; $week.BackColor = $t.Surface; $week.Dock = [System.Windows.Forms.DockStyle]::Top
+    $card.Controls.Add($week); $card.Controls.Add($gap); $card.Controls.Add($five)
+    $outer.Controls.Add($card)
+    $outer.Height = $t.S(14) + $t.S(12) + $five.Height + $gap.Height + $week.Height + $t.S(12)
+    return @{ Panel = $outer; Five = $five; Week = $week }
+}
+
+function Update-NotifierUsageViews {
+    <# .SYNOPSIS Обновляет полосы расхода в окне и мини-окне из usage.json. #>
+    $usage = Get-NotifierUsage -DataRoot $script:TrayDataRoot
+    $targets = @()
+    if ($script:SessionsForm -and -not $script:SessionsForm.IsDisposed -and $script:SessionsForm.Tag.Usage) { $targets += $script:SessionsForm.Tag.Usage }
+    if ($script:Popover -and -not $script:Popover.IsDisposed -and $script:Popover.Tag.Usage) { $targets += $script:Popover.Tag.Usage }
+    foreach ($u in $targets) {
+        $f = Format-NotifierUsageWindow -Usage $usage -Window five_hour
+        $w = Format-NotifierUsageWindow -Usage $usage -Window seven_day
+        if ($null -eq $usage) { $f.Detail = 'нет данных — войдите в Claude Code CLI'; $w.Detail = 'нет данных' }
+        $u.Five.SetValue([double]$f.Percent, [string]$f.Detail)
+        $u.Week.SetValue([double]$w.Percent, [string]$w.Detail)
+    }
+}
+
 function New-NotifierForm {
     <# .SYNOPSIS Окно в цветах темы: фон, заголовок Windows 11 в тон, иконка-точка. #>
-    param([Parameter(Mandatory = $true)]$Theme, [AllowEmptyString()][string]$Title = '', [int]$Width = 520, [int]$Height = 600)
-    $f = New-Object System.Windows.Forms.Form
+    param([Parameter(Mandatory = $true)]$Theme, [AllowEmptyString()][string]$Title = '', [int]$Width = 520, [int]$Height = 600, [switch]$Chrome)
+    if ($Chrome) {
+        # Свой заголовок в стиле macOS: системная полоса убрана, рамка, тень и Snap остаются.
+        $f = New-Object ClaudeNotifier.Ui.ChromeForm
+        $f.CaptionHeight = $Theme.S(40)
+    }
+    else { $f = New-Object System.Windows.Forms.Form }
     $f.Text = $Title
     $f.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
     $f.BackColor = $Theme.Window
@@ -334,6 +422,7 @@ function Show-NotifierDialog {
     }
     $f.AcceptButton = $ok
     $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($y + $ok.Height + $t.S(20)))
+    $f.TopMost = $true   # поверх мини-окна у трея
     $f.Tag.Box = $box
     if ($box) { $f.add_Shown({ $this.Tag.Box.SelectAll(); [void]$this.Tag.Box.Focus() }) }
     try {
@@ -350,9 +439,41 @@ function Show-NotifierDialog {
 function New-NotifierSessionsForm {
     <# .SYNOPSIS Окно: заголовок, подзаголовок, вкладки «Сеансы» / «Устройства», карточки. #>
     $t = Get-NotifierTheme
-    $form = New-NotifierForm -Theme $t -Title 'Claude Notifier' -Width 560 -Height 600
-    $form.MinimumSize = New-Object System.Drawing.Size($t.S(420), $t.S(380))
-    $form.Padding = New-Object System.Windows.Forms.Padding($t.S(20), $t.S(10), $t.S(20), $t.S(16))
+    $form = New-NotifierForm -Theme $t -Title 'Claude Notifier' -Width 560 -Height 660 -Chrome
+    $form.MinimumSize = New-Object System.Drawing.Size($t.S(420), $t.S(440))
+    $form.Padding = New-Object System.Windows.Forms.Padding(0)
+
+    # Строка заголовка в стиле Windows 11: слева «Назад», «Устройства», «Настройки»; справа кнопки окна
+    # «Свернуть / Развернуть / Закрыть»; пустое место перетаскивает окно.
+    $caption = New-Object ClaudeNotifier.Ui.CaptionPanel
+    $caption.Dock = [System.Windows.Forms.DockStyle]::Top
+    $caption.Height = $t.S(40)
+    $caption.BackColor = $t.Window
+    $winButtons = New-Object ClaudeNotifier.Ui.CaptionButtons
+    $winButtons.ApplyTheme($t, $caption.Height)
+    $winButtons.BackColor = $t.Window
+    $winButtons.Dock = [System.Windows.Forms.DockStyle]::Right
+    $back = New-NotifierIconButton -Theme $t -Glyph ([string][char]0xE72B) -Tip 'Назад к сеансам' -OnClick { $script:SessionsForm.Tag.Tabs.SelectedIndex = 0 }
+    $btnStats = New-NotifierIconButton -Theme $t -Glyph ([string][char]0xE9D2) -Tip 'Статистика' -OnClick { Switch-NotifierPage 3 }
+    $btnDevices = New-NotifierIconButton -Theme $t -Glyph ([string][char]0xE772) -Tip 'Устройства' -OnClick { Switch-NotifierPage 1 }
+    $btnSettings = New-NotifierIconButton -Theme $t -Glyph ([string][char]0xE713) -Tip 'Настройки' -OnClick { Switch-NotifierPage 2 }
+    $y = [int](($caption.Height - $btnDevices.Height) / 2)
+    $back.Location = New-Object System.Drawing.Point($t.S(8), $y)
+    $back.Visible = $false
+    $btnStats.Location = New-Object System.Drawing.Point($t.S(8), $y)
+    $btnDevices.Location = New-Object System.Drawing.Point(($btnStats.Right + $t.S(4)), $y)
+    $btnSettings.Location = New-Object System.Drawing.Point(($btnDevices.Right + $t.S(4)), $y)
+    $caption.Controls.AddRange(@($back, $btnStats, $btnDevices, $btnSettings, $winButtons))
+    $caption.Tag = @{ Back = $back; Stats = $btnStats; Devices = $btnDevices; Settings = $btnSettings; Theme = $t }
+    # Стрелка «Назад» появляется слева на подстраницах — иконки сдвигаются вправо.
+    $back.add_VisibleChanged({
+            $tg = $this.Parent.Tag
+            $x = $tg.Theme.S(8)
+            if ($this.Visible) { $x = $this.Right + $tg.Theme.S(4) }
+            $tg.Stats.Left = $x
+            $tg.Devices.Left = $tg.Stats.Right + $tg.Theme.S(4)
+            $tg.Settings.Left = $tg.Devices.Right + $tg.Theme.S(4)
+        })
 
     $header = New-Object System.Windows.Forms.Panel
     $header.Dock = [System.Windows.Forms.DockStyle]::Top
@@ -368,10 +489,9 @@ function New-NotifierSessionsForm {
     $header.Controls.Add($title)
     $header.Controls.Add($subtitle)
 
+    # Страницы переключают иконки в заголовке; Tabs остаётся невидимым носителем номера страницы.
     $tabs = New-Object ClaudeNotifier.Ui.Tabs
-    $tabs.ApplyTheme($t)
-    $tabs.Dock = [System.Windows.Forms.DockStyle]::Top
-    $tabs.SetTitles('Сеансы', 'Устройства')
+    $tabs.SetTitles('Сеансы', 'Устройства', 'Настройки', 'Статистика')
 
     $spacer = New-Object System.Windows.Forms.Panel
     $spacer.Dock = [System.Windows.Forms.DockStyle]::Top
@@ -383,17 +503,18 @@ function New-NotifierSessionsForm {
     $cards.Dock = [System.Windows.Forms.DockStyle]::Fill
     $cards.EmptyTitle = 'Активных сеансов нет'
     $cards.EmptyHint = 'Сеанс появится здесь, как только вы начнёте работу в Claude Code — на этом ПК или на подключённом Mac.'
-    $menu = New-NotifierMenu -Theme $t -Items @(
-        @('Перейти к окну', { Invoke-NotifierSelectedSession -Action focus }),
-        @('Убрать из списка', { Invoke-NotifierSelectedSession -Action remove })
-    )
-    $menu.Items[0].Font = [ClaudeNotifier.Ui.Fonts]::Semibold(9.5)
+    $menu = New-NotifierSessionMenu -Theme $t
     $cards.add_ItemAction({
             param($sender, $e)
             switch ($e.Action) {
+                { $_ -like 'act:*' } {
+                    $notice = Invoke-NotifierCardAction -Item $e.Item -ActionId $e.Action.Substring(4)
+                    if ($notice) { Show-NotifierNotice $notice }
+                    [void](Invoke-NotifierSessionsRefresh)
+                }
                 'open' { Invoke-NotifierSelectedSession -Action focus }
                 'delete' { Invoke-NotifierSelectedSession -Action remove }
-                'context' { $script:SessionsForm.Tag.Menu.Show($sender, $e.Location) }
+                'context' { Show-NotifierSessionMenu -Menu $script:SessionsForm.Tag.Menu -Cards $sender -Item $e.Item -Location $e.Location }
             }
         })
 
@@ -407,20 +528,47 @@ function New-NotifierSessionsForm {
         $netUi.Page.Visible = $false
         $pages.Controls.Add($netUi.Page)
     }
+    $settingsUi = $null
+    if ($script:TrayDataRoot) {
+        $settingsUi = New-NotifierSettingsPage -Theme $t
+        $settingsUi.Page.Visible = $false
+        $pages.Controls.Add($settingsUi.Page)
+    }
+    $statsUi = New-NotifierStatsPage -Theme $t
+    $statsUi.Page.Visible = $false
+    $pages.Controls.Add($statsUi.Page)
     $tabs.add_SelectedIndexChanged({
             $tag = $script:SessionsForm.Tag
-            $tag.Cards.Visible = ($this.SelectedIndex -eq 0)
-            if ($tag.Net) { $tag.Net.Page.Visible = ($this.SelectedIndex -eq 1) }
-            $tag.Title.Text = @('Сеансы', 'Устройства')[$this.SelectedIndex]
+            $i = $this.SelectedIndex
+            $tag.Cards.Visible = ($i -eq 0)
+            if ($tag.Net) { $tag.Net.Page.Visible = ($i -eq 1) }
+            if ($tag.Settings) { $tag.Settings.Page.Visible = ($i -eq 2); if ($i -eq 2) { Update-NotifierSettingsView } }
+            $tag.Stats.Page.Visible = ($i -eq 3)
+            if ($i -eq 3) { Update-NotifierStatsView; [void](Start-NotifierActivityScan) }
+            $tag.Title.Text = @('Сеансы', 'Устройства', 'Настройки', 'Статистика')[$i]
+            $tag.Back.Visible = ($i -ne 0)
+            $tag.DevicesButton.Checked = ($i -eq 1); $tag.DevicesButton.Invalidate()
+            $tag.SettingsButton.Checked = ($i -eq 2); $tag.SettingsButton.Invalidate()
+            $tag.StatsButton.Checked = ($i -eq 3); $tag.StatsButton.Invalidate()
+            $tag.Usage.Panel.Visible = ($i -eq 0)
             [void](Invoke-NotifierSessionsRefresh)
         })
 
     # Порядок добавления задаёт порядок пристыковки: последний Top — самый верхний.
-    $form.Controls.Add($pages)
-    $form.Controls.Add($spacer)
-    $form.Controls.Add($tabs)
-    $form.Controls.Add($header)
-    $form.Tag = @{ Theme = $t; Cards = $cards; Title = $title; Subtitle = $subtitle; Tabs = $tabs; Net = $netUi; Menu = $menu }
+    $usage = New-NotifierUsagePanel -Theme $t
+    # Содержимое — с полями по краям; заголовок окна — во всю ширину, кнопки окна у самого края.
+    $body = New-Object System.Windows.Forms.Panel
+    $body.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $body.BackColor = $t.Window
+    $body.Padding = New-Object System.Windows.Forms.Padding($t.S(20), $t.S(4), $t.S(20), $t.S(16))
+    $body.Controls.Add($pages)
+    $body.Controls.Add($usage.Panel)
+    $body.Controls.Add($spacer)
+    $body.Controls.Add($header)
+    $form.Controls.Add($body)
+    $form.Controls.Add($caption)
+    $form.Tag = @{ Theme = $t; Cards = $cards; Title = $title; Subtitle = $subtitle; Tabs = $tabs; Net = $netUi; Settings = $settingsUi; Stats = $statsUi; Menu = $menu
+        Back = $back; DevicesButton = $btnDevices; SettingsButton = $btnSettings; StatsButton = $btnStats; Usage = $usage; WindowButtons = $winButtons }
     $form.add_FormClosed({ $script:SessionsForm = $null })
     $form.add_Shown({ $this.Tag.Cards.Focus() })
     return $form

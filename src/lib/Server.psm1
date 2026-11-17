@@ -5,6 +5,8 @@ Import-Module (Join-Path $PSScriptRoot 'Config.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Event.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Sessions.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Devices.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Requests.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Transcript.psm1')
 
 # HTTP-сервер для устройств в локальной сети (ADR-007).
 # Фоновый runspace только принимает соединения (GetContext) и кладёт их в очередь; разбор запроса,
@@ -198,8 +200,11 @@ function Get-NotifierSessionsPayload {
     }
     $all = @(Get-NotifierSessions -DataRoot $Ctx.DataRoot)
     $live = Select-NotifierLiveSessions -Sessions $all -Now $Now
+    $pending = Get-NotifierPendingRequests -DataRoot $Ctx.DataRoot
     $items = @()
-    foreach ($s in (Get-NotifierSortedSessions -Sessions $live)) {
+    $prefs = Get-NotifierSessionPrefs -DataRoot $Ctx.DataRoot
+    $pinned = @($prefs.Keys | Where-Object { $prefs[$_].pinned })
+    foreach ($s in (Get-NotifierSortedSessions -Sessions $live -Pinned $pinned)) {
         $dev = ''
         if ($s.PSObject.Properties['device']) { $dev = [string]$s.device }
         $devName = $names[$dev]
@@ -208,11 +213,26 @@ function Get-NotifierSessionsPayload {
             device      = $dev
             device_name = $devName
             project     = [string]$s.project
+            title       = $(if ($prefs.ContainsKey([string]$s.session_id) -and $prefs[[string]$s.session_id].title) { [string]$prefs[[string]$s.session_id].title } else { [string]$s.project })
+            pinned      = ($prefs.ContainsKey([string]$s.session_id) -and [bool]$prefs[[string]$s.session_id].pinned)
+            context     = $(if ($s.PSObject.Properties['stats'] -and $s.stats -and $s.stats.PSObject.Properties['window']) { [int]$s.stats.percent } else { -1 })
             state       = [string]$s.state
             state_text  = (Get-NotifierSessionStateText ([string]$s.state))
             elapsed     = (Format-NotifierElapsed -Ts ([string]$s.since) -Now $Now)
             origin      = [string]$s.origin
             preview     = [string]$s.preview
+            id          = [string]$s.session_id
+            details     = (Format-NotifierSessionDetails -Session $s -Now $Now)
+            request     = $null
+            can_reply   = $false
+        }
+        if ($dev -eq '') {
+            $sid = [string]$s.session_id
+            $req = @($pending.Permissions | Where-Object { [string]$_.session_id -eq $sid }) | Select-Object -First 1
+            if ($req) {
+                $items[-1].request = [ordered]@{ id = [string]$req.id; kind = [string]$req.kind; title = [string]$req.title; detail = [string]$req.detail; options = @($req.options); can_always = [bool]$req.canAlways }
+            }
+            elseif ($pending.Replies.ContainsKey($sid) -and [string]$s.state -eq 'waiting') { $items[-1].can_reply = $true }
         }
     }
     return [ordered]@{ pc = $Ctx.PcName; devices = $devices; sessions = $items }
@@ -308,6 +328,27 @@ function Invoke-NotifierHttpRequest {
     }
     if ($method -eq 'GET' -and $path -eq '/api/sessions') {
         return (New-JsonResponse 200 (Get-NotifierSessionsPayload -Ctx $Ctx -Now $Now))
+    }
+    if ($method -eq 'POST' -and ($path -eq '/api/decision' -or $path -eq '/api/reply')) {
+        $body = $null
+        try { $body = ConvertFrom-Json -InputObject $Request.Body -ErrorAction Stop } catch { }
+        if ($null -eq $body) { return (New-JsonResponse 400 @{ error = 'bad json' }) }
+        $sid = $null
+        if ($path -eq '/api/decision') {
+            $behavior = [string]$body.behavior
+            if (@('allow', 'always', 'deny') -notcontains $behavior) { return (New-JsonResponse 400 @{ error = 'bad behavior' }) }
+            $answer = ''
+            if ($body.PSObject.Properties['answer']) { $answer = [string]$body.answer }
+            $sid = Write-NotifierDecision -RequestId ([string]$body.id) -Behavior $behavior -Answer $answer -DataRoot $Ctx.DataRoot
+        }
+        else {
+            if (Write-NotifierReply -SessionId ([string]$body.session) -Text ([string]$body.text) -DataRoot $Ctx.DataRoot) { $sid = [string]$body.session }
+        }
+        if (-not $sid) { return (New-JsonResponse 410 @{ error = 'gone' }) }   # уже решено в Claude или сеанс не ждёт
+        # Служебное событие: трей сразу переведёт сеанс в «Работает».
+        [void]$Ctx.Events.Add([pscustomobject]@{ v = 1; type = 'working'; title = 'working'; preview = ''; session_id = $sid; ts = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture) })
+        Write-NotifierLog -Level INFO -Message "network: ответ с устройства $($device.id): $path" -DataRoot $Ctx.DataRoot
+        return (New-JsonResponse 200 @{ ok = $true })
     }
     if ($method -eq 'POST' -and $path -eq '/api/install-link') {
         $code = New-NotifierToken

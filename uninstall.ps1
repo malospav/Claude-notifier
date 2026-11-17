@@ -16,6 +16,7 @@ param(
     [string]$ClassesRoot = 'HKCU:\Software\Classes',
     [string]$StartMenuDir = ([Environment]::GetFolderPath('Programs')),
     [string]$DesktopDir = ([Environment]::GetFolderPath('DesktopDirectory')),
+    [string]$StartupDir = ([Environment]::GetFolderPath('Startup')),
     [switch]$Purge
 )
 
@@ -47,6 +48,10 @@ try {
     if (Unregister-NotifierAumid -ClassesRoot $ClassesRoot) { Write-Output 'AppUserModelID ClaudeNotifier удалён' }
     $removedLinks = Remove-NotifierShortcuts -StartMenuDir $StartMenuDir -DesktopDir $DesktopDir
     if ($removedLinks -gt 0) { Write-Output "Ярлыков Claude Notifier удалено: $removedLinks" }
+    if (Test-NotifierAutostart -StartupDir $StartupDir) {
+        Set-NotifierAutostart -Enabled $false -AppRoot (Join-Path $DataRoot 'app') -StartupDir $StartupDir
+        Write-Output 'Автозапуск при входе в Windows выключен'
+    }
 
     # Доступ из сети: резервация URL и правило брандмауэра снимаются с запросом UAC — только если
     # доступ когда-либо включали (есть network.json) и настройка Windows действительно сделана.

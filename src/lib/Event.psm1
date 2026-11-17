@@ -11,6 +11,7 @@ $script:KindToType = @{
     sessionstart = 'start'
     prompt       = 'working'
     sessionend   = 'end'
+    permreq      = 'request'   # запрос разрешения, на который можно ответить из приложения
 }
 
 function Get-InputString($Object, [string]$Name) {
@@ -108,7 +109,7 @@ function ConvertTo-NotifierEvent {
     }
 
     $project = Get-ProjectName (Get-InputString $hook 'cwd')
-    if ($NotifierStrings.ContainsKey($type)) { $title = Get-NotifierEventTitle -Type $type }
+    if (@('done', 'permission', 'error', 'limit') -contains $type) { $title = Get-NotifierEventTitle -Type $type }
     else { $title = 'Сеанс' }
     if ($project -ne '') { $title = "$title $([char]0x00B7) $project" }
     $hostId = $null

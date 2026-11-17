@@ -8,7 +8,10 @@ $script:HookSpecs = @(
     # Окно «Сеансы»: начало, новый запрос (статус «Работает»), завершение сеанса.
     @{ Event = 'SessionStart'; Matcher = $null; Kind = 'sessionstart' },
     @{ Event = 'UserPromptSubmit'; Matcher = $null; Kind = 'prompt' },
-    @{ Event = 'SessionEnd'; Matcher = $null; Kind = 'sessionend' }
+    @{ Event = 'SessionEnd'; Matcher = $null; Kind = 'sessionend' },
+    # Ответы из приложения (ADR-008): синхронный PermissionRequest ждёт решения; Stop с asyncRewake — быстрого ответа.
+    @{ Event = 'PermissionRequest'; Matcher = $null; Kind = 'permreq'; Mode = 'sync'; Timeout = 3700 },
+    @{ Event = 'Stop'; Matcher = $null; Kind = 'replywait'; Mode = 'rewake'; Timeout = 14700 }
 )
 $script:Marker = 'claude-notifier\app\hook-bridge.ps1'
 $script:StatusLineMarker = 'claude-notifier/app/statusline.ps1'
@@ -149,12 +152,19 @@ function Add-NotifierHooks {
         $Settings | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{})
     }
     foreach ($spec in $script:HookSpecs) {
-        $hook = [pscustomobject][ordered]@{
+        $hook = [ordered]@{
             type    = 'command'
             command = $ps
             args    = @('-NoProfile', '-NonInteractive', '-File', $bridge, $spec.Kind)
-            async   = $true
         }
+        $mode = ''
+        if ($spec.ContainsKey('Mode')) { $mode = [string]$spec.Mode }
+        switch ($mode) {
+            'sync' { $hook.timeout = $spec.Timeout }
+            'rewake' { $hook.asyncRewake = $true; $hook.timeout = $spec.Timeout }
+            default { $hook.async = $true }
+        }
+        $hook = [pscustomobject]$hook
         $group = [ordered]@{}
         if ($spec.Matcher) { $group.matcher = $spec.Matcher }
         $group.hooks = @($hook)

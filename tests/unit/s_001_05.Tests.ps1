@@ -51,7 +51,8 @@ Describe 's_001_05 · install.ps1' {
         $LASTEXITCODE | Should Be 0
         $s = Read-Json $e.Settings
         $ours = Get-OurHooks $s
-        $ours['Stop'] | Should Be 1
+        $ours['Stop'] | Should Be 2   # уведомление + ожидание быстрого ответа (asyncRewake)
+        $ours['PermissionRequest'] | Should Be 1
         $ours['Notification'] | Should Be 1
         $ours['StopFailure'] | Should Be 1
         @(Get-ChildItem (Split-Path $e.Settings) -Filter 'settings.json.bak-*').Count | Should Be 0
@@ -82,7 +83,7 @@ Describe 's_001_05 · install.ps1' {
         $s = Read-Json $e.Settings
         $s.model | Should Be 'opus'
         $s.permissions.allow[0] | Should Be 'Bash(git status)'
-        @($s.hooks.Stop).Count | Should Be 2
+        @($s.hooks.Stop).Count | Should Be 3
         (@($s.hooks.Stop)[0].hooks)[0].command | Should Be 'C:\my\stop.cmd'
         @($s.hooks.PreToolUse)[0].matcher | Should Be 'Bash'
         $bak = @(Get-ChildItem (Split-Path $e.Settings) -Filter 'settings.json.bak-*')
@@ -98,15 +99,15 @@ Describe 's_001_05 · install.ps1' {
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $s = Read-Json $e.Settings
         $ours = Get-OurHooks $s
-        ($ours.Values | Measure-Object -Sum).Sum | Should Be 6
-        @($s.hooks.Stop).Count | Should Be 2
+        ($ours.Values | Measure-Object -Sum).Sum | Should Be 8
+        @($s.hooks.Stop).Count | Should Be 3
     }
 
     It 'install → uninstall возвращает чужие настройки семантически без изменений' {
         $e = New-Env
         [IO.File]::WriteAllText($e.Settings, $foreign, (New-Object Text.UTF8Encoding $false))
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $after = Read-Json $e.Settings | ConvertTo-Json -Depth 20 -Compress
         $before = $foreign | ConvertFrom-Json | ConvertTo-Json -Depth 20 -Compress
         $after | Should Be $before
@@ -147,7 +148,7 @@ Describe 's_001_05 · запуск через powershell -File (как в README
         & $ps -NoProfile -ExecutionPolicy Bypass -File $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $LASTEXITCODE | Should Be 0
         Test-Path (Join-Path $e.Data 'app\hook-bridge.ps1') | Should Be $true
-        & $ps -NoProfile -ExecutionPolicy Bypass -File $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $ps -NoProfile -ExecutionPolicy Bypass -File $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $LASTEXITCODE | Should Be 0
         Test-Path (Join-Path $e.Data 'app') | Should Be $false
     }
@@ -160,7 +161,7 @@ Describe 's_001_05 · uninstall.ps1' {
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         Set-Content (Join-Path $e.Data 'config.json') '{}'
         Set-Content (Join-Path $e.Data 'history.json') '[]'
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $LASTEXITCODE | Should Be 0
         $s = Read-Json $e.Settings
         (Get-OurHooks $s).Count | Should Be 0
@@ -175,14 +176,14 @@ Describe 's_001_05 · uninstall.ps1' {
         $e = New-Env
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         Set-Content (Join-Path $e.Data 'config.json') '{}'
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -Purge | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') -Purge | Out-Null
         Test-Path $e.Data | Should Be $false
     }
 
     It 'только наши хуки → секция hooks удаляется целиком' {
         $e = New-Env
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $s = Read-Json $e.Settings
         $null -eq $s.PSObject.Properties['hooks'] | Should Be $true
     }
@@ -190,7 +191,7 @@ Describe 's_001_05 · uninstall.ps1' {
     It 'нечего удалять → settings.json не перезаписывается и без резервной копии' {
         $e = New-Env
         [IO.File]::WriteAllText($e.Settings, $foreign, (New-Object Text.UTF8Encoding $false))
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $LASTEXITCODE | Should Be 0
         [IO.File]::ReadAllText($e.Settings) | Should Be $foreign
         @(Get-ChildItem (Split-Path $e.Settings) -Filter 'settings.json.bak-*').Count | Should Be 0
@@ -198,7 +199,7 @@ Describe 's_001_05 · uninstall.ps1' {
 
     It 'нет settings.json → без ошибки' {
         $e = New-Env
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         $LASTEXITCODE | Should Be 0
         Test-Path $e.Settings | Should Be $false
     }
@@ -207,7 +208,7 @@ Describe 's_001_05 · uninstall.ps1' {
         $e = New-Env
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         [IO.File]::WriteAllText($e.Settings, '{ broken', (New-Object Text.UTF8Encoding $false))
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -ErrorAction SilentlyContinue 2>$null | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') -ErrorAction SilentlyContinue 2>$null | Out-Null
         $LASTEXITCODE | Should Be 1
         Test-Path (Join-Path $e.Data 'app') | Should Be $true
     }
@@ -219,7 +220,7 @@ Describe 's_001_05 · URL-протокол в установщике (s_003_02)'
         & $install -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
         $cmd = (Get-ItemProperty (Join-Path $e.Classes 'claude-notifier\shell\open\command')).'(default)'
         $cmd | Should BeLike ('*"' + (Join-Path $e.Data 'app\focus-handler.ps1') + '" "%1"')
-        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') | Out-Null
+        & $uninstall -SettingsPath $e.Settings -DataRoot $e.Data -ClassesRoot $e.Classes -StartMenuDir (Join-Path $TestDrive 'startmenu') -DesktopDir (Join-Path $TestDrive 'desktop') -StartupDir (Join-Path $TestDrive 'startup') | Out-Null
         Test-Path (Join-Path $e.Classes 'claude-notifier') | Should Be $false
     }
 }

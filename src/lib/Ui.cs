@@ -1,4 +1,4 @@
-// claude-notifier: элементы интерфейса в стиле Apple (WinForms + GDI+, C# 5 для csc из .NET Framework).
+﻿// claude-notifier: элементы интерфейса в стиле Apple (WinForms + GDI+, C# 5 для csc из .NET Framework).
 // Сгруппированные списки, сегментный переключатель, тумблер, кнопки-капсулы, ячейки кода, точка статуса для трея.
 // Движение — по принципам Apple / Emil Kowalski: отклик на нажатие сразу, ease-out, прерываемые анимации
 // с текущего значения, частые действия (обновление списка, клавиатура) не анимируются, «меньше движения» в Windows уважается.
@@ -188,6 +188,13 @@ namespace ClaudeNotifier.Ui {
             } catch { }
         }
 
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
+
+        // Тёмные системные полосы прокрутки у прокручиваемой панели (как в Проводнике в тёмной теме).
+        public static void DarkScrollbars(IntPtr hwnd, bool dark) {
+            try { SetWindowTheme(hwnd, dark ? "DarkMode_Explorer" : "Explorer", null); } catch { }
+        }
+
         public static void RoundPopup(IntPtr hwnd) {
             try { int small = 3; DwmSetWindowAttribute(hwnd, 33, ref small, 4); } catch { }
         }
@@ -270,7 +277,7 @@ namespace ClaudeNotifier.Ui {
     public static class TrayDot {
         public static Color ColorFor(string state) {
             switch (state) {
-                case "permission": return Theme.Hex(0xFF9F0A);
+                case "permission": case "alert": return Theme.Hex(0xFF9F0A);
                 case "error": return Theme.Hex(0xFF453A);
                 case "working": return Theme.Hex(0x0A84FF);
                 case "waiting": return Theme.Hex(0x30D158);
@@ -287,6 +294,13 @@ namespace ClaudeNotifier.Ui {
                 float d = size * 0.625f;
                 float c = size / 2f;
                 Color col = ColorFor(state);
+                if (state == "alert") {
+                    // Второй кадр мигания «запрос давно ждёт»: точка во всю иконку с ореолом.
+                    float big = size * 0.94f, core = size * 0.72f;
+                    using (SolidBrush halo = new SolidBrush(Color.FromArgb(110, col))) g.FillEllipse(halo, c - big / 2, c - big / 2, big, big);
+                    using (SolidBrush b = new SolidBrush(col)) g.FillEllipse(b, c - core / 2, c - core / 2, core, core);
+                    return bmp;
+                }
                 bool hollow = !(state == "permission" || state == "error" || state == "working" || state == "waiting");
                 if (hollow) {
                     using (Pen p = new Pen(col, Math.Max(1.5f, size / 9f))) g.DrawEllipse(p, c - d / 2, c - d / 2, d, d);
@@ -314,6 +328,16 @@ namespace ClaudeNotifier.Ui {
         public string Preview = "";
         public bool HollowDot;
         public bool IsAction;            // строка-действие («+ Подключить устройство»): текст цвета акцента
+        public string Details = "";      // подробности (строки через \n) — видны, когда строка раскрыта
+        public string RequestTitle = ""; // запрос к пользователю (разрешение, вопрос, быстрый ответ)
+        public string RequestDetail = "";
+        public string[] Actions = new string[0];   // кнопки: "id|текст|primary|secondary|destructive"
+        public bool ForceExpand;         // раскрыта всегда (есть запрос, ждущий ответа)
+        public int ContextPercent = -1;  // заполненность контекста сеанса; < 0 — не показывать
+        public int ContextWarn = 85;     // с этого процента индикатор оранжевый
+        public bool Pinned;              // закреплён сверху — значок булавки
+        public bool Muted;               // без уведомлений — значок «без звука»
+        public bool Urgent;              // запрос давно ждёт ответа — точка пульсирует сильнее
         public object Tag;
     }
 
@@ -323,31 +347,45 @@ namespace ClaudeNotifier.Ui {
     }
 
     // Сгруппированный список в стиле Apple: строки в скруглённых группах, тонкие разделители с отступом,
-    // выделение — скруглённая плашка цвета акцента. Обновление списка не анимируется (оно частое).
+    // выделение — скруглённая плашка цвета акцента. Выбранная строка (и строка с запросом) раскрывается:
+    // полный ответ, подробности, блок запроса с кнопками. Обновление списка не анимируется (оно частое);
+    // у статуса «Работает» точка мягко пульсирует (постоянное движение — линейно, только когда движение разрешено).
     public sealed class CardList : Control {
         readonly List<CardItem> items = new List<CardItem>();
         readonly List<Rectangle> rows = new List<Rectangle>();
         readonly List<Rectangle> groups = new List<Rectangle>();
         readonly List<KeyValuePair<Point, string>> headers = new List<KeyValuePair<Point, string>>();
+        readonly Dictionary<int, List<KeyValuePair<Rectangle, string>>> buttons = new Dictionary<int, List<KeyValuePair<Rectangle, string>>>();
+        readonly Timer pulseTimer = new Timer();
         Theme theme = Theme.Create(false);
-        Font fTitle, fBody, fSmall, fHeader, fEmpty;
+        Font fTitle, fBody, fSmall, fHeader, fEmpty, fButton, fMono, fIcon;
         int hover = -1, selected = -1, pressed = -1, scroll = 0, contentHeight = 0, footerY = 0;
+        string hoverButton = null;
+        float pulse;
         public string EmptyTitle = "Пусто";
         public string EmptyHint = "";
         public string Footer = "";
+        public bool ExpandSelected = true;
 
-        public event EventHandler<CardEventArgs> ItemAction;   // Action: open | context | delete
+        public event EventHandler<CardEventArgs> ItemAction;   // Action: open | context | delete | act:<id>
 
         public CardList() {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
             TabStop = true;
+            pulseTimer.Interval = 40;
+            pulseTimer.Tick += delegate {
+                pulse = (float)((DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond) % 1600) / 1600f;
+                Invalidate();
+            };
             ApplyTheme(theme);
         }
 
         public void ApplyTheme(Theme t) {
             theme = t;
-            fTitle = Fonts.Semibold(10.5f); fBody = Fonts.Text(9.5f); fSmall = Fonts.Text(9f); fHeader = Fonts.Semibold(9f); fEmpty = Fonts.Semibold(12f);
+            fTitle = Fonts.Semibold(10.5f); fBody = Fonts.Text(9.5f); fSmall = Fonts.Text(9f); fHeader = Fonts.Semibold(9f);
+            fEmpty = Fonts.Semibold(12f); fButton = Fonts.Semibold(9f); fIcon = IconButton.IconFont(8f);
+            fMono = new Font("Cascadia Mono", 8.5f); if (fMono.Name != "Cascadia Mono") { fMono.Dispose(); fMono = new Font("Consolas", 9f); }
             BackColor = t.Window;
             Relayout();
             Invalidate();
@@ -365,18 +403,66 @@ namespace ClaudeNotifier.Ui {
             if (keep != null) for (int i = 0; i < items.Count; i++) if (items[i].Id == keep) { selected = i; break; }
             hover = -1; pressed = -1;
             Relayout();
+            UpdatePulse();
             Invalidate();
         }
 
         public void Select(int index) {
             selected = (index >= 0 && index < items.Count) ? index : -1;
+            Relayout();
             EnsureVisible(selected);
             Invalidate();
         }
 
-        int RowHeight(CardItem it) {
+        // Нажимает кнопку действия строки (для тестов и клавиатуры).
+        public void InvokeAction(int index, string actionId) {
+            if (index < 0 || index >= items.Count) return;
+            selected = index;
+            Raise("act:" + actionId, Point.Empty);
+        }
+
+        bool IsExpanded(int i) { return items[i].ForceExpand || (ExpandSelected && i == selected && !items[i].IsAction); }
+
+        int TextWidth() { return Math.Max(theme.S(120), ClientSize.Width - theme.S(2) - theme.S(16) * 2 - theme.S(22)); }
+
+        int Measure(string text, Font f, int width, int maxLines) {
+            if (string.IsNullOrEmpty(text)) return 0;
+            int h = TextRenderer.MeasureText(text, f, new Size(width, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl).Height;
+            int line = TextRenderer.MeasureText("Ag", f).Height;
+            return Math.Min(h, line * maxLines);
+        }
+
+        static string[] ParseAction(string a) {
+            string[] p = (a ?? "").Split('|');
+            return new string[] { p[0], p.Length > 1 ? p[1] : p[0], p.Length > 2 ? p[2] : "secondary" };
+        }
+
+        int RowHeight(int i) {
+            CardItem it = items[i];
             if (it.IsAction) return theme.S(46);
-            return theme.S(string.IsNullOrEmpty(it.Preview) ? 58 : 76);
+            if (!IsExpanded(i)) return theme.S(string.IsNullOrEmpty(it.Preview) ? 58 : 76);
+            int w = TextWidth();
+            int h = theme.S(10) + theme.S(19) * 2;                                  // заголовок и статус
+            if (!string.IsNullOrEmpty(it.Preview)) h += Measure(it.Preview, fSmall, w, 6) + theme.S(4);
+            if (!string.IsNullOrEmpty(it.Details)) h += Measure(it.Details, fSmall, w, 11) + theme.S(6);
+            if (!string.IsNullOrEmpty(it.RequestTitle) || it.Actions.Length > 0) {
+                h += theme.S(10);
+                if (!string.IsNullOrEmpty(it.RequestTitle)) h += Measure(it.RequestTitle, fTitle, w - theme.S(24), 3) + theme.S(14);
+                if (!string.IsNullOrEmpty(it.RequestDetail)) h += Measure(it.RequestDetail, fMono, w - theme.S(24), 4) + theme.S(4);
+                h += ButtonsHeight(it, w - theme.S(24)) + theme.S(12);
+            }
+            return h + theme.S(12);
+        }
+
+        int ButtonsHeight(CardItem it, int width) {
+            if (it.Actions.Length == 0) return 0;
+            int x = 0, lines = 1, bh = theme.S(28), gap = theme.S(8);
+            foreach (string a in it.Actions) {
+                int bw = TextRenderer.MeasureText(ParseAction(a)[1], fButton).Width + theme.S(24);
+                if (x > 0 && x + bw > width) { lines++; x = 0; }
+                x += bw + gap;
+            }
+            return lines * bh + (lines - 1) * gap;
         }
 
         void Relayout() {
@@ -391,7 +477,7 @@ namespace ClaudeNotifier.Ui {
                     if (!string.IsNullOrEmpty(section)) { headers.Add(new KeyValuePair<Point, string>(new Point(theme.S(16), y), section)); y += theme.S(26); }
                     gStart = y;
                 }
-                int h = RowHeight(it);
+                int h = RowHeight(i);
                 rows.Add(new Rectangle(0, y, w, h));
                 y += h;
             }
@@ -412,21 +498,37 @@ namespace ClaudeNotifier.Ui {
             if (i < 0 || i >= rows.Count) return;
             Rectangle r = rows[i];
             if (r.Top < scroll) scroll = r.Top;
-            else if (r.Bottom > scroll + ClientSize.Height) scroll = r.Bottom - ClientSize.Height;
+            else if (r.Bottom > scroll + ClientSize.Height) scroll = Math.Min(r.Top, r.Bottom - ClientSize.Height);
             ClampScroll();
         }
 
+        void UpdatePulse() {
+            bool need = Motion.Enabled && Visible;
+            if (need) { need = false; foreach (CardItem it in items) if ((it.State == "working" || it.Urgent) && !it.IsAction) { need = true; break; } }
+            if (need && !pulseTimer.Enabled) pulseTimer.Start();
+            if (!need && pulseTimer.Enabled) { pulseTimer.Stop(); pulse = 0; }
+        }
+
+        protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdatePulse(); }
         protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); Relayout(); }
+        protected override void Dispose(bool disposing) { if (disposing) pulseTimer.Dispose(); base.Dispose(disposing); }
 
         int HitTest(Point p) {
             for (int i = 0; i < rows.Count; i++) { Rectangle r = rows[i]; r.Offset(0, -scroll); if (r.Contains(p)) return i; }
             return -1;
         }
 
+        string HitButton(Point p) {
+            foreach (KeyValuePair<int, List<KeyValuePair<Rectangle, string>>> kv in buttons)
+                foreach (KeyValuePair<Rectangle, string> b in kv.Value) if (b.Key.Contains(p)) return kv.Key + ":" + b.Value;
+            return null;
+        }
+
         protected override void OnPaint(PaintEventArgs e) {
             Graphics g = e.Graphics;
             g.Clear(theme.Window);
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            buttons.Clear();
             if (items.Count == 0) { PaintEmpty(g); return; }
             float radius = theme.S(12);
             foreach (Rectangle gr in groups) {
@@ -456,10 +558,13 @@ namespace ClaudeNotifier.Ui {
 
         void PaintRow(Graphics g, CardItem it, Rectangle r, int index, bool last) {
             bool sel = index == selected, hot = index == hover, down = index == pressed;
-            bool active = sel && Focused;
+            bool expanded = IsExpanded(index);
+            // Раскрытая строка выделяется мягко (без синей плашки): на ней кнопки и длинный текст.
+            bool active = sel && Focused && !expanded;
             int inset = theme.S(5);
             if (sel || hot || down) {
                 Color fill = active ? theme.Accent : (sel || down ? theme.SurfaceSelected : theme.SurfaceHover);
+                if (expanded && !down) fill = hot && !sel ? theme.SurfaceHover : theme.SurfaceHover;
                 Draw.Fill(g, new RectangleF(r.X + inset, r.Y + inset * 0.6f, r.Width - 2 * inset, r.Height - inset * 1.2f), theme.S(8), fill);
             }
             int pad = theme.S(16);
@@ -477,34 +582,114 @@ namespace ClaudeNotifier.Ui {
             } else {
                 int line1 = r.Y + theme.S(10), lh = theme.S(19);
                 Color dot = theme.State(it.State);
-                Draw.Dot(g, r.X + pad + theme.S(5), line1 + lh / 2f, theme.S(9), dot, it.HollowDot);
-                if (active && !it.HollowDot) using (Pen ring = new Pen(theme.AccentText, 1.4f)) {
-                    float d = theme.S(9), cx = r.X + pad + theme.S(5), cy = line1 + lh / 2f;
-                    g.DrawEllipse(ring, cx - d / 2, cy - d / 2, d, d);
+                float dcx = r.X + pad + theme.S(5), dcy = line1 + lh / 2f, dd = theme.S(9);
+                if ((it.State == "working" || it.Urgent) && pulseTimer.Enabled) {
+                    // Мягкий «пульс»: кольцо расходится и тает за 1,6 с. Давно ждущий запрос — вдвое чаще и шире.
+                    float ph = it.Urgent ? (pulse * 2f) % 1f : pulse;
+                    float pr = dd * (1f + ph * (it.Urgent ? 1.8f : 1.1f));
+                    using (SolidBrush halo = new SolidBrush(Color.FromArgb((int)((it.Urgent ? 150 : 110) * (1f - ph)), dot)))
+                        g.FillEllipse(halo, dcx - pr / 2, dcy - pr / 2, pr, pr);
                 }
+                Draw.Dot(g, dcx, dcy, dd, dot, it.HollowDot);
+                if (active && !it.HollowDot) using (Pen ring = new Pen(theme.AccentText, 1.4f)) g.DrawEllipse(ring, dcx - dd / 2, dcy - dd / 2, dd, dd);
                 int rightW = Draw.Width(g, it.Right, fSmall);
                 int rightX = r.Right - pad - rightW;
-                Draw.TextLine(g, it.Title, fTitle, new Rectangle(textX, line1, Math.Max(0, rightX - textX - theme.S(8)), lh), title, TextFormatFlags.Left);
+                // Значки «закреплён» и «без уведомлений» — перед временем.
+                string icons = (it.Pinned ? "" : "") + (it.Muted ? "" : "");
+                int iconsX = rightX;
+                if (icons.Length > 0) {
+                    int iw = theme.S(14) * icons.Length;
+                    iconsX = rightX - (rightW > 0 ? theme.S(6) : 0) - iw;
+                    for (int k = 0; k < icons.Length; k++)
+                        TextRenderer.DrawText(g, icons[k].ToString(), fIcon, new Rectangle(iconsX + k * theme.S(14), line1, theme.S(14), lh), muted,
+                            TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+                Draw.TextLine(g, it.Title, fTitle, new Rectangle(textX, line1, Math.Max(0, iconsX - textX - theme.S(8)), lh), title, TextFormatFlags.Left);
                 if (rightW > 0) Draw.TextLine(g, it.Right, fSmall, new Rectangle(rightX, line1, rightW + theme.S(2), lh), muted, TextFormatFlags.Left);
 
                 int line2 = line1 + lh;
                 int avail = r.Right - pad - textX;
+                // Заполненность контекста — справа во второй строке: «контекст 72 %» и короткая полоска.
+                int metaRight = r.Right - pad;
+                if (it.ContextPercent >= 0) {
+                    int bw = theme.S(36), bh = theme.S(4);
+                    string ct = (avail > theme.S(300) ? "контекст " : "") + it.ContextPercent + " %";
+                    int ctw = Draw.Width(g, ct, fSmall);
+                    int bx = r.Right - pad - bw;
+                    Color cc = it.ContextPercent >= 95 ? theme.State("error") : (it.ContextPercent >= it.ContextWarn ? theme.State("permission") : theme.State("working"));
+                    if (active) cc = theme.AccentText;
+                    float by = line2 + lh / 2f - bh / 2f;
+                    Draw.Fill(g, new RectangleF(bx, by, bw, bh), bh / 2f, active ? Color.FromArgb(90, theme.AccentText) : theme.Fill);
+                    float fw = Math.Max(bh, bw * Math.Min(100, it.ContextPercent) / 100f);
+                    Draw.Fill(g, new RectangleF(bx, by, fw, bh), bh / 2f, cc);
+                    Color ctc = active ? theme.AccentText : (it.ContextPercent >= it.ContextWarn ? theme.StateText("permission") : muted);
+                    Draw.TextLine(g, ct, fSmall, new Rectangle(bx - theme.S(6) - ctw, line2, ctw + theme.S(2), lh), ctc, TextFormatFlags.Left);
+                    metaRight = bx - theme.S(6) - ctw - theme.S(10);
+                }
                 int sw = Draw.Width(g, it.StateText, fBody);
                 Color stateColor = active ? theme.AccentText : theme.StateText(it.State);
-                Draw.TextLine(g, it.StateText, fBody, new Rectangle(textX, line2, Math.Min(sw + theme.S(2), avail), lh), stateColor, TextFormatFlags.Left);
+                Draw.TextLine(g, it.StateText, fBody, new Rectangle(textX, line2, Math.Max(0, Math.Min(sw + theme.S(2), metaRight - textX)), lh), stateColor, TextFormatFlags.Left);
                 if (!string.IsNullOrEmpty(it.Meta)) {
                     string meta = (sw > 0 ? "  ·  " : "") + it.Meta;
                     int mx = textX + sw;
-                    Draw.TextLine(g, meta, fBody, new Rectangle(mx, line2, Math.Max(0, r.Right - pad - mx), lh), muted, TextFormatFlags.Left);
+                    Draw.TextLine(g, meta, fBody, new Rectangle(mx, line2, Math.Max(0, metaRight - mx), lh), muted, TextFormatFlags.Left);
                 }
-                if (!string.IsNullOrEmpty(it.Preview)) {
-                    Draw.TextLine(g, it.Preview, fSmall, new Rectangle(textX, line2 + lh, avail, lh), muted, TextFormatFlags.Left);
+                int y = line2 + lh;
+                if (!expanded) {
+                    if (!string.IsNullOrEmpty(it.Preview)) Draw.TextLine(g, it.Preview, fSmall, new Rectangle(textX, y, avail, lh), muted, TextFormatFlags.Left);
+                } else {
+                    TextFormatFlags wrap = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.EndEllipsis;
+                    if (!string.IsNullOrEmpty(it.Preview)) {
+                        int ph = Measure(it.Preview, fSmall, avail, 6);
+                        TextRenderer.DrawText(g, it.Preview, fSmall, new Rectangle(textX, y + theme.S(2), avail, ph), theme.Text, wrap);
+                        y += ph + theme.S(4);
+                    }
+                    if (!string.IsNullOrEmpty(it.Details)) {
+                        int dh = Measure(it.Details, fSmall, avail, 11);
+                        TextRenderer.DrawText(g, it.Details, fSmall, new Rectangle(textX, y + theme.S(4), avail, dh), theme.Muted, wrap);
+                        y += dh + theme.S(6);
+                    }
+                    if (!string.IsNullOrEmpty(it.RequestTitle) || it.Actions.Length > 0) PaintRequest(g, it, index, textX, y + theme.S(10), avail);
                 }
             }
             // Разделитель с отступом до текста — как в списках iOS; у последней строки группы его нет.
             if (!last && !sel && !(index + 1 == selected)) {
                 using (Pen p = new Pen(theme.Border, 1f)) g.DrawLine(p, textX, r.Bottom - 0.5f, r.Right, r.Bottom - 0.5f);
             }
+        }
+
+        void PaintRequest(Graphics g, CardItem it, int index, int x, int y, int width) {
+            int innerW = width - theme.S(24);
+            int th = string.IsNullOrEmpty(it.RequestTitle) ? 0 : Measure(it.RequestTitle, fTitle, innerW, 3);
+            int dh = string.IsNullOrEmpty(it.RequestDetail) ? 0 : Measure(it.RequestDetail, fMono, innerW, 4);
+            int bh = ButtonsHeight(it, innerW);
+            int boxH = theme.S(12) + th + (th > 0 ? theme.S(6) : 0) + dh + (dh > 0 ? theme.S(8) : 0) + bh + theme.S(12);
+            Color box = theme.Dark ? Theme.Hex(0x232325) : Theme.Hex(0xF2F2F7);
+            Draw.Fill(g, new RectangleF(x, y, width, boxH), theme.S(10), box);
+            int cx = x + theme.S(12), cy = y + theme.S(12);
+            TextFormatFlags wrap = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.EndEllipsis;
+            if (th > 0) { TextRenderer.DrawText(g, it.RequestTitle, fTitle, new Rectangle(cx, cy, innerW, th), theme.Text, wrap); cy += th + theme.S(6); }
+            if (dh > 0) { TextRenderer.DrawText(g, it.RequestDetail, fMono, new Rectangle(cx, cy, innerW, dh), theme.Muted, wrap); cy += dh + theme.S(8); }
+            List<KeyValuePair<Rectangle, string>> list = new List<KeyValuePair<Rectangle, string>>();
+            int bx = cx, bhh = theme.S(28), gap = theme.S(8);
+            foreach (string a in it.Actions) {
+                string[] p = ParseAction(a);
+                int bw = TextRenderer.MeasureText(p[1], fButton).Width + theme.S(24);
+                if (bx > cx && bx + bw > cx + innerW) { bx = cx; cy += bhh + gap; }
+                Rectangle br = new Rectangle(bx, cy, bw, bhh);
+                bool hot = hoverButton == index + ":" + p[0];
+                Color fill, text;
+                switch (p[2]) {
+                    case "primary": fill = hot ? theme.AccentHover : theme.Accent; text = theme.AccentText; break;
+                    case "destructive": fill = hot ? Draw.Mix(theme.Fill, theme.Text, 0.06f) : theme.Fill; text = theme.Danger; break;
+                    default: fill = hot ? Draw.Mix(theme.Fill, theme.Text, 0.06f) : theme.Fill; text = theme.Text; break;
+                }
+                Draw.Fill(g, br, bhh / 2f, fill);
+                TextRenderer.DrawText(g, p[1], fButton, br, text, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                list.Add(new KeyValuePair<Rectangle, string>(br, p[0]));
+                bx += bw + gap;
+            }
+            buttons[index] = list;
         }
 
         void PaintEmpty(Graphics g) {
@@ -519,22 +704,32 @@ namespace ClaudeNotifier.Ui {
         protected override void OnMouseMove(MouseEventArgs e) {
             base.OnMouseMove(e);
             int h = HitTest(e.Location);
-            if (h != hover) { hover = h; Cursor = h >= 0 ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            string hb = HitButton(e.Location);
+            if (h != hover || hb != hoverButton) { hover = h; hoverButton = hb; Cursor = h >= 0 ? Cursors.Hand : Cursors.Default; Invalidate(); }
         }
 
-        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); if (hover != -1 || pressed != -1) { hover = -1; pressed = -1; Invalidate(); } }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); if (hover != -1 || pressed != -1 || hoverButton != null) { hover = -1; pressed = -1; hoverButton = null; Invalidate(); } }
 
         // Отклик на нажатие, а не на отпускание: выделение и подсветка появляются сразу.
         protected override void OnMouseDown(MouseEventArgs e) {
             base.OnMouseDown(e);
             Focus();
+            if (HitButton(e.Location) != null) return;   // кнопка сработает на отпускание
             int h = HitTest(e.Location);
-            if (h >= 0) { selected = h; pressed = h; Invalidate(); }
+            if (h >= 0) { bool changed = h != selected; selected = h; pressed = h; if (changed) Relayout(); Invalidate(); }
             if (e.Button == MouseButtons.Right && h >= 0) Raise("context", e.Location);
         }
 
         protected override void OnMouseUp(MouseEventArgs e) {
             base.OnMouseUp(e);
+            string hb = HitButton(e.Location);
+            if (hb != null && e.Button == MouseButtons.Left) {
+                int colon = hb.IndexOf(':');
+                selected = int.Parse(hb.Substring(0, colon));
+                pressed = -1; Invalidate();
+                Raise("act:" + hb.Substring(colon + 1), e.Location);
+                return;
+            }
             int h = HitTest(e.Location);
             bool action = pressed >= 0 && h == pressed && e.Button == MouseButtons.Left && items[h].IsAction;
             pressed = -1; Invalidate();
@@ -543,6 +738,7 @@ namespace ClaudeNotifier.Ui {
 
         protected override void OnMouseDoubleClick(MouseEventArgs e) {
             base.OnMouseDoubleClick(e);
+            if (HitButton(e.Location) != null) return;
             int h = HitTest(e.Location);
             if (e.Button == MouseButtons.Left && h >= 0 && !items[h].IsAction) Raise("open", e.Location);
         }
@@ -568,7 +764,7 @@ namespace ClaudeNotifier.Ui {
             else if (e.KeyCode == Keys.Delete && SelectedItem != null && !SelectedItem.IsAction) { Raise("delete", Point.Empty); e.Handled = true; }
             else if (e.KeyCode == Keys.Apps && SelectedItem != null) {
                 Rectangle r = rows[selected]; r.Offset(0, -scroll);
-                Raise("context", new Point(r.X + theme.S(40), r.Bottom - theme.S(8)));
+                Raise("context", new Point(r.X + theme.S(40), r.Top + theme.S(40)));
                 e.Handled = true;
             }
         }
@@ -858,6 +1054,253 @@ namespace ClaudeNotifier.Ui {
                 if (Center) fl &= ~TextFormatFlags.HorizontalCenter;
             }
             TextRenderer.DrawText(g, Text ?? "", Font, new Rectangle(x, 0, Width - x, Height), color, fl);
+        }
+    }
+
+    // Окно со своим заголовком (как в macOS): системная полоса заголовка убрана, но рамка, тень, скругление,
+    // изменение размера, Snap и разворачивание остаются (WM_NCCALCSIZE + WM_NCHITTEST, как в Windows Terminal).
+    public class ChromeForm : Form {
+        [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] struct NCCALCSIZE_PARAMS { public RECT r0, r1, r2; public IntPtr pos; }
+        [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        public int CaptionHeight = 44;
+
+        protected override void OnHandleCreated(EventArgs e) {
+            base.OnHandleCreated(e);
+            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0027);   // SWP_FRAMECHANGED | NOMOVE | NOSIZE | NOZORDER
+        }
+
+        protected override void WndProc(ref Message m) {
+            if (m.Msg == 0x0083 && m.WParam != IntPtr.Zero) {   // WM_NCCALCSIZE
+                NCCALCSIZE_PARAMS p = (NCCALCSIZE_PARAMS)Marshal.PtrToStructure(m.LParam, typeof(NCCALCSIZE_PARAMS));
+                int top = p.r0.Top;
+                base.WndProc(ref m);
+                p = (NCCALCSIZE_PARAMS)Marshal.PtrToStructure(m.LParam, typeof(NCCALCSIZE_PARAMS));
+                // Убираем заголовок (и верхнюю рамку — её заменяет HTTOP ниже). Развёрнутое окно выходит за экран
+                // на толщину рамки — компенсируем.
+                p.r0.Top = top + (WindowState == FormWindowState.Maximized ? GetSystemMetrics(33) + GetSystemMetrics(92) : 0);
+                Marshal.StructureToPtr(p, m.LParam, false);
+                m.Result = IntPtr.Zero;
+                return;
+            }
+            if (m.Msg == 0x0084) {   // WM_NCHITTEST
+                base.WndProc(ref m);
+                if ((int)m.Result == 1) {   // HTCLIENT
+                    int x = unchecked((short)((long)m.LParam & 0xFFFF)), y = unchecked((short)(((long)m.LParam >> 16) & 0xFFFF));
+                    Point pt = PointToClient(new Point(x, y));
+                    if (WindowState == FormWindowState.Normal && pt.Y < 6) m.Result = (IntPtr)12;   // HTTOP
+                    else if (pt.Y < CaptionHeight) m.Result = (IntPtr)2;                          // HTCAPTION: перетаскивание, двойной щелчок
+                }
+                return;
+            }
+            base.WndProc(ref m);
+        }
+    }
+
+    // Полоса заголовка: прозрачна для щелчков (HTTRANSPARENT) — окно под ней перетаскивается; кнопки на ней работают.
+    public sealed class CaptionPanel : Panel {
+        protected override void WndProc(ref Message m) {
+            if (m.Msg == 0x0084) { m.Result = (IntPtr)(-1); return; }
+            base.WndProc(ref m);
+        }
+    }
+
+    // Кнопки окна Windows 11: «Свернуть», «Развернуть»/«Восстановить», «Закрыть» (46 px, глифы Segoe Fluent;
+    // «Закрыть» при наведении — красная). Прижимаются к правому краю заголовка.
+    public sealed class CaptionButtons : Control {
+        Theme theme = Theme.Create(false);
+        int hot = -1, down = -1;
+        Font font;
+        public CaptionButtons() {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+        public void ApplyTheme(Theme t, int height) { theme = t; font = IconButton.IconFont(7.5f); Size = new Size(t.S(46) * 3, height); Invalidate(); }
+        int W { get { return Width / 3; } }
+        int Hit(Point p) { if (p.X < 0 || p.Y < 0 || p.Y >= Height) return -1; int i = p.X / Math.Max(1, W); return i >= 0 && i < 3 ? i : -1; }
+
+        protected override void OnPaint(PaintEventArgs e) {
+            Graphics g = e.Graphics; g.Clear(BackColor);
+            Form f = FindForm();
+            bool max = f != null && f.WindowState == FormWindowState.Maximized;
+            string[] glyphs = { "\uE921", max ? "\uE923" : "\uE922", "\uE8BB" };
+            bool active = f == null || Form.ActiveForm == f;
+            for (int i = 0; i < 3; i++) {
+                Rectangle r = new Rectangle(i * W, 0, W, Height);
+                Color text = active ? theme.Text : theme.Muted;
+                if (i == hot || i == down) {
+                    Color fill;
+                    if (i == 2) { fill = i == down ? Theme.Hex(0xA92B1F) : Theme.Hex(0xC42B1C); text = Color.White; }
+                    else fill = Color.FromArgb(i == down ? (theme.Dark ? 28 : 36) : (theme.Dark ? 18 : 24), theme.Dark ? Color.White : Color.Black);
+                    using (SolidBrush b = new SolidBrush(fill)) g.FillRectangle(b, r);
+                }
+                TextRenderer.DrawText(g, glyphs[i], font, r, text, TextFormatFlags.NoPrefix | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            }
+        }
+        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); int h = Hit(e.Location); if (h != hot) { hot = h; Invalidate(); } }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hot = -1; down = -1; Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (e.Button == MouseButtons.Left) { down = Hit(e.Location); Invalidate(); } }
+        protected override void OnMouseUp(MouseEventArgs e) {
+            base.OnMouseUp(e);
+            int h = Hit(e.Location), was = down; down = -1; Invalidate();
+            if (h < 0 || h != was) return;
+            Form f = FindForm(); if (f == null) return;
+            if (h == 0) f.WindowState = FormWindowState.Minimized;
+            else if (h == 1) f.WindowState = f.WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
+            else f.Close();
+        }
+    }
+
+    // Круглая кнопка-иконка (Segoe Fluent Icons): подсветка при наведении, «включена» — заливка акцентом.
+    public sealed class IconButton : Control {
+        Theme theme = Theme.Create(false);
+        bool hot;
+        readonly Tween press = new Tween(1f);
+        public string Glyph = "";
+        public bool Checked;
+        Font font;
+        public IconButton() {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.Selectable | ControlStyles.SupportsTransparentBackColor, true);
+            Cursor = Cursors.Hand; TabStop = true;
+            press.Changed += delegate { Invalidate(); };
+        }
+        public static Font IconFont(float size) {
+            Font f = new Font("Segoe Fluent Icons", size);
+            if (f.Name == "Segoe Fluent Icons") return f;
+            f.Dispose(); return new Font("Segoe MDL2 Assets", size);
+        }
+        public void ApplyTheme(Theme t) { theme = t; font = IconFont(11f); Size = new Size(t.S(32), t.S(32)); Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e) {
+            Graphics g = e.Graphics; g.Clear(BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
+            float s = press.Value;
+            g.TranslateTransform(Width / 2f, Height / 2f); g.ScaleTransform(s, s); g.TranslateTransform(-Width / 2f, -Height / 2f);
+            if (Checked || hot) {
+                Color fill = Checked ? Color.FromArgb(theme.Dark ? 60 : 36, theme.Accent) : theme.Fill;
+                Draw.Fill(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), theme.S(8), fill);
+            }
+            if (font == null) font = IconFont(11f);
+            TextRenderer.DrawText(g, Glyph, font, ClientRectangle, Checked ? theme.Accent : theme.Text,
+                TextFormatFlags.NoPrefix | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            g.ResetTransform();
+        }
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hot = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hot = false; press.Animate(1f, 160); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (e.Button == MouseButtons.Left) press.Animate(0.92f, 100); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); press.Animate(1f, 160); }
+        protected override void Dispose(bool disposing) { if (disposing) press.Dispose(); base.Dispose(disposing); }
+    }
+
+    // Полоса расхода лимита: подпись, процент и время сброса, дорожка с заливкой (синяя → оранжевая → красная).
+    public sealed class UsageBar : Control {
+        Theme theme = Theme.Create(false);
+        Font fLabel, fValue;
+        public string Label = "";
+        public double Percent = -1;      // < 0 — нет данных
+        public string Detail = "";       // «сброс в 14:05» или «нет данных»
+        public UsageBar() {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+        public void ApplyTheme(Theme t) { theme = t; fLabel = Fonts.Semibold(9f); fValue = Fonts.Text(9f); Height = t.S(34); Invalidate(); }
+        public void SetValue(double percent, string detail) { Percent = percent; Detail = detail ?? ""; Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e) {
+            Graphics g = e.Graphics; g.Clear(BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (fLabel == null) ApplyTheme(theme);
+            int lh = theme.S(18);
+            Draw.TextLine(g, Label, fLabel, new Rectangle(0, 0, Width / 2, lh), theme.Text, TextFormatFlags.Left);
+            string right = Percent < 0 ? Detail : (Math.Round(Percent).ToString() + " %" + (string.IsNullOrEmpty(Detail) ? "" : "  ·  " + Detail));
+            int rw = Draw.Width(g, right, fValue);
+            Draw.TextLine(g, right, fValue, new Rectangle(Width - rw - 2, 0, rw + 2, lh), theme.Muted, TextFormatFlags.Left);
+            float bh = theme.S(6), by = lh + theme.S(5);
+            RectangleF track = new RectangleF(0, by, Width - 1, bh);
+            Draw.Fill(g, track, bh / 2, theme.Fill);
+            if (Percent > 0) {
+                float w = (float)(Math.Min(100, Percent) / 100.0 * track.Width);
+                Color c = Percent >= 90 ? theme.State("error") : (Percent >= 75 ? theme.State("permission") : theme.State("working"));
+                Draw.Fill(g, new RectangleF(0, by, Math.Max(bh, w), bh), bh / 2, c);
+            }
+        }
+    }
+
+    // Глобальная горячая клавиша (RegisterHotKey) на невидимом окне сообщений; Pressed — в потоке UI.
+    public sealed class HotKey : NativeWindow, IDisposable {
+        [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+        [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        public const uint ModAlt = 1, ModControl = 2, ModShift = 4, ModWin = 8;
+        const uint NoRepeat = 0x4000;
+        bool registered;
+        public event EventHandler Pressed;
+        public HotKey() {
+            CreateParams cp = new CreateParams();
+            cp.Parent = new IntPtr(-3);   // HWND_MESSAGE: окно только для сообщений
+            CreateHandle(cp);
+        }
+        public bool Registered { get { return registered; } }
+        public bool Register(uint mods, Keys key) {
+            Unregister();
+            registered = RegisterHotKey(Handle, 1, mods | NoRepeat, (uint)key);
+            return registered;
+        }
+        public void Unregister() { if (registered && Handle != IntPtr.Zero) UnregisterHotKey(Handle, 1); registered = false; }
+        // Для тестов: как будто клавишу нажали.
+        public void Raise() { EventHandler h = Pressed; if (h != null) h(this, EventArgs.Empty); }
+        protected override void WndProc(ref Message m) {
+            if (m.Msg == 0x0312) Raise();   // WM_HOTKEY
+            base.WndProc(ref m);
+        }
+        public void Dispose() { Unregister(); if (Handle != IntPtr.Zero) DestroyHandle(); }
+    }
+
+    // Столбцы по дням: подпись дня снизу, значение над столбцом; выделенный (сегодня) — акцентом, остальные — светлее.
+    public sealed class BarChart : Control {
+        Theme theme = Theme.Create(false);
+        Font fLabel, fValue, fLabelBold;
+        public double[] Values = new double[0];
+        public string[] Labels = new string[0];
+        public string[] ValueLabels = new string[0];
+        public int Highlight = -1;
+        public BarChart() {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+        public void ApplyTheme(Theme t) { theme = t; fLabel = Fonts.Text(8.5f); fLabelBold = Fonts.Semibold(8.5f); fValue = Fonts.Text(8f); Invalidate(); }
+        public void SetData(double[] values, string[] labels, string[] valueLabels, int highlight) {
+            Values = values ?? new double[0]; Labels = labels ?? new string[0]; ValueLabels = valueLabels ?? new string[0]; Highlight = highlight;
+            Invalidate();
+        }
+        protected override void OnPaint(PaintEventArgs e) {
+            Graphics g = e.Graphics; g.Clear(BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (fLabel == null) ApplyTheme(theme);
+            int n = Values.Length;
+            if (n == 0) return;
+            double max = 0; foreach (double v in Values) max = Math.Max(max, v);
+            int top = theme.S(18), bottom = Height - theme.S(22);
+            float slot = Width / (float)n;
+            float bw = Math.Min(theme.S(30), slot * 0.56f);
+            float r = Math.Min(theme.S(6), bw / 2f);
+            for (int i = 0; i < n; i++) {
+                float cx = slot * i + slot / 2f;
+                bool hi = i == Highlight;
+                Color col = hi ? theme.Accent : Draw.Mix(BackColor, theme.Accent, theme.Dark ? 0.45f : 0.35f);
+                float h = max > 0 ? (float)(Values[i] / max) * (bottom - top) : 0;
+                if (Values[i] > 0) h = Math.Max(h, theme.S(4));
+                if (h > 0) {
+                    RectangleF bar = new RectangleF(cx - bw / 2, bottom - h, bw, h);
+                    Draw.Fill(g, bar, Math.Min(r, h / 2f), col);
+                } else {
+                    Draw.Fill(g, new RectangleF(cx - bw / 2, bottom - theme.S(3), bw, theme.S(3)), theme.S(1.5f), theme.Fill);
+                }
+                string vl = i < ValueLabels.Length ? ValueLabels[i] : "";
+                if (!string.IsNullOrEmpty(vl) && Values[i] > 0) {
+                    int vw = Draw.Width(g, vl, fValue);
+                    Draw.TextLine(g, vl, fValue, new Rectangle((int)(cx - vw / 2f) - 1, (int)(bottom - h) - theme.S(17), vw + 2, theme.S(16)), hi ? theme.Text : theme.Muted, TextFormatFlags.Left);
+                }
+                string lb = i < Labels.Length ? Labels[i] : "";
+                Font lf = hi ? fLabelBold : fLabel;
+                int lw = Draw.Width(g, lb, lf);
+                Draw.TextLine(g, lb, lf, new Rectangle((int)(cx - lw / 2f) - 1, bottom + theme.S(4), lw + 2, theme.S(18)), hi ? theme.Text : theme.Muted, TextFormatFlags.Left);
+            }
         }
     }
 

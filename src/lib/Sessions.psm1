@@ -15,6 +15,7 @@ $script:TypeToState = @{
     done       = 'waiting'
     permission = 'permission'
     error      = 'error'
+    request    = 'permission'   # запрос разрешения, на который можно ответить из приложения
 }
 # Порядок в окне: сначала те, что ждут человека.
 $script:StateOrder = @{ permission = 0; error = 1; waiting = 2; working = 3 }
@@ -116,6 +117,24 @@ function Update-NotifierSessionList {
     if ($origin -eq '' -and $old) { $origin = [string](Get-Prop $old 'origin') }
     $device = [string](Get-Prop $Event 'device')   # '' — этот ПК; иначе id устройства из network.json
 
+    # Подробности: начало сеанса (первое событие или начало журнала), статистика журнала, последний запрос.
+    $started = $ts
+    if ($old -and (Get-Prop $old 'started')) { $started = [string](Get-Prop $old 'started') }
+    $stats = $null
+    if ($old) { $stats = Get-Prop $old 'stats' }
+    $evStats = Get-Prop $Event 'stats'
+    if ($evStats) {
+        $stats = $evStats
+        $st = [string](Get-Prop $evStats 'started')
+        if ($st -ne '') { $started = $st }
+    }
+    $transcript = ''
+    if ($old) { $transcript = [string](Get-Prop $old 'transcript') }
+    if (Get-Prop $Event 'transcript') { $transcript = [string](Get-Prop $Event 'transcript') }
+    $prompt = ''
+    if ($old) { $prompt = [string](Get-Prop $old 'prompt') }
+    if (Get-Prop $Event 'prompt') { $prompt = [string](Get-Prop $Event 'prompt') }
+
     $session = [pscustomobject][ordered]@{
         session_id = $sid
         project    = $project
@@ -124,7 +143,11 @@ function Update-NotifierSessionList {
         state      = $state
         since      = $since
         updated    = $ts
+        started    = $started
         preview    = $preview
+        prompt     = $prompt
+        stats      = $stats
+        transcript = $transcript
         window     = $window
     }
     return , @($others + $session)
@@ -172,10 +195,12 @@ function Select-NotifierLiveSessions {
 }
 
 function Get-NotifierSortedSessions {
-    <# .SYNOPSIS Порядок для окна: нужно разрешение, ошибка, ждёт ответа, работает; внутри — новые выше. #>
+    <# .SYNOPSIS Порядок для окна: закреплённые; затем нужно разрешение, ошибка, ждёт ответа, работает; внутри — новые выше. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions, [string[]]$Pinned = @())
+    $script:SortPinned = @($Pinned)
     $sorted = @($Sessions | Sort-Object -Property @(
+            @{ Expression = { if ($script:SortPinned -contains [string](Get-Prop $_ 'session_id')) { 0 } else { 1 } } },
             @{ Expression = { $o = $script:StateOrder[[string](Get-Prop $_ 'state')]; if ($null -eq $o) { 9 } else { $o } } },
             @{ Expression = { [string](Get-Prop $_ 'updated') }; Descending = $true }))
     return , $sorted
@@ -197,9 +222,64 @@ function Format-NotifierElapsed {
 function Get-NotifierSessionStateText {
     <# .SYNOPSIS Русское название статуса сеанса. #>
     param([string]$State)
-    $key = "state.$State"
-    if ($NotifierStrings.ContainsKey($key)) { return $NotifierStrings[$key] }
+    # Своя таблица, а не переменная из Config.psm1: импортированная переменная обнуляется,
+    # если Config перезагружают с -Force (так делают тесты).
+    $names = @{ working = 'Работает'; waiting = 'Ждёт ответа'; permission = 'Нужно разрешение'; error = 'Ошибка' }
+    if ($names.ContainsKey($State)) { return $names[$State] }
     return $State
 }
 
-Export-ModuleMember -Function Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText
+# session-prefs.json — что пользователь задал сеансу: своё имя, закрепление, без уведомлений.
+# Отдельно от sessions.json: настройки переживают завершение и возобновление сеанса (claude --resume).
+$script:PrefsKeepDays = 30
+
+function Get-NotifierSessionPrefs {
+    <# .SYNOPSIS Настройки сеансов: hashtable session_id → @{ title; pinned; muted; updated }. #>
+    [CmdletBinding()]
+    param([string]$DataRoot = (Get-NotifierDataRoot))
+    $prefs = @{}
+    $path = Join-Path $DataRoot 'session-prefs.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $prefs }
+    try { $obj = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop } catch { return $prefs }
+    if ($obj -isnot [System.Management.Automation.PSCustomObject]) { return $prefs }
+    foreach ($p in $obj.PSObject.Properties) {
+        $v = $p.Value
+        $prefs[$p.Name] = @{ title = [string](Get-Prop $v 'title'); pinned = [bool](Get-Prop $v 'pinned'); muted = [bool](Get-Prop $v 'muted'); updated = [string](Get-Prop $v 'updated') }
+    }
+    return $prefs
+}
+
+function Set-NotifierSessionPref {
+    <#
+    .SYNOPSIS
+    Меняет настройку сеанса: title (пустая строка — вернуть имя проекта), pinned, muted. Записи без настроек
+    и старше 30 дней удаляются.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][ValidateSet('title', 'pinned', 'muted')][string]$Name,
+        [AllowEmptyString()]$Value,
+        [string]$DataRoot = (Get-NotifierDataRoot),
+        [datetime]$Now = [DateTime]::UtcNow
+    )
+    $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot
+    if (-not $prefs.ContainsKey($SessionId)) { $prefs[$SessionId] = @{ title = ''; pinned = $false; muted = $false; updated = '' } }
+    if ($Name -eq 'title') { $prefs[$SessionId].title = ([string]$Value).Trim() } else { $prefs[$SessionId][$Name] = [bool]$Value }
+    $prefs[$SessionId].updated = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+    $out = [ordered]@{}
+    foreach ($k in @($prefs.Keys | Sort-Object)) {
+        $e = $prefs[$k]
+        if ($e.title -eq '' -and -not $e.pinned -and -not $e.muted) { continue }
+        $u = ConvertTo-UtcTime $e.updated
+        if ($null -ne $u -and ($Now - $u).TotalDays -gt $script:PrefsKeepDays) { continue }
+        $out[$k] = [ordered]@{ title = $e.title; pinned = $e.pinned; muted = $e.muted; updated = $e.updated }
+    }
+    if (-not (Test-Path -LiteralPath $DataRoot)) { New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null }
+    $path = Join-Path $DataRoot 'session-prefs.json'
+    $tmp = "$path.tmp-$PID"
+    [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $out -Depth 4), (New-Object System.Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+Export-ModuleMember -Function Get-NotifierSessionPrefs, Set-NotifierSessionPref, Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText

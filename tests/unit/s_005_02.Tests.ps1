@@ -131,9 +131,9 @@ Describe 's_005_02 · меню «История» в трее' {
         $root = Join-Path $TestDrive 'traymenu'
         $icon = New-NotifierTrayIcon -OnExit { } -DataRoot $root
         try {
-            ($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'Сеансы,Устройства,История,,Выход'
+            ($icon.ContextMenuStrip.Items | ForEach-Object { $_.Text }) -join ',' | Should Be 'Сеансы,Устройства,Настройки,Статистика,История,,Выход'
             Add-NotifierHistory -Event (New-Ev 3) -DataRoot $root | Out-Null
-            $hist = $icon.ContextMenuStrip.Items[2]
+            $hist = $icon.ContextMenuStrip.Items[4]
             $hist.ShowDropDown(); $hist.HideDropDown()
             $hist.DropDownItems[0].Tag | Should Be (New-Ev 3).id
         }
