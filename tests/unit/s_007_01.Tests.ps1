@@ -150,6 +150,18 @@ Describe 's_007_01 · маршруты HTTP' {
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{}' @{ authorization = 'Bearer nope' }) -Ctx $ctx).Status | Should Be 401
     }
 
+    It 'вход с формы страницы: свой Origin — вход; Origin null — понятная страница, а не JSON' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'origin')
+        $ctx.Pairing = New-NotifierPairing
+        $bad = Invoke-NotifierHttpRequest -Request (New-Req POST '/login' "pin=$($ctx.Pairing.Pin)" @{ origin = 'null'; host = '192.168.1.50:47600' }) -Ctx $ctx
+        $bad.Status | Should Be 403
+        $bad.ContentType | Should Match 'text/html'
+        $bad.Body | Should Match 'Обновите страницу'
+        $ok = Invoke-NotifierHttpRequest -Request (New-Req POST '/login' "pin=$($ctx.Pairing.Pin)" @{ origin = 'http://192.168.1.50:47600'; host = '192.168.1.50:47600'; 'user-agent' = 'Mozilla/5.0 (Macintosh)' }) -Ctx $ctx
+        $ok.Status | Should Be 303
+        (Get-CookieToken $ok) | Should Match '^[A-Za-z0-9_-]{43}$'
+    }
+
     It 'вход: неверный PIN → 401 с числом попыток; верный → cookie, устройство по User-Agent, Paired' {
         $ctx = New-Ctx (Join-Path $TestDrive 'r2')
         $bad = Invoke-NotifierHttpRequest -Request (New-Req POST '/login' 'pin=999999x') -Ctx $ctx
@@ -217,6 +229,10 @@ Describe 's_007_01 · маршруты HTTP' {
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; 'content-type' = 'text/plain' }) -Ctx $ctx).Status | Should Be 415
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; origin = 'http://evil.example'; host = '192.168.1.50:47600' }) -Ctx $ctx).Status | Should Be 403
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; origin = 'http://192.168.1.50:47600'; host = '192.168.1.50:47600' }) -Ctx $ctx).Status | Should Be 200
+        # «Origin: null» (так шлёт браузер со сторонней страницы или песочницы) — отказ
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; origin = 'null'; host = '192.168.1.50:47600' }) -Ctx $ctx).Status | Should Be 403
+        # Регистр имени хоста не важен (адрес вида testpc.local)
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; origin = 'http://TestPC.local:47600'; host = 'testpc.local:47600' }) -Ctx $ctx).Status | Should Be 200
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/hello' '{"name":"MacBook Pro Саши"}' $bearer) -Ctx $ctx).Status | Should Be 200
         $d = $ctx.Network.devices[0]
         $d.name | Should Be 'MacBook Pro Саши'
@@ -290,6 +306,8 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
             $resp = $task.Result
             [int]$resp.StatusCode | Should Be 200
             $resp.Headers.GetValues('Cache-Control') | Should Be 'no-store'
+            # same-origin: со своей страницы браузер шлёт настоящий Origin (при no-referrer — «null», и вход ломался)
+            $resp.Headers.GetValues('Referrer-Policy') | Should Be 'same-origin'
             $resp.Content.ReadAsStringAsync().Result | Should Match 'TESTPC'
         }
         finally {

@@ -160,7 +160,10 @@ function Write-NotifierHttpResponse {
         $resp.ContentType = $Response.ContentType
         $resp.Headers.Add('Cache-Control', 'no-store')
         $resp.Headers.Add('X-Content-Type-Options', 'nosniff')
-        $resp.Headers.Add('Referrer-Policy', 'no-referrer')
+        # same-origin, а не no-referrer: при no-referrer браузер шлёт «Origin: null» даже со своей страницы
+        # (форма PIN, fetch), и проверка Origin отклоняла их. С same-origin свои запросы несут настоящий Origin,
+        # а со сторонних сайтов — по-прежнему «null» (и отклоняются). Наружу адрес страницы не уходит.
+        $resp.Headers.Add('Referrer-Policy', 'same-origin')
         foreach ($h in $Response.Headers) {
             if ($h[0] -eq 'Location') { $resp.RedirectLocation = $h[1] }
             else { $resp.Headers.Add($h[0], $h[1]) }
@@ -326,7 +329,11 @@ function Invoke-NotifierHttpRequest {
         if ($origin -ne '' -and $hostHeader -ne '') {
             $originHost = ''
             try { $originHost = ([Uri]$origin).Authority } catch { }
-            if ($originHost -ne $hostHeader) { return (New-JsonResponse 403 @{ error = 'bad origin' }) }
+            if (-not [string]::Equals($originHost, $hostHeader, [StringComparison]::OrdinalIgnoreCase)) {
+                # Форма PIN — понятная страница, а не JSON (например, если открыта старая копия страницы).
+                if ($path -eq '/login') { return (Get-LoginPage $Ctx 'Обновите страницу и введите код ещё раз.' 403) }
+                return (New-JsonResponse 403 @{ error = 'bad origin' })
+            }
         }
     }
 
