@@ -65,7 +65,10 @@ function New-NotifierPopover {
     $cards.EmptyHint = 'Начните работу в Claude Code — сеанс появится здесь.'
     $cards.add_ItemAction({
             param($sender, $e)
-            if ($e.Action -like 'act:*') {
+            if ($e.Action -like 'act:*' -and (Invoke-NotifierExtraCardAction -Item $e.Item -ActionId $e.Action.Substring(4) -Control $sender -Location $e.Location -Source popover)) {
+                [void](Invoke-NotifierSessionsRefresh)
+            }
+            elseif ($e.Action -like 'act:*') {
                 $script:DialogOpen = $true
                 try { $notice = Invoke-NotifierCardAction -Item $e.Item -ActionId $e.Action.Substring(4) }
                 finally { $script:DialogOpen = $false }

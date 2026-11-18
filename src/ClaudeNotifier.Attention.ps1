@@ -20,6 +20,8 @@ $script:StallNotified = @{}          # session_id → с какого момен
 $script:ApiErrorNotified = @{}       # session_id → время ошибки API из журнала, о которой уже сообщили
 $script:ApiErrorGraceSec = 20        # столько ждём хука StopFailure, прежде чем сообщить об ошибке из журнала
 $script:ExpandedGroups = @{}         # группы сеансов одного проекта, раскрытые в списке
+$script:AgentBudgetMs = 400          # за один проход трея журналы агентов читаются не дольше (первый раз их бывает десятки МБ)
+$script:AgentActiveMinutes = 30      # незавершённый агент, журнал которого молчит дольше, считается брошенным
 
 function Get-NotifierSessionName {
     <# .SYNOPSIS Имя сеанса для уведомлений и карточек: своё (из настроек сеанса) или имя проекта. #>
@@ -98,6 +100,158 @@ function Test-NotifierQuickTask {
     $end = $Now
     if ($Event.PSObject.Properties['ts']) { $e = ConvertTo-NotifierUtc ([string]$Event.ts); if ($null -ne $e) { $end = $e } }
     return (($end - $start).TotalMinutes -lt [int]$Config.longTasks.minutes)
+}
+
+# --- Агенты сеанса ---
+
+function Get-NotifierSessionAgents {
+    <#
+    .SYNOPSIS
+    Агенты сеанса по журналам <журнал без .jsonl>\subagents\agent-*.jsonl: активные — не завершённые (finished в
+    agent-*.meta.json) и писавшие в журнал за последние 30 минут: имя (описание задачи) и последнее действие;
+    Cost — стоимость всех агентов сеанса. Журналы читаются с места, где остановились, свежие первыми, в пределах
+    BudgetMs (по часам Clock); не успели все — Complete = $false, стоимость неполная.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Transcript, [Parameter(Mandatory = $true)][string]$StateDir, [datetime]$Now = [DateTime]::UtcNow,
+        [Diagnostics.Stopwatch]$Clock, [int]$BudgetMs = 0)
+    $res = @{ Active = @(); Cost = [double]0; Complete = $true }
+    $sub = Join-Path ([IO.Path]::ChangeExtension($Transcript, $null).TrimEnd('.')) 'subagents'
+    if (-not [IO.Directory]::Exists($sub)) { return $res }
+    $files = @((New-Object IO.DirectoryInfo $sub).GetFiles('*.jsonl') | Sort-Object LastWriteTimeUtc -Descending)
+    foreach ($f in $files) {
+        if ($Clock -and $BudgetMs -gt 0 -and $Clock.ElapsedMilliseconds -gt $BudgetMs) { $res.Complete = $false; break }
+        try { $st = Get-NotifierTranscriptStats -Path $f.FullName -StateDir $StateDir } catch { continue }
+        if ($null -eq $st) { continue }
+        $res.Cost += [double]$st.cost
+        $name = ''; $finished = $false
+        $metaPath = [IO.Path]::ChangeExtension($f.FullName, '.meta.json')
+        if ([IO.File]::Exists($metaPath)) {
+            try {
+                $meta = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($metaPath, [Text.Encoding]::UTF8)) -ErrorAction Stop
+                if ($meta.PSObject.Properties['finished']) { $finished = [bool]$meta.finished }
+                if ($meta.PSObject.Properties['description']) { $name = [string]$meta.description }
+            }
+            catch { }
+        }
+        if ($finished -or ($Now - $f.LastWriteTimeUtc).TotalMinutes -gt $script:AgentActiveMinutes) { continue }
+        if ($name -eq '') { $name = 'Агент' }
+        $res.Active += [pscustomobject][ordered]@{ name = $name; doing = [string]$st.lastTool }
+    }
+    return $res
+}
+
+# --- Изменённые файлы и папка проекта ---
+
+function Get-NotifierSessionFiles {
+    <# .SYNOPSIS Полные пути файлов, изменённых в сеансе (до 15, новые первыми). #>
+    param($Session)
+    if ($null -eq $Session -or -not $Session.PSObject.Properties['stats'] -or $null -eq $Session.stats) { return @() }
+    if (-not $Session.stats.PSObject.Properties['fileList']) { return @() }
+    $list = @(@($Session.stats.fileList) | Where-Object { $_ -is [string] -and $_ -ne '' } | ForEach-Object { $_ -replace '/', '\' })
+    [array]::Reverse($list)
+    return $list   # не «, $list»: вызывающие оборачивают в @(), иначе получится массив из одного массива
+}
+
+function Get-NotifierSessionFolder {
+    <# .SYNOPSIS Папка проекта сеанса (cwd из журнала) или '', если неизвестна или её нет на диске. #>
+    param($Session)
+    if ($null -eq $Session -or -not $Session.PSObject.Properties['stats'] -or $null -eq $Session.stats) { return '' }
+    if (-not $Session.stats.PSObject.Properties['cwd']) { return '' }
+    $dir = ([string]$Session.stats.cwd) -replace '/', '\'
+    if ($dir -eq '' -or -not [IO.Directory]::Exists($dir)) { return '' }
+    return $dir
+}
+
+function Get-NotifierCodePath {
+    # VS Code: code.cmd из PATH или из обычного места установки.
+    $c = Get-Command 'code.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { return $c.Source }
+    foreach ($p in @("$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd", "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd")) { if ([IO.File]::Exists($p)) { return $p } }
+    return ''
+}
+
+function Open-NotifierFile {
+    <#
+    .SYNOPSIS
+    Открывает файл в VS Code; без VS Code — показывает его в Проводнике (файл не запускается). Возвращает текст подсказки.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not [IO.File]::Exists($Path)) { return "Файла уже нет: $([IO.Path]::GetFileName($Path))" }
+    $code = Get-NotifierCodePath
+    if ($code) { Start-Process -FilePath $code -ArgumentList ('"' + $Path + '"') -WindowStyle Hidden; return '' }
+    Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $Path + '"')
+    return ''
+}
+
+function Open-NotifierProjectFolder {
+    param($Session)
+    $dir = Get-NotifierSessionFolder $Session
+    if ($dir -eq '') { return 'Папка проекта не найдена' }
+    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $dir + '"')
+    return ''
+}
+
+function Add-NotifierFileItems {
+    <# .SYNOPSIS Пункты «файл» (путь относительно папки проекта) в меню или подменю; щелчок открывает файл. #>
+    param([Parameter(Mandatory = $true)]$Items, $Session, $Theme)
+    $Items.Clear()
+    $files = @(Get-NotifierSessionFiles $Session)
+    $root = Get-NotifierSessionFolder $Session
+    if ($files.Count -eq 0) {
+        $none = New-Object System.Windows.Forms.ToolStripMenuItem 'Файлы не менялись'
+        $none.Enabled = $false
+        [void]$Items.Add($none)
+        return
+    }
+    foreach ($f in $files) {
+        $text = $f
+        if ($root -and $f.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { $text = $f.Substring($root.Length + 1) }
+        $mi = New-Object System.Windows.Forms.ToolStripMenuItem $text
+        if ($Theme) { $mi.Padding = New-Object System.Windows.Forms.Padding($Theme.S(8), $Theme.S(4), $Theme.S(8), $Theme.S(4)) }
+        $mi.Tag = $f
+        $mi.ToolTipText = $f
+        $mi.add_Click({ $n = Open-NotifierFile -Path ([string]$this.Tag); if ($n) { Show-NotifierActionNotice $n } })
+        [void]$Items.Add($mi)
+    }
+}
+
+function Show-NotifierActionNotice([string]$Text) {
+    if ($script:MenuSource -eq 'popover' -and $script:Popover -and -not $script:Popover.IsDisposed) { $script:Popover.Tag.Sub.Text = $Text; $script:PopoverNoticeUntil = [datetime]::UtcNow.AddSeconds(4) }
+    else { Show-NotifierNotice $Text }
+}
+
+function Invoke-NotifierExtraCardAction {
+    <#
+    .SYNOPSIS
+    Кнопки карточек, которые не отвечают Claude: files (меню изменённых файлов), folder (папка проекта),
+    clear (убрать все неактивные сеансы). Возвращает $true, если кнопка обработана.
+    #>
+    param([Parameter(Mandatory = $true)]$Item, [Parameter(Mandatory = $true)][string]$ActionId, $Control, [System.Drawing.Point]$Location, [string]$Source = 'window')
+    $script:MenuSource = $Source
+    switch ($ActionId) {
+        'files' {
+            $theme = $null
+            if ($script:SessionsForm -and -not $script:SessionsForm.IsDisposed) { $theme = $script:SessionsForm.Tag.Theme }
+            if ($Source -eq 'popover' -and $script:Popover) { $theme = $script:Popover.Tag.Theme }
+            if ($null -eq $theme) { $theme = Get-NotifierTheme }
+            $menu = New-NotifierMenu -Theme $theme
+            Add-NotifierFileItems -Items $menu.Items -Session (Get-NotifierCardSession $Item) -Theme $theme
+            if ($Control) { $menu.Show($Control, $Location) }
+            return $true
+        }
+        'folder' { $n = Open-NotifierProjectFolder (Get-NotifierCardSession $Item); if ($n) { Show-NotifierActionNotice $n }; return $true }
+        'clear' {
+            if (-not $Item.IsGroup -or $Item.Tag -isnot [hashtable] -or -not $Item.Tag.ContainsKey('Ids')) { return $false }
+            $ids = @($Item.Tag.Ids)
+            $rest = @(Get-NotifierSessions -DataRoot $script:TrayDataRoot | Where-Object { $ids -notcontains [string]$_.session_id })
+            Save-NotifierSessions -Sessions $rest -DataRoot $script:TrayDataRoot
+            $script:ExpandedGroups.Remove([string]$Item.Tag.Group)
+            $script:SessionsDirty = $true
+            Show-NotifierActionNotice "Убрано из списка: $(Format-NotifierSessionCount $ids.Count)"
+            return $true
+        }
+    }
+    return $false
 }
 
 # --- Сеанс завис или упал ---
@@ -197,6 +351,7 @@ function Update-NotifierLiveContext {
     if ($sessions.Count -eq 0) { return }
     $changed = $false
     $stateDir = Join-Path $DataRoot 'stats'
+    $clock = [Diagnostics.Stopwatch]::StartNew()
     $config = Get-NotifierConfig -DataRoot $DataRoot
     $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot
     foreach ($s in $sessions) {
@@ -249,7 +404,17 @@ function Update-NotifierLiveContext {
                         ts = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture) })
             }
         }
-        if ($old -and $old.PSObject.Properties['window'] -and [int64]$old.context -eq $st.context -and [int64]$old.output -eq $st.output -and [int]$old.tools -eq $st.tools) { continue }
+        # Агенты: кто сейчас работает и сколько стоили все агенты сеанса.
+        $ag = Get-NotifierSessionAgents -Transcript $tp -StateDir $stateDir -Now $Now -Clock $clock -BudgetMs $script:AgentBudgetMs
+        $agentsCost = [double]$ag.Cost
+        if (-not $ag.Complete) { $agentsCost = 0; if ($old -and $old.PSObject.Properties['agentsCost']) { $agentsCost = [double]$old.agentsCost } }
+        $st.agentsCost = $agentsCost
+        $sig = (@($ag.Active) | ForEach-Object { "$($_.name)|$($_.doing)" }) -join "`n"
+        $oldSig = ''
+        if ($s.PSObject.Properties['agents'] -and $s.agents) { $oldSig = (@($s.agents) | ForEach-Object { "$($_.name)|$($_.doing)" }) -join "`n" }
+        if ($sig -ne $oldSig) { $s | Add-Member -NotePropertyName agents -NotePropertyValue @($ag.Active) -Force; $changed = $true }
+        if ($old -and $old.PSObject.Properties['window'] -and [int64]$old.context -eq $st.context -and [int64]$old.output -eq $st.output -and [int]$old.tools -eq $st.tools -and
+            $old.PSObject.Properties['agentsCost'] -and [double]$old.agentsCost -eq $agentsCost) { continue }
         $s | Add-Member -NotePropertyName stats -NotePropertyValue ([pscustomobject]$st) -Force
         $changed = $true
     }
@@ -450,6 +615,9 @@ function New-NotifierSessionMenu {
     param([Parameter(Mandatory = $true)]$Theme)
     $menu = New-NotifierMenu -Theme $Theme -Items @(
         @('Перейти к окну', { Invoke-NotifierMenuAction focus }),
+        @('Изменённые файлы', $null),
+        @('Открыть папку проекта', { Invoke-NotifierMenuAction folder }),
+        '-',
         @('Переименовать…', { Invoke-NotifierMenuAction rename }),
         @('Закрепить сверху', { Invoke-NotifierMenuAction pin }),
         @('Без уведомлений', { Invoke-NotifierMenuAction mute }),
@@ -457,6 +625,11 @@ function New-NotifierSessionMenu {
         @('Убрать из списка', { Invoke-NotifierMenuAction remove })
     )
     $menu.Items[0].Font = [ClaudeNotifier.Ui.Fonts]::Semibold(9.5)
+    $files = $menu.Items[1]
+    [void]$files.DropDownItems.Add('(пусто)')   # чтобы у пункта была стрелка подменю
+    $files.DropDown.Renderer = $menu.Renderer
+    $files.DropDown.Font = $menu.Font
+    $menu.Tag = $Theme
     $menu.add_Opening({
             $item = $script:MenuItem
             $pinned = $false; $muted = $false
@@ -467,8 +640,15 @@ function New-NotifierSessionMenu {
                 $sid = [string]$s.session_id
                 if ($prefs.ContainsKey($sid)) { $pinned = [bool]$prefs[$sid].pinned; $muted = [bool]$prefs[$sid].muted }
             }
-            $this.Items[2].Text = @('Закрепить сверху', 'Открепить')[[int]$pinned]
-            $this.Items[3].Text = @('Без уведомлений', 'Включить уведомления')[[int]$muted]
+            $this.Items[5].Text = @('Закрепить сверху', 'Открепить')[[int]$pinned]
+            $this.Items[6].Text = @('Без уведомлений', 'Включить уведомления')[[int]$muted]
+            # Файлы и папка — только для сеансов этого ПК.
+            $session = $null
+            if ($item) { $session = Get-NotifierCardSession $item }
+            $local = $session -and -not ($session.PSObject.Properties['device'] -and [string]$session.device -ne '')
+            Add-NotifierFileItems -Items $this.Items[1].DropDownItems -Session $session -Theme $this.Tag
+            $this.Items[1].Enabled = $local -and @(Get-NotifierSessionFiles $session).Count -gt 0
+            $this.Items[2].Enabled = $local -and (Get-NotifierSessionFolder $session) -ne ''
         })
     return $menu
 }
@@ -491,6 +671,7 @@ function Invoke-NotifierMenuAction {
     $notice = ''
     switch ($Action) {
         { @('rename', 'pin', 'mute') -contains $_ } { $notice = Invoke-NotifierSessionPrefAction -Item $item -Action $Action -Owner $owner }
+        'folder' { $notice = Open-NotifierProjectFolder (Get-NotifierCardSession $item) }
         'focus' {
             $s = $item.Tag; if ($s -is [hashtable]) { $s = $s.Session }
             if ($s.PSObject.Properties['device'] -and [string]$s.device -ne '') { $notice = "Этот сеанс идёт на устройстве «$(Get-NotifierDeviceName ([string]$s.device))»" }

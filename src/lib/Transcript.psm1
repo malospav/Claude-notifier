@@ -1,6 +1,7 @@
 ﻿Set-StrictMode -Version 2.0
 
 Import-Module (Join-Path $PSScriptRoot 'Sessions.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Activity.psm1')   # цены моделей: Get-NotifierMessageCost
 
 # Статистика сеанса из журнала Claude Code (transcript_path, JSONL): время начала, размер контекста,
 # токены ответов, число запросов и действий. Журнал бывает десятки мегабайт, поэтому он читается
@@ -20,14 +21,20 @@ $script:RxFilePath = [regex]'"(?:file_path|notebook_path)":"((?:[^"\\]|\\.)*)"'
 $script:RxCommand = [regex]'"command":"((?:[^"\\]|\\.)*)"'
 $script:RxPreTokens = [regex]'"preTokens":(\d+)'
 $script:RxText = [regex]'"text":"((?:[^"\\]|\\.)*)"'
+$script:RxCwd = [regex]'"cwd":"((?:[^"\\]|\\.)*)"'
+$script:RxPattern = [regex]'"(?:pattern|description|url|query)":"((?:[^"\\]|\\.)*)"'
+$script:RxCache5m = [regex]'"ephemeral_5m_input_tokens":(\d+)'
+$script:RxCache1h = [regex]'"ephemeral_1h_input_tokens":(\d+)'
+$script:KeepFileList = 15
 $script:EditTools = @('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 $script:ShellTools = @('Bash', 'PowerShell')
 $script:MaxFiles = 500
 $script:KeepCommands = 5
 
 function New-TranscriptState {
-    return [ordered]@{ v = 3; offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
-        model = ''; maxCtx = [int64]0; compactions = 0; files = @(); toolCounts = @{}; commands = @(); lastActivity = ''; apiError = ''; apiErrorText = '' }
+    return [ordered]@{ v = 4; offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
+        model = ''; maxCtx = [int64]0; compactions = 0; files = @(); toolCounts = @{}; commands = @(); lastActivity = ''; apiError = ''; apiErrorText = ''
+        cost = [double]0; mIn = [int64]0; mRead = [int64]0; m5 = [int64]0; m1 = [int64]0; mModel = ''; mFast = $false; cwd = ''; cwdOk = $false; dirKey = ''; lastTool = ''; sub = $false }
 }
 
 function ConvertFrom-JsonString([string]$Escaped) {
@@ -56,6 +63,15 @@ function Add-ToolUses($State, [string]$Line) {
         if (-not $m.Success) { continue }
         $name = $m.Groups[1].Value
         if ($State.toolCounts.ContainsKey($name)) { $State.toolCounts[$name]++ } else { $State.toolCounts[$name] = 1 }
+        # Последнее действие — для строки «что делает агент»: инструмент и его цель (файл, команда, шаблон).
+        $target = ''
+        $fm = $script:RxFilePath.Match($seg); $cm = $script:RxCommand.Match($seg); $pm = $script:RxPattern.Match($seg)
+        if ($fm.Success) { $target = [IO.Path]::GetFileName((ConvertFrom-JsonString $fm.Groups[1].Value)) }
+        elseif ($cm.Success) { $target = ((ConvertFrom-JsonString $cm.Groups[1].Value) -split "`n")[0].Trim() }
+        elseif ($pm.Success) { $target = ((ConvertFrom-JsonString $pm.Groups[1].Value) -split "`n")[0].Trim() }
+        if ($target.Length -gt 70) { $target = $target.Substring(0, 69) + [char]0x2026 }
+        $State.lastTool = ($name -replace '^mcp__.*__', '')
+        if ($target) { $State.lastTool += ": $target" }
         if ($script:EditTools -contains $name) {
             $f = $script:RxFilePath.Match($seg)
             if ($f.Success) {
@@ -80,6 +96,16 @@ function Get-StatePath([string]$TranscriptPath, [string]$StateDir) {
     return (Join-Path $StateDir ((-join ($bytes[0..7] | ForEach-Object { $_.ToString('x2') })) + '.json'))
 }
 
+function Get-StateMessageCost($State) {
+    return (Get-NotifierMessageCost -Model $State.mModel -InTokens $State.mIn -Output $State.lastOut -CacheRead $State.mRead -Cache5m $State.m5 -Cache1h $State.m1 -Fast:([bool]$State.mFast))
+}
+
+function Max-Int([regex]$Rx, [string]$Line, [int64]$Old) {
+    $m = $Rx.Match($Line)
+    if ($m.Success) { return [Math]::Max($Old, [int64]$m.Groups[1].Value) }
+    return $Old
+}
+
 function First-Int([regex]$Rx, [string]$Line) {
     $m = $Rx.Match($Line)
     if ($m.Success) { return [int64]$m.Groups[1].Value }
@@ -92,6 +118,16 @@ function Update-TranscriptState {
     if ($State.started -eq '') {
         $ts = $script:RxTimestamp.Match($Line)
         if ($ts.Success) { $State.started = $ts.Groups[1].Value }
+    }
+    # Папка проекта: тот cwd, из которого Claude Code назвал папку журнала (каждый символ кроме букв и цифр → «-»);
+    # пока такого нет — последний встреченный.
+    if (-not $State.cwdOk) {
+        $cw = $script:RxCwd.Match($Line)
+        if ($cw.Success) {
+            $c = (ConvertFrom-JsonString $cw.Groups[1].Value).TrimEnd('\', '/')
+            $State.cwd = $c
+            if ($State.dirKey -ne '' -and ($c -replace '[^A-Za-z0-9]', '-') -eq $State.dirKey) { $State.cwdOk = $true }
+        }
     }
     if ($Line.Contains('"subtype":"compact_boundary"')) {
         # Сжатие истории: контекст сброшен; размер до сжатия подсказывает окно модели.
@@ -122,18 +158,29 @@ function Update-TranscriptState {
             $ta = $script:RxTimestamp.Match($Line)
             if ($ta.Success -and $ta.Groups[1].Value -gt [string]$State.lastActivity) { $State.lastActivity = $ta.Groups[1].Value }
         }
-        # Ответы субагентов (isSidechain) — их собственный контекст, не контекст сеанса.
-        if ($Line.Contains('"usage"') -and -not $Line.Contains('"isSidechain":true')) {
+        # Ответы субагентов (isSidechain) в журнале сеанса — их собственный контекст, не контекст сеанса.
+        # В журнале самого субагента (sub) все строки такие — там они и считаются.
+        if ($Line.Contains('"usage"') -and ($State.sub -or -not $Line.Contains('"isSidechain":true'))) {
             $id = $script:RxMsgId.Match($Line)
             $msgId = ''
             if ($id.Success) { $msgId = $id.Groups[1].Value }
             # Одно сообщение пишется несколькими строками с одной и той же usage: считаем его один раз.
             if ($msgId -ne $State.lastId) {
                 $State.output += $State.lastOut
+                $State.cost += Get-StateMessageCost $State
                 $State.lastId = $msgId
                 $State.lastOut = [int64]0
+                $State.mIn = [int64]0; $State.mRead = [int64]0; $State.m5 = [int64]0; $State.m1 = [int64]0
+                $State.mModel = ''
+                if ($mm.Success) { $State.mModel = $mm.Groups[1].Value }
+                $State.mFast = $Line.Contains('"speed":"fast"')
             }
             $State.lastOut = [Math]::Max($State.lastOut, (First-Int $script:RxOutput $Line))
+            $State.mIn = Max-Int $script:RxInput $Line $State.mIn
+            $State.mRead = Max-Int $script:RxCacheRead $Line $State.mRead
+            $c5 = $script:RxCache5m.Match($Line); $c1 = $script:RxCache1h.Match($Line)
+            if ($c5.Success -or $c1.Success) { $State.m5 = Max-Int $script:RxCache5m $Line $State.m5; $State.m1 = Max-Int $script:RxCache1h $Line $State.m1 }
+            else { $State.m5 = Max-Int $script:RxCacheNew $Line $State.m5 }
             $State.context = (First-Int $script:RxInput $Line) + (First-Int $script:RxCacheRead $Line) + (First-Int $script:RxCacheNew $Line)
             if ($State.context -gt $State.maxCtx) { $State.maxCtx = $State.context }
         }
@@ -165,10 +212,12 @@ function Get-NotifierTranscriptStats {
     if (Test-Path -LiteralPath $statePath) {
         try {
             $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8)) -ErrorAction Stop
-            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 3) { throw 'old state' }   # прежний формат: перечитать журнал целиком
+            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 4) { throw 'old state' }   # прежний формат: перечитать журнал целиком
             foreach ($k in @($state.Keys)) { if ($saved.PSObject.Properties[$k]) { $state[$k] = $saved.$k } }
             $state.offset = [int64]$state.offset; $state.output = [int64]$state.output; $state.lastOut = [int64]$state.lastOut; $state.context = [int64]$state.context
             $state.maxCtx = [int64]$state.maxCtx
+            foreach ($k in @('mIn', 'mRead', 'm5', 'm1')) { $state[$k] = [int64]$state[$k] }
+            $state.cost = [double]$state.cost; $state.mFast = [bool]$state.mFast; $state.cwdOk = [bool]$state.cwdOk
             $state.files = @(@($state.files) | Where-Object { $_ -is [string] })
             $state.commands = @(@($state.commands) | Where-Object { $_ -is [string] })
             $counts = @{}
@@ -178,9 +227,14 @@ function Get-NotifierTranscriptStats {
         }
         catch { $state = New-TranscriptState }
     }
+    $isSub = $Path -match '[\\/]subagents[\\/]'
+    $dir = Split-Path $Path -Parent
+    if ($isSub) { $dir = Split-Path (Split-Path $dir -Parent) -Parent }
+    $dirKey = Split-Path $dir -Leaf
+    $state.sub = $isSub; $state.dirKey = $dirKey
     $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
-        if ($fs.Length -lt $state.offset) { $state = New-TranscriptState }
+        if ($fs.Length -lt $state.offset) { $state = New-TranscriptState; $state.sub = $isSub; $state.dirKey = $dirKey }
         [void]$fs.Seek($state.offset, [IO.SeekOrigin]::Begin)
         $remaining = $fs.Length - $state.offset
         if ($remaining -gt 0) {
@@ -214,6 +268,10 @@ function Get-NotifierTranscriptStats {
         lastActivity = [string]$state.lastActivity
         apiError    = [string]$state.apiError
         apiErrorText = [string]$state.apiErrorText
+        cost        = [double]($state.cost + (Get-StateMessageCost $state))
+        cwd         = [string]$state.cwd
+        lastTool    = [string]$state.lastTool
+        fileList    = @(@($state.files) | Select-Object -Last $script:KeepFileList)
         files       = [int]@($state.files).Count
         recentFiles = @(@($state.files) | Select-Object -Last 3 | ForEach-Object { [IO.Path]::GetFileName($_) })
         topTools    = $top
@@ -267,6 +325,24 @@ function Format-NotifierSessionDetails {
             $last = @($stats.commands)[-1]
             $lines += "Последняя команда: $last"
         }
+        $cost = 0.0; $agentsCost = 0.0
+        if ($stats.PSObject.Properties['cost']) { $cost = [double]$stats.cost }
+        if ($stats.PSObject.Properties['agentsCost']) { $agentsCost = [double]$stats.agentsCost }
+        if ($cost + $agentsCost -gt 0) {
+            $line = "Стоимость $([char]0x2248) $(Format-NotifierCost ($cost + $agentsCost)) по ценам API"
+            if ($agentsCost -gt 0) { $line += " (агенты $(Format-NotifierCost $agentsCost))" }
+            $lines += $line
+        }
+    }
+    # Работающие агенты: что поручено и что делает сейчас.
+    if ($Session.PSObject.Properties['agents'] -and [string]$Session.state -eq 'working') {
+        $agents = @(@($Session.agents) | Where-Object { $_ })
+        foreach ($a in ($agents | Select-Object -First 4)) {
+            $line = "Агент: $([string]$a.name)"
+            if ([string]$a.doing) { $line += " $([char]0x2014) $([string]$a.doing)" }
+            $lines += $line
+        }
+        if ($agents.Count -gt 4) { $lines += "…и ещё $($agents.Count - 4)" }
     }
     $prompt = ''
     if ($Session.PSObject.Properties['prompt']) { $prompt = [string]$Session.prompt }

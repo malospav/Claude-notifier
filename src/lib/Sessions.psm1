@@ -135,6 +135,8 @@ function Update-NotifierSessionList {
     $busy = ''
     if ($old) { $busy = [string](Get-Prop $old 'busySince') }
     if ($state -eq 'working' -and ($busy -eq '' -or -not $old -or @('working', 'permission') -notcontains [string](Get-Prop $old 'state'))) { $busy = $ts }
+    $agents = @()
+    if ($old -and (Get-Prop $old 'agents')) { $agents = @(Get-Prop $old 'agents') }   # активные агенты — обновляет трей раз в 15 с
     $prompt = ''
     if ($old) { $prompt = [string](Get-Prop $old 'prompt') }
     if (Get-Prop $Event 'prompt') { $prompt = [string](Get-Prop $Event 'prompt') }
@@ -152,6 +154,7 @@ function Update-NotifierSessionList {
         preview    = $preview
         prompt     = $prompt
         stats      = $stats
+        agents     = $agents
         transcript = $transcript
         window     = $window
     }
@@ -224,6 +227,16 @@ function Format-NotifierElapsed {
     return "$([int][Math]::Floor($span.TotalDays)) дн"
 }
 
+function Get-NotifierAgentsStateText {
+    <# .SYNOPSIS Статус работающего сеанса с агентами: «Работает агент», «Работают агенты · 3»; без агентов — ''. #>
+    param($Session)
+    if ([string](Get-Prop $Session 'state') -ne 'working') { return '' }
+    $n = @(@(Get-Prop $Session 'agents') | Where-Object { $_ }).Count
+    if ($n -eq 0) { return '' }
+    if ($n -eq 1) { return 'Работает агент' }
+    return "Работают агенты $([char]0x00B7) $n"
+}
+
 function Get-NotifierSessionStateText {
     <# .SYNOPSIS Русское название статуса сеанса. #>
     param([string]$State)
@@ -287,4 +300,4 @@ function Set-NotifierSessionPref {
     Move-Item -LiteralPath $tmp -Destination $path -Force
 }
 
-Export-ModuleMember -Function Get-NotifierSessionPrefs, Set-NotifierSessionPref, Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText
+Export-ModuleMember -Function Get-NotifierAgentsStateText, Get-NotifierSessionPrefs, Set-NotifierSessionPref, Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText

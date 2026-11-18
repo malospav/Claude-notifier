@@ -52,7 +52,7 @@ function Set-NotifierEventOption {
 function Set-NotifierOptionValue {
     <# .SYNOPSIS Меняет поле раздела approvals / quickReplies или showPrompt и сохраняет config.json. #>
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups')][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups', 'inactive')][string]$Name,
         [string]$Field = 'enabled',
         [Parameter(Mandatory = $true)]$Value,
         [string]$DataRoot = $script:TrayDataRoot
@@ -260,16 +260,18 @@ function New-NotifierSettingsPage {
     $swLong = New-NotifierSwitchControl -Theme $t -Checked ([bool]$config.longTasks.enabled) -OnChange { Set-NotifierOptionValue -Name longTasks -Value $this.Checked }
     $swGroups = New-NotifierSwitchControl -Theme $t -Checked ([bool]$config.groups.enabled) -OnChange { Set-NotifierOptionValue -Name groups -Value $this.Checked; $script:SessionsDirty = $true }
     $ui.Switches['context'] = $swContext; $ui.Switches['remind'] = $swRemind; $ui.Switches['hotkey'] = $swHotkey
-    $ui.Switches['stalled'] = $swStalled; $ui.Switches['longTasks'] = $swLong; $ui.Switches['groups'] = $swGroups
+    $swInactive = New-NotifierSwitchControl -Theme $t -Checked ([bool]$config.inactive.enabled) -OnChange { Set-NotifierOptionValue -Name inactive -Value $this.Checked; $script:SessionsDirty = $true }
+    $ui.Switches['stalled'] = $swStalled; $ui.Switches['longTasks'] = $swLong; $ui.Switches['groups'] = $swGroups; $ui.Switches['inactive'] = $swInactive
     $attention = New-NotifierSettingsGroup -Theme $t -Width $width -Rows @(
         @{ Title = 'Контекст почти заполнен'; Subtitle = "Уведомить на $([int]$config.context.warnPercent) % $([char]0x2014) до автосжатия истории"; Control = $swContext },
         @{ Title = 'Сеанс завис или упал'; Subtitle = "«Работает», но тишина $([int]$config.stalled.minutes) мин, или ошибка API"; Control = $swStalled },
         @{ Title = 'Напоминать о запросах'; Subtitle = 'Повторить через 3 мин, если запрос ждёт; точка в трее мигает'; Control = $swRemind },
         @{ Title = '«Готово» только после долгих задач'; Subtitle = "Работал меньше $([int]$config.longTasks.minutes) мин, а вы за ПК $([char]0x2014) без уведомления"; Control = $swLong },
         @{ Title = 'Группировать по проектам'; Subtitle = "От $([int]$config.groups.minSessions) сеансов $([char]0x2014) сеансы проекта в одну строку"; Control = $swGroups },
+        @{ Title = 'Убирать давние сеансы'; Subtitle = "«Ждёт ответа» дольше $([int]$config.inactive.hours) ч $([char]0x2014) в строку «Неактивные»"; Control = $swInactive },
         @{ Title = 'Горячая клавиша'; Subtitle = (Format-NotifierHotKeySubtitle); Control = $swHotkey }
     )
-    $ui.HotkeyRow = @($attention.Controls)[5]
+    $ui.HotkeyRow = @($attention.Controls)[6]
     Add-Group $attention 'Если вы отошли от ПК больше чем на минуту, «Готово» приходит всегда.'
 
     # Система.
@@ -313,6 +315,7 @@ function Update-NotifierSettingsView {
         $ui.Switches['stalled'].SetChecked([bool]$config.stalled.enabled)
         $ui.Switches['longTasks'].SetChecked([bool]$config.longTasks.enabled)
         $ui.Switches['groups'].SetChecked([bool]$config.groups.enabled)
+        $ui.Switches['inactive'].SetChecked([bool]$config.inactive.enabled)
         if ($ui.HotkeyRow) { $ui.HotkeyRow.Tag.Subtitle.Text = Format-NotifierHotKeySubtitle }
     }
     $ui.Autostart.SetChecked((Test-NotifierAutostart))

@@ -47,6 +47,7 @@ function Get-NotifierDefaultConfig {
         stalled         = @{ enabled = $true; minutes = 10 }       # «Работает», но журнал молчит столько минут — «сеанс, похоже, остановился»
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
+        inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
     }
 }
 
@@ -240,6 +241,7 @@ function Get-NotifierConfig {
     Merge-OptionSection $config $user 'stalled' @{ minutes = @(3, 120) } $DataRoot
     Merge-OptionSection $config $user 'longTasks' @{ minutes = @(1, 60) } $DataRoot
     Merge-OptionSection $config $user 'groups' @{ minSessions = @(2, 20) } $DataRoot
+    Merge-OptionSection $config $user 'inactive' @{ hours = @(1, 72) } $DataRoot
     Merge-OptionSection $config $user 'quickReplies' @{ minutes = @(1, 240) } $DataRoot
     $showPrompt = Get-JsonProperty $user 'showPrompt'
     if ($showPrompt.found) {

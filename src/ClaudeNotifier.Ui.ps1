@@ -57,6 +57,8 @@ function ConvertTo-NotifierSessionCard {
     $card.Title = Get-NotifierSessionName -Session $Session -Prefs $Prefs
     $card.State = [string]$Session.state
     $card.StateText = Get-NotifierSessionStateText ([string]$Session.state)
+    $agentsText = Get-NotifierAgentsStateText $Session
+    if ($agentsText) { $card.StateText = $agentsText }
     $card.Meta = 'Терминал'
     if ([string]$Session.origin -eq 'desktop') { $card.Meta = 'Приложение' }
     # Сеанс переименован — имя проекта остаётся видно во второй строке.
@@ -78,6 +80,16 @@ function ConvertTo-NotifierSessionCard {
     $card.Tag = $Session
     $card.Details = Format-NotifierSessionDetails -Session $Session -Now $Now
     if ($deviceId -eq '') { Add-NotifierCardRequest -Card $card -Session $Session }   # ответы — для сеансов этого ПК
+    # Без запроса — кнопки изменённых файлов и папки проекта (видны, когда карточка раскрыта).
+    if ($deviceId -eq '' -and $card.Actions.Length -eq 0) {
+        $acts = @()
+        $n = @(Get-NotifierSessionFiles $Session).Count
+        # Всего изменено (в меню — последние 15).
+        if ($n -gt 0 -and $Session.stats.PSObject.Properties['files'] -and [int]$Session.stats.files -gt $n) { $n = [int]$Session.stats.files }
+        if ($n -gt 0) { $acts += "files|Изменённые файлы $([char]0x00B7) $n|secondary" }
+        if ((Get-NotifierSessionFolder $Session) -ne '') { $acts += 'folder|Папка проекта|secondary' }
+        $card.Actions = [string[]]$acts
+    }
     return $card
 }
 
@@ -102,10 +114,14 @@ function Update-NotifierSessionsView {
         $script:RemindMinutes = [int]$cfg.approvals.remindMinutes
     }
     $minGroup = 4
-    if ($script:TrayDataRoot) { $minGroup = 0; if ($cfg.groups.enabled) { $minGroup = [int]$cfg.groups.minSessions } }
+    $inactiveHours = 2
+    if ($script:TrayDataRoot) {
+        $minGroup = 0; if ($cfg.groups.enabled) { $minGroup = [int]$cfg.groups.minSessions }
+        $inactiveHours = 0; if ($cfg.inactive.enabled) { $inactiveHours = [int]$cfg.inactive.hours }
+    }
     $pinned = @($prefs.Keys | Where-Object { $prefs[$_].pinned })
     $cardsSorted = @(foreach ($x in (Get-NotifierSortedSessions -Sessions $Sessions -Pinned $pinned)) { ConvertTo-NotifierSessionCard -Session $x -Now $Now -Prefs $prefs -ContextWarn $warn })
-    $Cards.SetItems((Get-NotifierGroupedCards -Cards $cardsSorted -MinSessions $minGroup))
+    $Cards.SetItems((Get-NotifierGroupedCards -Cards $cardsSorted -MinSessions $minGroup -InactiveHours $inactiveHours -Now $Now))
     return (Format-NotifierSessionsSubtitle -Sessions $Sessions)
 }
 
@@ -152,12 +168,27 @@ function Get-NotifierGroupedCards {
     Карточки по группам-устройствам; если сеансов не меньше MinSessions, сеансы одного проекта на одном устройстве
     сворачиваются в строку-группу. Свёрнутая группа всё равно показывает сеансы, которые ждут решения (запрос, ошибка);
     закреплённые сеансы в группы не попадают. MinSessions = 0 — без групп.
+    Сеансы «Ждёт ответа» дольше InactiveHours часов (0 — не собирать) — в конце своей группы-устройства строкой
+    «Неактивные»; раскрытая, она показывает их и кнопку «Убрать все из списка».
     #>
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Cards, [int]$MinSessions = 4, [hashtable]$Expanded = $script:ExpandedGroups)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Cards, [int]$MinSessions = 4, [hashtable]$Expanded = $script:ExpandedGroups,
+        [double]$InactiveHours = 0, [datetime]$Now = [DateTime]::UtcNow)
     if ($null -eq $Expanded) { $Expanded = @{} }
     $list = New-Object 'System.Collections.Generic.List[ClaudeNotifier.Ui.CardItem]'
     $order = New-Object System.Collections.ArrayList
     foreach ($c in $Cards) { if (-not $order.Contains($c.Section)) { [void]$order.Add($c.Section) } }
+    # Неактивные: ждут ответа давно, не закреплены и без запроса.
+    $idle = @{}
+    if ($InactiveHours -gt 0) {
+        foreach ($c in $Cards) {
+            $s = Get-NotifierCardSession $c
+            if ($null -eq $s -or $c.Pinned -or $c.ForceExpand -or [string]$c.State -ne 'waiting') { continue }
+            $since = ConvertTo-NotifierUtc ([string]$s.since)
+            if ($null -ne $since -and ($Now - $since).TotalHours -ge $InactiveHours) { $idle[$c.Id] = $true }
+        }
+    }
+    $all = $Cards
+    $Cards = @($Cards | Where-Object { -not $idle.ContainsKey($_.Id) })
     $grouping = $MinSessions -gt 0 -and $Cards.Count -ge $MinSessions
     $keyOf = { param($c) $s = Get-NotifierCardSession $c; if ($null -eq $s -or $c.Pinned -or [string]$s.project -eq '') { return '' }; return "$($c.Section)|$([string]$s.project)" }
     $members = @{}
@@ -184,6 +215,20 @@ function Get-NotifierGroupedCards {
                 $needs = $m.ForceExpand -or @('permission', 'error') -contains [string]$m.State
                 if ($open -or $needs) { $m.Child = $true; $list.Add($m) }
             }
+        }
+        $sectionIdle = @($all | Where-Object { $_.Section -eq $section -and $idle.ContainsKey($_.Id) })
+        if ($sectionIdle.Count -gt 0) {
+            $k = "inactive|$section"
+            $open = $Expanded.ContainsKey($k)
+            $g = New-Object ClaudeNotifier.Ui.CardItem
+            $g.Id = "group:$k"; $g.Section = $section; $g.Title = 'Неактивные'
+            $g.IsGroup = $true; $g.GroupOpen = $open; $g.HollowDot = $true; $g.State = 'waiting'
+            $g.StateText = Format-NotifierSessionCount $sectionIdle.Count
+            $g.Meta = "ждут ответа дольше $InactiveHours ч"
+            $g.Tag = @{ Group = $k; Ids = @($sectionIdle | ForEach-Object { $_.Id }) }
+            if ($open) { $g.ForceExpand = $true; $g.Actions = [string[]]@('clear|Убрать все из списка|destructive') }
+            $list.Add($g)
+            if ($open) { foreach ($m in $sectionIdle) { $m.Child = $true; $list.Add($m) } }
         }
     }
     return , $list
@@ -599,6 +644,7 @@ function New-NotifierSessionsForm {
             param($sender, $e)
             switch ($e.Action) {
                 { $_ -like 'act:*' } {
+                    if (Invoke-NotifierExtraCardAction -Item $e.Item -ActionId $e.Action.Substring(4) -Control $sender -Location $e.Location) { [void](Invoke-NotifierSessionsRefresh); return }
                     $notice = Invoke-NotifierCardAction -Item $e.Item -ActionId $e.Action.Substring(4)
                     if ($notice) { Show-NotifierNotice $notice }
                     [void](Invoke-NotifierSessionsRefresh)

@@ -218,7 +218,7 @@ function Get-NotifierSessionsPayload {
             pinned      = ($prefs.ContainsKey([string]$s.session_id) -and [bool]$prefs[[string]$s.session_id].pinned)
             context     = $(if ($s.PSObject.Properties['stats'] -and $s.stats -and $s.stats.PSObject.Properties['window']) { [int]$s.stats.percent } else { -1 })
             state       = $(if ($stalled) { 'error' } else { [string]$s.state })
-            state_text  = $(if ($stalled) { 'Похоже, остановился' } else { Get-NotifierSessionStateText ([string]$s.state) })
+            state_text  = $(if ($stalled) { 'Похоже, остановился' } elseif (Get-NotifierAgentsStateText $s) { Get-NotifierAgentsStateText $s } else { Get-NotifierSessionStateText ([string]$s.state) })
             elapsed     = $(if ($stalled) { Format-NotifierElapsed -Ts ([string]$s.stalledSince) -Now $Now } else { Format-NotifierElapsed -Ts ([string]$s.since) -Now $Now })
             origin      = [string]$s.origin
             preview     = [string]$s.preview

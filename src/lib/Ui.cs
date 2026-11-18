@@ -447,7 +447,7 @@ namespace ClaudeNotifier.Ui {
             int w = TextWidth();
             int h = theme.S(10) + theme.S(19) * 2;                                  // заголовок и статус
             if (!string.IsNullOrEmpty(it.Preview)) h += Measure(it.Preview, fSmall, w, 6) + theme.S(4);
-            if (!string.IsNullOrEmpty(it.Details)) h += Measure(it.Details, fSmall, w, 11) + theme.S(6);
+            if (!string.IsNullOrEmpty(it.Details)) h += Measure(it.Details, fSmall, w, 18) + theme.S(6);
             if (!string.IsNullOrEmpty(it.RequestTitle) || it.Actions.Length > 0) {
                 h += theme.S(10);
                 if (!string.IsNullOrEmpty(it.RequestTitle)) h += Measure(it.RequestTitle, fTitle, w - theme.S(24), 3) + theme.S(14);
@@ -657,7 +657,7 @@ namespace ClaudeNotifier.Ui {
                         y += ph + theme.S(4);
                     }
                     if (!string.IsNullOrEmpty(it.Details)) {
-                        int dh = Measure(it.Details, fSmall, avail, 11);
+                        int dh = Measure(it.Details, fSmall, avail, 18);
                         TextRenderer.DrawText(g, it.Details, fSmall, new Rectangle(textX, y + theme.S(4), avail, dh), theme.Muted, wrap);
                         y += dh + theme.S(6);
                     }
