@@ -256,36 +256,38 @@ function Get-NotifierNotchSettingsRows {
     foreach ($type in @('done', 'permission', 'error', 'limit')) {
         $label = Get-NotifierEventLabel $type
         $rows += New-NotifierNotchRow switch "event.$type" $label[0] $label[1] -On ([bool]$c.events[$type].enabled)
-        $rows += New-NotifierNotchRow button "sound.$type" 'Звук' $label[0] -Value (Format-NotifierSoundName ([string]$c.events[$type].sound))
+        $rows += New-NotifierNotchRow choice "sound.$type" 'Звук' $label[0] -Value (Get-NotifierSelectLabel "sound.$type" -Config $c)
     }
-    $rows += New-NotifierNotchRow switch 'quiet' 'Без звука' 'Уведомления приходят, звук не играет' -On ([bool]$c.quiet.enabled)
-    $rows += New-NotifierNotchRow switch 'longTasks' '«Готово» только после долгих задач' "Меньше $([int]$c.longTasks.minutes) мин и вы за ПК $([char]0x2014) тихо" -On ([bool]$c.longTasks.enabled)
+    $rows += New-NotifierNotchRow choice 'quiet' 'Без звука' 'Всегда или по часам' -Value (Get-NotifierSelectLabel 'quiet' -Config $c)
+    $rows += New-NotifierNotchRow choice 'longTasks' 'Звук «Готово»' 'После задач дольше (или вас нет)' -Value (Get-NotifierSelectLabel 'longTasks' -Config $c)
     $rows += New-NotifierNotchRow header -Title 'Ответы'
     $rows += New-NotifierNotchRow switch 'approvals' 'Запросы разрешения' 'Разрешать из шторки и с телефона' -On ([bool]$c.approvals.enabled)
     $rows += New-NotifierNotchRow switch 'quickReplies' 'Быстрые ответы' 'Отвечать после «Готово» без перехода в окно' -On ([bool]$c.quickReplies.enabled)
-    $rows += New-NotifierNotchRow switch 'remind' 'Напоминать о запросах' 'Повторить через 3 мин, если запрос ждёт' -On ([int]$c.approvals.remindMinutes -gt 0)
+    $rows += New-NotifierNotchRow choice 'remind' 'Напоминание' 'Повторить, если запрос ждёт' -Value (Get-NotifierSelectLabel 'remind' -Config $c)
     $rows += New-NotifierNotchRow switch 'showPrompt' 'Показывать мой запрос' 'Начало запроса в подробностях сеанса' -On ([bool]$c.showPrompt)
     $rows += New-NotifierNotchRow header -Title 'Сеансы'
-    $rows += New-NotifierNotchRow switch 'context' 'Контекст почти заполнен' "Уведомить на $([int]$c.context.warnPercent) % $([char]0x2014) до автосжатия" -On ([bool]$c.context.enabled)
-    $rows += New-NotifierNotchRow switch 'stalled' 'Сеанс завис или упал' "Тишина $([int]$c.stalled.minutes) мин или ошибка API" -On ([bool]$c.stalled.enabled)
-    $rows += New-NotifierNotchRow switch 'inactive' 'Убирать давние сеансы' "Ждёт ответа дольше $([int]$c.inactive.hours) ч $([char]0x2014) в конец" -On ([bool]$c.inactive.enabled)
+    $rows += New-NotifierNotchRow choice 'context' 'Контекст' 'Предупредить до автосжатия' -Value (Get-NotifierSelectLabel 'context' -Config $c)
+    $rows += New-NotifierNotchRow choice 'stalled' 'Сеанс завис' 'Тишина в журнале или ошибка API' -Value (Get-NotifierSelectLabel 'stalled' -Config $c)
+    $rows += New-NotifierNotchRow choice 'inactive' 'Давние сеансы' 'Ждут ответа — в конец списка' -Value (Get-NotifierSelectLabel 'inactive' -Config $c)
     $rows += New-NotifierNotchRow header -Title 'Шторка'
-    $rows += New-NotifierNotchRow choice 'notch.screen' 'Монитор' 'Экран для шторки' -Value (Format-NotifierScreenName (Get-NotifierNotchScreen -Config $c) -Short)
-    $rows += New-NotifierNotchRow choice 'notch.position' 'Положение' 'У верхнего края' -Value (Format-NotifierNotchPosition ([string]$c.notch.position))
-    $rows += New-NotifierNotchRow switch 'hotkey' 'Горячая клавиша' (Format-NotifierHotKeySubtitle) -On ([bool]$c.hotkey.enabled)
+    $rows += New-NotifierNotchRow choice 'notch.screen' 'Монитор' 'Экран для шторки' -Value (Get-NotifierSelectLabel 'notch.screen' -Config $c)
+    $rows += New-NotifierNotchRow choice 'notch.position' 'Положение' 'У верхнего края' -Value (Get-NotifierSelectLabel 'notch.position' -Config $c)
+    $rows += New-NotifierNotchRow choice 'hotkey' 'Горячая клавиша' (Format-NotifierHotKeySubtitle) -Value (Get-NotifierSelectLabel 'hotkey' -Config $c)
     $rows += New-NotifierNotchRow switch 'notch' 'Шторка вместо окна' 'Выключить — прежнее окно «Сеансы»' -On $true
     $rows += New-NotifierNotchRow header -Title 'Маскоты'
-    $rows += New-NotifierNotchRow choice 'mascot:' 'Этот ПК' 'Сеансы Claude на этом компьютере' -Value (Format-NotifierMascot (Get-NotifierMascotOf -Device '' -Config $c))
+    $rows += New-NotifierNotchRow choice 'mascot:' 'Этот ПК' 'Сеансы Claude на этом компьютере' -Value (Get-NotifierSelectLabel 'mascot:' -Config $c)
     $devices = @()
     if ($script:Net -and $script:Net.Network) { $devices = @($script:Net.Network.devices | Where-Object { $_ }) }
     foreach ($d in $devices) {
-        $rows += New-NotifierNotchRow choice "mascot:$([string]$d.id)" ([string]$d.name) (Get-NotifierDeviceKindText $d) -Value (Format-NotifierMascot (Get-NotifierMascotOf -Device ([string]$d.id) -Config $c))
+        $rows += New-NotifierNotchRow choice "mascot:$([string]$d.id)" ([string]$d.name) (Get-NotifierDeviceKindText $d) -Value (Get-NotifierSelectLabel "mascot:$([string]$d.id)" -Config $c)
     }
     if ($devices.Count -eq 0) { $rows += New-NotifierNotchRow note -Title 'Подключите Mac или телефон на странице «Устройства» — у сеансов с них может быть свой маскот.' }
     $rows += New-NotifierNotchRow header -Title 'Система'
     $auto = $false; try { $auto = [bool](Test-NotifierAutostart) } catch { }
     $rows += New-NotifierNotchRow switch 'autostart' 'Запускать при входе' 'Шторка сразу после включения ПК' -On $auto
     $rows += New-NotifierNotchRow button 'data' 'Папка данных' (Format-NotifierShortText ([string]$script:TrayDataRoot)) -Value 'Открыть'
+    $rows += New-NotifierNotchRow button 'export' 'Экспорт настроек' 'Сохранить в файл для другого ПК' -Value 'Сохранить…'
+    $rows += New-NotifierNotchRow button 'import' 'Импорт настроек' 'Загрузить из сохранённого файла' -Value 'Загрузить…'
     return $rows   # строки по одной в конвейер: вызывающие оборачивают в @()
 }
 
@@ -394,26 +396,28 @@ function Show-NotifierSoundMenuAt {
 }
 
 function Invoke-NotifierNotchSetting {
-    <# .SYNOPSIS Тумблер или выбор на страницах «Настройки» и «Устройства». #>
+    <#
+    .SYNOPSIS
+    Тумблер или выбор на страницах «Настройки» и «Устройства». Возвращает $true, если открыт выпадающий список
+    (тогда шторку держат раскрытой, пока он не закроется).
+    #>
     param([Parameter(Mandatory = $true)][string]$Key, [System.Drawing.Point]$Location = [System.Windows.Forms.Cursor]::Position, [int]$Width = 0)
+    # Селекты — выпадающий список под кнопкой; страница обновится после выбора.
+    if (@(Get-NotifierSelectOptions -Key $Key).Count -gt 0) {
+        Show-NotifierSelect -Key $Key -Location $Location -Width $Width -After { Push-NotifierNotchPage -Page settings }
+        return $true
+    }
     $c = Get-NotifierConfig -DataRoot $script:TrayDataRoot
-    switch -Regex ($Key) {
+    $null = switch -Regex ($Key) {
         '^event\.(done|permission|error|limit)$' { Set-NotifierEventOption -Type $Matches[1] -Enabled (-not [bool]$c.events[$Matches[1]].enabled) }
-        '^(approvals|quickReplies|context|stalled|longTasks|groups|inactive|quiet)$' { Set-NotifierOptionValue -Name $Key -Value (-not [bool]$c[$Key].enabled); $script:SessionsDirty = $true }
+        '^(approvals|quickReplies|groups)$' { Set-NotifierOptionValue -Name $Key -Value (-not [bool]$c[$Key].enabled); $script:SessionsDirty = $true }
         '^showPrompt$' { Set-NotifierOptionValue -Name showPrompt -Value (-not [bool]$c.showPrompt) }
-        '^remind$' { Set-NotifierOptionValue -Name approvals -Field remindMinutes -Value @(3, 0)[[int]([int]$c.approvals.remindMinutes -gt 0)] }
-        '^hotkey$' { Set-NotifierOptionValue -Name hotkey -Value (-not [bool]$c.hotkey.enabled); try { [void](Register-NotifierHotKey) } catch { } }
-        # Монитор, положение и маскоты — выпадающий список под кнопкой; страница обновится после выбора.
-        '^(notch\.screen|notch\.position|notch\.mascot|mascot:.*)$' {
-            Show-NotifierSelect -Key $Key -Location $Location -Width $Width -After { Push-NotifierNotchPage -Page settings }
-            return
-        }
         '^notch$' {
             # Шторку выключили — дальше работает прежнее окно (открываем его на настройках).
             Set-NotifierOptionValue -Name notch -Value $false
             Initialize-NotifierNotch
             Show-NotifierSessionsWindow -Tab 2
-            return
+            return $false
         }
         '^autostart$' { Set-NotifierAutostart -Enabled (-not (Test-NotifierAutostart)) -AppRoot $PSScriptRoot }
         '^net$' {
@@ -422,7 +426,15 @@ function Invoke-NotifierNotchSetting {
             [void](Invoke-NotifierSessionsRefresh)
         }
     }
-    if ($Key -eq 'quiet') { Push-NotifierNotchLimits -SoundOff (-not [bool]$c.quiet.enabled) }
+    return $false
+}
+
+function Switch-NotifierQuiet {
+    <# .SYNOPSIS Кнопка-динамик в шторке: «Без звука» всегда ↔ выкл; расписание (quiet.schedule) не трогается. #>
+    $c = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+    $on = -not [bool]$c.quiet.enabled
+    Set-NotifierOptionValue -Name quiet -Value $on
+    Push-NotifierNotchLimits -SoundOff $on
 }
 
 function Invoke-NotifierDeviceActionById {
@@ -475,59 +487,202 @@ function Switch-NotifierNotchPosition {
     Set-NotifierNotchPlacement
 }
 
+# --- Селекты настроек: кнопка со стрелкой вниз → список вариантов под ней ---
+# Все варианты описаны в Get-NotifierSelectOptions; Set-NotifierSelectValue записывает только значение из этого
+# списка, поэтому ручная правка config.json со «своим» числом тоже видна (оно добавляется в список как текущее).
+
+$script:NotchSounds = @('Windows Notify Messaging', 'Windows Notify Calendar', 'Windows Notify Email', 'Windows Notify System Generic',
+    'Windows Notify', 'Windows Message Nudge', 'Windows Proximity Notification', 'Windows Exclamation', 'Windows Ding',
+    'chimes', 'chord', 'tada')
+$script:QuietSchedules = @('22:00-07:00', '23:00-08:00', '00:00-09:00')
+
+function New-SelectOption([string]$Value, [string]$Label, [bool]$Current, [switch]$Separator) {
+    return @{ Value = $Value; Label = $Label; Current = $Current; Separator = [bool]$Separator }
+}
+
+function Get-NumberSelectOptions {
+    # Варианты-числа с «Выкл» (Off — значение выключения) и текущим значением, даже если его нет среди готовых.
+    param([int[]]$Values, [string]$Current, [scriptblock]$Format, [string]$Off = '', [string]$OffLabel = 'Выкл')
+    $list = @()
+    if ($Off -ne '') { $list += New-SelectOption $Off $OffLabel ($Current -eq $Off) }
+    $all = @($Values)
+    if ($Current -ne $Off -and $Current -match '^\d+$' -and $all -notcontains [int]$Current) { $all = @($all + [int]$Current | Sort-Object) }
+    foreach ($v in $all) { $list += New-SelectOption ([string]$v) (& $Format $v) ([string]$v -eq $Current) }
+    return $list
+}
+
+function Format-NotifierQuietSchedule([string]$Schedule) {
+    if ($Schedule -notmatch '^(\d\d:\d\d)-(\d\d:\d\d)$') { return 'Выкл' }
+    return "$($Matches[1])$([char]0x2013)$($Matches[2])"
+}
+
 function Get-NotifierSelectOptions {
     <#
     .SYNOPSIS
-    Варианты селекта настроек: @{ Value; Label; Current } по порядку. Ключи: notch.screen, notch.position,
-    mascot:<id устройства> ('' — этот ПК). Неизвестный ключ — пусто.
+    Варианты селекта настроек: @{ Value; Label; Current; Separator } по порядку. Значения, начинающиеся с «*», —
+    действия (выбрать файл, прослушать), а не настройка. Неизвестный ключ — пусто.
     #>
     param([Parameter(Mandatory = $true)][string]$Key, $Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
+    $c = $Config
     switch -Regex ($Key) {
         '^notch\.screen$' {
-            $cur = Get-NotifierNotchScreen -Config $Config
-            foreach ($s in @([System.Windows.Forms.Screen]::AllScreens)) {
-                @{ Value = [string]$s.DeviceName; Label = (Format-NotifierScreenName $s); Current = ($s.DeviceName -eq $cur.DeviceName) }
-            }
+            $set = [string]$c.notch.screen
+            $auto = Get-NotifierNotchScreen -Config @{ notch = @{ screen = '' } }
+            New-SelectOption '' "Автоматически ($(Format-NotifierScreenName $auto -Short))" ($set -eq '')
+            foreach ($s in @([System.Windows.Forms.Screen]::AllScreens)) { New-SelectOption ([string]$s.DeviceName) (Format-NotifierScreenName $s) ($set -ne '' -and $s.DeviceName -eq $set) }
+            # Выбранный монитор отключён: шторка на «автоматическом», но выбор помнится — покажем его отдельно.
+            if ($set -ne '' -and @([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -eq $set }).Count -eq 0) { New-SelectOption $set 'Отключённый монитор' $true }
         }
         '^notch\.position$' {
-            $cur = [string]$Config.notch.position
+            $cur = [string]$c.notch.position
             if (@('left', 'right') -notcontains $cur) { $cur = 'center' }
-            foreach ($v in @('left', 'center', 'right')) { @{ Value = $v; Label = (Format-NotifierNotchPosition $v); Current = ($v -eq $cur) } }
+            foreach ($v in @('left', 'center', 'right')) { New-SelectOption $v (Format-NotifierNotchPosition $v) ($v -eq $cur) }
         }
         '^(?:notch\.mascot|mascot:(.*))$' {
-            $dev = if ($Matches[1]) { $Matches[1] } else { '' }
-            $cur = Get-NotifierMascotOf -Device $dev -Config $Config
-            foreach ($v in $script:NotchMascots) { @{ Value = $v; Label = (Format-NotifierMascot $v); Current = ($v -eq $cur) } }
+            $dev = if ($Matches[1]) { [string]$Matches[1] } else { '' }
+            if ($dev -ne '') {
+                # У устройства может не быть своего маскота — тогда как у этого ПК.
+                $own = $c.notch.mascots.ContainsKey($dev)
+                New-SelectOption '' "Как у этого ПК ($(Format-NotifierMascot ([string]$c.notch.mascot)))" (-not $own)
+                foreach ($v in $script:NotchMascots) { New-SelectOption $v (Format-NotifierMascot $v) ($own -and [string]$c.notch.mascots[$dev] -eq $v) }
+            }
+            else { foreach ($v in $script:NotchMascots) { New-SelectOption $v (Format-NotifierMascot $v) ([string]$c.notch.mascot -eq $v) } }
+        }
+        '^remind$' { Get-NumberSelectOptions -Values 1, 3, 5, 10, 15 -Current ([string][int]$c.approvals.remindMinutes) -Off '0' -Format { "$($args[0]) мин" } }
+        '^longTasks$' {
+            $cur = if ($c.longTasks.enabled) { [string][int]$c.longTasks.minutes } else { 'off' }
+            Get-NumberSelectOptions -Values 1, 2, 5, 10, 15 -Current $cur -Off 'off' -OffLabel 'Всегда' -Format { "От $($args[0]) мин" }
+        }
+        '^context$' {
+            $cur = if ($c.context.enabled) { [string][int]$c.context.warnPercent } else { 'off' }
+            Get-NumberSelectOptions -Values 70, 80, 85, 90, 95 -Current $cur -Off 'off' -Format { "$($args[0]) %" }
+        }
+        '^stalled$' {
+            $cur = if ($c.stalled.enabled) { [string][int]$c.stalled.minutes } else { 'off' }
+            Get-NumberSelectOptions -Values 5, 10, 15, 30, 60 -Current $cur -Off 'off' -Format { "$($args[0]) мин" }
+        }
+        '^inactive$' {
+            $cur = if ($c.inactive.enabled) { [string][int]$c.inactive.hours } else { 'off' }
+            Get-NumberSelectOptions -Values 1, 2, 4, 8, 24 -Current $cur -Off 'off' -Format { "$($args[0]) ч" }
+        }
+        '^sound\.(done|permission|error|limit)$' {
+            $cur = [string]$c.events[$Matches[1]].sound
+            New-SelectOption '' 'Системный' ($cur -eq '')
+            $media = Join-Path $env:SystemRoot 'Media'
+            $known = $false
+            foreach ($n in $script:NotchSounds) {
+                $p = Join-Path $media "$n.wav"
+                if (-not (Test-Path -LiteralPath $p)) { continue }
+                $is = $cur -ne '' -and [string]::Equals($cur, $p, [StringComparison]::OrdinalIgnoreCase)
+                if ($is) { $known = $true }
+                New-SelectOption $p ($n -replace '^Windows ', '') $is
+            }
+            if ($cur -ne '' -and -not $known) { New-SelectOption $cur ([IO.Path]::GetFileNameWithoutExtension($cur) -replace '^Windows ', '') $true }
+            New-SelectOption '*file' 'Свой файл WAV…' $false -Separator
+            New-SelectOption '*play' 'Прослушать' $false
+        }
+        '^hotkey$' {
+            $cur = if ($c.hotkey.enabled) { [string]$c.hotkey.keys } else { 'off' }
+            New-SelectOption 'off' 'Выкл' ($cur -eq 'off')
+            foreach ($v in (Get-NotifierHotKeyChoices)) {
+                $label = if ($v -eq 'auto') { 'Win+Shift+C (или Ctrl+Alt+C)' } else { $v }
+                New-SelectOption $v $label ($v -eq $cur)
+            }
+        }
+        '^quiet$' {
+            # Выкл / Всегда (кнопка-динамик в шторке) / по расписанию каждый день.
+            $cur = if ($c.quiet.enabled) { 'always' } else { [string]$c.quiet.schedule }
+            New-SelectOption '' 'Выкл' ($cur -eq '')
+            New-SelectOption 'always' 'Всегда' ($cur -eq 'always')
+            $all = @($script:QuietSchedules)
+            if ($cur -ne '' -and $all -notcontains $cur) { $all += $cur }
+            foreach ($v in $all) { New-SelectOption $v (Format-NotifierQuietSchedule $v) ($v -eq $cur) }
         }
     }
 }
 
+function Get-NotifierSelectLabel {
+    <# .SYNOPSIS Текст кнопки селекта — подпись текущего варианта (у монитора — коротко). #>
+    param([Parameter(Mandatory = $true)][string]$Key, $Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
+    if ($Key -eq 'notch.screen') {
+        if ([string]$Config.notch.screen -eq '') { return 'Авто' }
+        return (Format-NotifierScreenName (Get-NotifierNotchScreen -Config $Config) -Short)
+    }
+    $cur = @(Get-NotifierSelectOptions -Key $Key -Config $Config | Where-Object { $_.Current }) | Select-Object -First 1
+    if ($null -eq $cur) { return '' }
+    $label = [string]$cur.Label
+    if ($Key -like 'mascot:?*' -and [string]$cur.Value -eq '') { return 'Как у ПК' }
+    if ($Key -eq 'hotkey' -and [string]$cur.Value -eq 'auto') { return 'Win+Shift+C' }
+    return $label
+}
+
 function Set-NotifierSelectValue {
-    <# .SYNOPSIS Записать вариант, выбранный в селекте настроек, и сразу применить (место шторки, маскот). #>
-    param([Parameter(Mandatory = $true)][string]$Key, [Parameter(Mandatory = $true)][string]$Value)
+    <#
+    .SYNOPSIS
+    Записать вариант, выбранный в селекте, и сразу применить (место шторки, маскот, горячая клавиша).
+    Принимается только значение из Get-NotifierSelectOptions; действия «*file» / «*play» — у звука.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Key, [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+    $config = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+    if (@(Get-NotifierSelectOptions -Key $Key -Config $config | Where-Object { [string]$_.Value -ceq $Value }).Count -eq 0) { return }
     switch -Regex ($Key) {
-        '^notch\.screen$' {
-            if (@([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -eq $Value }).Count -eq 0) { return }
-            Set-NotifierOptionValue -Name notch -Field screen -Value $Value
-            Set-NotifierNotchPlacement
-        }
-        '^notch\.position$' {
-            if (@('left', 'center', 'right') -notcontains $Value) { return }
-            Set-NotifierOptionValue -Name notch -Field position -Value $Value
-            Set-NotifierNotchPlacement
-        }
+        '^notch\.screen$' { Set-NotifierOptionValue -Name notch -Field screen -Value $Value; Set-NotifierNotchPlacement }
+        '^notch\.position$' { Set-NotifierOptionValue -Name notch -Field position -Value $Value; Set-NotifierNotchPlacement }
         '^(?:notch\.mascot|mascot:(.*))$' {
-            if ($script:NotchMascots -notcontains $Value) { return }
-            $dev = if ($Matches[1]) { $Matches[1] } else { '' }
+            $dev = if ($Matches[1]) { [string]$Matches[1] } else { '' }
             if ($dev -eq '') { Set-NotifierOptionValue -Name notch -Field mascot -Value $Value }
             else {
-                $config = Get-NotifierConfig -DataRoot $script:TrayDataRoot
                 $map = @{}
                 foreach ($k in @($config.notch.mascots.Keys)) { $map[$k] = $config.notch.mascots[$k] }
-                $map[$dev] = $Value
+                if ($Value -eq '') { $map.Remove($dev) } else { $map[$dev] = $Value }   # '' — снова как у этого ПК
                 Set-NotifierOptionValue -Name notch -Field mascots -Value ([pscustomobject]$map)
             }
             Set-NotifierMascot
+        }
+        '^remind$' { Set-NotifierOptionValue -Name approvals -Field remindMinutes -Value ([int]$Value) }
+        '^(longTasks|context|stalled|inactive)$' {
+            $name = $Matches[1]
+            $field = @{ longTasks = 'minutes'; context = 'warnPercent'; stalled = 'minutes'; inactive = 'hours' }[$name]
+            if ($Value -eq 'off') { Set-NotifierOptionValue -Name $name -Value $false }
+            else {
+                $section = $config[$name]
+                $section.enabled = $true
+                $section[$field] = [int]$Value
+                Set-NotifierConfigValue -Name $name -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot
+            }
+            $script:SessionsDirty = $true
+        }
+        '^sound\.(done|permission|error|limit)$' {
+            $type = $Matches[1]
+            switch ($Value) {
+                '*play' { [void](Invoke-NotifierSound -Type $type -Config $config -DataRoot $script:TrayDataRoot); return }
+                '*file' {
+                    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+                    $dlg.Filter = 'Звук WAV (*.wav)|*.wav'; $dlg.Title = 'Звук уведомления'
+                    if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($true) }
+                    try { if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }; $file = $dlg.FileName }
+                    finally { $dlg.Dispose(); if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($false) } }
+                    Set-NotifierEventOption -Type $type -Sound $file
+                }
+                default { Set-NotifierEventOption -Type $type -Sound $Value }
+            }
+            # Выбранный звук сразу слышно — так проще выбирать.
+            [void](Invoke-NotifierSound -Type $type -Config (Get-NotifierConfig -DataRoot $script:TrayDataRoot) -DataRoot $script:TrayDataRoot)
+        }
+        '^hotkey$' {
+            if ($Value -eq 'off') { Set-NotifierOptionValue -Name hotkey -Value $false }
+            else {
+                $section = $config.hotkey; $section.enabled = $true; $section.keys = $Value
+                Set-NotifierConfigValue -Name hotkey -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot
+            }
+            try { [void](Register-NotifierHotKey) } catch { }
+        }
+        '^quiet$' {
+            $section = $config.quiet
+            if ($Value -eq 'always') { $section.enabled = $true }
+            else { $section.enabled = $false; $section.schedule = $Value }
+            Set-NotifierConfigValue -Name quiet -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot
+            Push-NotifierNotchLimits -SoundOff ([bool]$section.enabled)
         }
     }
 }
@@ -553,6 +708,7 @@ function Show-NotifierSelect {
     if ($Width -gt 0) { $menu.MinimumSize = New-Object System.Drawing.Size($Width, 0) }
     $script:SelectAfter = $After
     foreach ($o in $options) {
+        if ($o.Separator) { [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) }
         $mi = New-Object System.Windows.Forms.ToolStripMenuItem ([string]$o.Label)
         $mi.Padding = New-Object System.Windows.Forms.Padding($theme.S(4), $theme.S(5), $theme.S(8), $theme.S(5))
         $mi.Checked = [bool]$o.Current
@@ -570,6 +726,79 @@ function Show-NotifierSelect {
     if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($true) }
     $menu.add_Closed({ if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($false) } })
     $menu.Show($Location)
+}
+
+function Export-NotifierSettings {
+    <#
+    .SYNOPSIS
+    Настройки (config.json) — в файл для другого ПК. chainStatusLine не переносится: это команда этого ПК.
+    Нет config.json — пишутся настройки по умолчанию.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$DataRoot = $script:TrayDataRoot)
+    $src = Join-Path $DataRoot 'config.json'
+    $obj = [pscustomobject]@{}
+    if (Test-Path -LiteralPath $src -PathType Leaf) { $obj = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($src, [Text.Encoding]::UTF8)) -ErrorAction Stop }
+    if ($obj.PSObject.Properties['chainStatusLine']) { $obj.PSObject.Properties.Remove('chainStatusLine') }
+    $obj | Add-Member -NotePropertyName '$claudeNotifier' -NotePropertyValue 'settings' -Force   # метка: это файл наших настроек
+    [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $obj -Depth 8), (New-Object System.Text.UTF8Encoding $false))
+}
+
+function Import-NotifierSettings {
+    <#
+    .SYNOPSIS
+    Загружает настройки из файла экспорта. Файл проверяется заранее (JSON-объект с меткой экспорта); свой
+    chainStatusLine этого ПК сохраняется. Неверные значения внутри при чтении заменятся значениями по умолчанию.
+    Возвращает '' при успехе или текст ошибки.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$DataRoot = $script:TrayDataRoot)
+    try { $obj = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)) -ErrorAction Stop }
+    catch { return 'Файл не читается как JSON.' }
+    if ($obj -isnot [System.Management.Automation.PSCustomObject] -or [string]$obj.PSObject.Properties['$claudeNotifier'].Value -ne 'settings') {
+        return 'Это не файл настроек claude-notifier (сохраните его через «Экспорт настроек»).'
+    }
+    $obj.PSObject.Properties.Remove('$claudeNotifier')
+    if ($obj.PSObject.Properties['chainStatusLine']) { $obj.PSObject.Properties.Remove('chainStatusLine') }
+    $dst = Join-Path $DataRoot 'config.json'
+    if (Test-Path -LiteralPath $dst -PathType Leaf) {
+        try {
+            $mine = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($dst, [Text.Encoding]::UTF8)) -ErrorAction Stop
+            if ($mine.PSObject.Properties['chainStatusLine']) { $obj | Add-Member -NotePropertyName chainStatusLine -NotePropertyValue $mine.chainStatusLine -Force }
+        }
+        catch { }
+        Copy-Item -LiteralPath $dst -Destination "$dst.before-import" -Force   # на случай, если захочется вернуть
+    }
+    $tmp = "$dst.tmp-$PID"
+    [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $obj -Depth 8), (New-Object System.Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $dst -Force
+    return ''
+}
+
+function Export-NotifierSettingsDialog {
+    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg.Filter = 'Настройки claude-notifier (*.json)|*.json'; $dlg.FileName = 'claude-notifier-settings.json'; $dlg.Title = 'Экспорт настроек'
+    try {
+        if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        Export-NotifierSettings -Path $dlg.FileName
+    }
+    catch { [void](Show-NotifierDialog -Owner $null -Title 'Не удалось сохранить настройки' -Message $_.Exception.Message -Primary 'Понятно') }
+    finally { $dlg.Dispose() }
+}
+
+function Import-NotifierSettingsDialog {
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Filter = 'Настройки claude-notifier (*.json)|*.json'; $dlg.Title = 'Импорт настроек'
+    try {
+        if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $err = Import-NotifierSettings -Path $dlg.FileName
+        if ($err) { [void](Show-NotifierDialog -Owner $null -Title 'Настройки не загружены' -Message $err -Primary 'Понятно'); return }
+        # Применить сразу: маскоты, место шторки, горячая клавиша, списки сеансов.
+        Set-NotifierMascot
+        Set-NotifierNotchPlacement -Force
+        try { [void](Register-NotifierHotKey) } catch { }
+        $script:SessionsDirty = $true
+    }
+    catch { [void](Show-NotifierDialog -Owner $null -Title 'Настройки не загружены' -Message $_.Exception.Message -Primary 'Понятно') }
+    finally { $dlg.Dispose() }
 }
 
 function Show-NotifierNotchSessionMenu {
@@ -604,7 +833,7 @@ function Invoke-NotifierNotchCommand {
                 if ($script:NotchPage -eq 'answer') { $script:NotchAnswerId = [string]$Event.Id; Push-NotifierNotchAnswer -Id $script:NotchAnswerId }
                 else { Push-NotifierNotchPage -Page $script:NotchPage }
             }
-            'sound' { Invoke-NotifierNotchSetting -Key quiet }
+            'sound' { Switch-NotifierQuiet }   # кнопка-динамик: «Без звука» всегда / выкл (расписание остаётся)
             'open' {
                 if ($null -eq $session -or ($session.PSObject.Properties['device'] -and [string]$session.device -ne '')) { return }
                 if ((Invoke-NotifierSessionFocus -Session $session) -ne 'unknown') { Close-NotifierNotch }
@@ -618,7 +847,8 @@ function Invoke-NotifierNotchCommand {
             }
             'set' {
                 $w = 0; [void][int]::TryParse([string]$Event.Action, [ref]$w)   # у селекта — ширина кнопки
-                Invoke-NotifierNotchSetting -Key ([string]$Event.Id) -Location $Event.Location -Width $w
+                # Открыт выпадающий список — шторку держим раскрытой, пока он не закроется (снимет его Closed).
+                if (Invoke-NotifierNotchSetting -Key ([string]$Event.Id) -Location $Event.Location -Width $w) { $keepHold = $true }
                 Push-NotifierNotchPage
             }
             'remove' {
@@ -634,6 +864,8 @@ function Invoke-NotifierNotchCommand {
             'row' {
                 $id = [string]$Event.Id
                 if ($id -eq 'data') { Start-Process explorer.exe $script:TrayDataRoot }
+                elseif ($id -eq 'export') { Export-NotifierSettingsDialog }
+                elseif ($id -eq 'import') { Import-NotifierSettingsDialog }
                 elseif ($id -eq 'connect') { Show-NotifierConnectDialog }
                 elseif ($id -like 'sound.*') { $keepHold = $true; Show-NotifierSoundMenuAt -Type $id.Substring(6) -Location $Event.Location }
                 elseif ($Event.Action) { Invoke-NotifierDeviceActionById -Id $id -Action ([string]$Event.Action) }

@@ -129,8 +129,9 @@ function New-NotifierSettingsGroup {
 function Format-NotifierHotKeySubtitle {
     # Подпись строки «Горячая клавиша»: действующее сочетание или почему его нет.
     $config = Get-NotifierConfig -DataRoot $script:TrayDataRoot
-    if (-not $config.hotkey.enabled) { return 'Win+Shift+C открывает мини-окно (выключено)' }
-    if ($script:HotKeyText) { return "$($script:HotKeyText) $([char]0x2014) мини-окно с сеансами" }
+    if (-not $config.hotkey.enabled) { return 'Выключена' }
+    if ($script:HotKeyText) { return "$($script:HotKeyText) $([char]0x2014) раскрыть шторку" }
+    if ([string]$config.hotkey.keys -ne 'auto') { return "$($config.hotkey.keys) занято другой программой" }
     return 'Win+Shift+C и Ctrl+Alt+C заняты другой программой'
 }
 

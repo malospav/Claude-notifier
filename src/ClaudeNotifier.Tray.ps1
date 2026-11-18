@@ -264,7 +264,7 @@ function Invoke-NotifierEventBatch {
                 $buttons = @()
                 try { $buttons = @(Get-NotifierToastButtons -Event $event -Config $config -Request:$wasRequest -DataRoot $DataRoot) } catch { }
                 [void](Show-NotifierToast -Event $event -Actions $buttons -DataRoot $DataRoot)
-                if (-not $config.quiet.enabled) { [void](Invoke-NotifierSound -Type $event.type -Config $config -DataRoot $DataRoot) }   # звук выключен в шторке
+                if (-not (Test-NotifierQuietTime -Config $config)) { [void](Invoke-NotifierSound -Type $event.type -Config $config -DataRoot $DataRoot) }   # звук выключен в шторке или по расписанию
             }
             $shown++
             Write-NotifierLog -Level INFO -Message "tray: показано '$($event.type)', задержка $(Get-EventLatencyMs $event) мс" -DataRoot $DataRoot

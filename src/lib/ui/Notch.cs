@@ -186,6 +186,8 @@ namespace ClaudeNotifier.Ui {
             bool ex = Expanded; Point o = origin; Size l0 = lay;
             List<KeyValuePair<Rectangle, string>> h0 = new List<KeyValuePair<Rectangle, string>>(hits);
             List<RectangleF> f0 = new List<RectangleF>(faceRects);
+            Dictionary<string, Rectangle> a0 = new Dictionary<string, Rectangle>(selectAnchors);
+            List<KeyValuePair<Rectangle, string>> t0 = new List<KeyValuePair<Rectangle, string>>(tips);
             try {
                 using (Bitmap bmp = new Bitmap(L.Width, L.Height))
                 using (Graphics g = Graphics.FromImage(bmp)) {
@@ -198,6 +200,8 @@ namespace ClaudeNotifier.Ui {
             finally {
                 origin = o; lay = l0; Expanded = ex;
                 hits.Clear(); hits.AddRange(h0); faceRects.Clear(); faceRects.AddRange(f0);
+                selectAnchors.Clear(); foreach (KeyValuePair<string, Rectangle> kv in a0) selectAnchors[kv.Key] = kv.Value;
+                tips.Clear(); tips.AddRange(t0);
             }
             if (SphynxSprites.Renders == r0) warm.Stop();   // всё уже в кэше
         }
@@ -310,7 +314,7 @@ namespace ClaudeNotifier.Ui {
 
         protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdateTimer(); }
         protected override void Dispose(bool disposing) {
-            if (disposing) { anim.Dispose(); warm.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall); }
+            if (disposing) { anim.Dispose(); warm.Dispose(); if (tipBox != null) tipBox.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall); }
             base.Dispose(disposing);
         }
 
@@ -326,6 +330,23 @@ namespace ClaudeNotifier.Ui {
         void Hit(Rectangle r, string id) { r.Offset(origin); hits.Add(new KeyValuePair<Rectangle, string>(r, id)); }
         // Кнопки-селекты (строки choice): где нарисованы — список вариантов открывается ровно под кнопкой.
         readonly Dictionary<string, Rectangle> selectAnchors = new Dictionary<string, Rectangle>();
+        // Обрезанные многоточием подписи строк настроек: где и полный текст — подсказка при наведении.
+        readonly List<KeyValuePair<Rectangle, string>> tips = new List<KeyValuePair<Rectangle, string>>();
+        ToolTip tipBox;
+        string tipShown;
+        void Tip(Rectangle r, string text, Font f) {
+            if (string.IsNullOrEmpty(text) || TextRenderer.MeasureText(text, f).Width <= r.Width) return;
+            r.Offset(origin);
+            tips.Add(new KeyValuePair<Rectangle, string>(r, text));
+        }
+        void UpdateTip(Point p) {
+            string text = null;
+            foreach (KeyValuePair<Rectangle, string> t in tips) if (t.Key.Contains(p)) { text = t.Value; break; }
+            if (text == tipShown) return;
+            tipShown = text;
+            if (tipBox == null) { tipBox = new ToolTip(); tipBox.InitialDelay = 350; tipBox.ReshowDelay = 100; }
+            tipBox.SetToolTip(this, text ?? "");
+        }
 
         // --- Раскрытие без рывков: окно на время анимации не меняет размер и форму (это дорого и дёргается),
         // а внутри прозрачного окна плавно растёт нарисованная фигура шторки. Содержимое не перекладывается:
@@ -381,6 +402,7 @@ namespace ClaudeNotifier.Ui {
             RectangleF s = ShapeRect;
             float r = CornerRadius;
             hits.Clear();
+            tips.Clear();
             faceRects.Clear();
             SphynxSprites.RatePerSec = Expanded ? 12 : 3;
             SphynxSprites.BeginFrame();
@@ -864,7 +886,7 @@ namespace ClaudeNotifier.Ui {
                 rightW = sw + theme.S(10);
             } else if (row.Kind == "choice") {
                 // Селект: значение слева, стрелка вниз справа; щелчок — выпадающий список под кнопкой.
-                int bw = Math.Min(r.Width / 2, Math.Max(theme.S(120), TextRenderer.MeasureText(row.Value, fBody).Width + theme.S(56)));
+                int bw = Math.Min(r.Width / 2, Math.Max(theme.S(100), TextRenderer.MeasureText(row.Value, fBody).Width + theme.S(56)));
                 Rectangle b = new Rectangle(r.Right - pad - bw, r.Y + (r.Height - theme.S(30)) / 2, bw, theme.S(30));
                 PaintSelect(g, b, row.Value, hot);
                 Rectangle a = b; a.Offset(origin);
@@ -904,10 +926,15 @@ namespace ClaudeNotifier.Ui {
             }
             int tw = Math.Max(theme.S(40), r.Right - pad - rightW - tx);
             if (string.IsNullOrEmpty(row.Subtitle)) {
-                TextRenderer.DrawText(g, row.Title, fBold, new Rectangle(tx, r.Y, tw, r.Height), Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                Rectangle tr = new Rectangle(tx, r.Y, tw, r.Height);
+                TextRenderer.DrawText(g, row.Title, fBold, tr, Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                Tip(Rectangle.Intersect(tr, area), row.Title, fBold);
             } else {
-                TextRenderer.DrawText(g, row.Title, fBold, new Rectangle(tx, r.Y + theme.S(9), tw, theme.S(20)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
-                TextRenderer.DrawText(g, row.Subtitle, fSmall, new Rectangle(tx, r.Y + theme.S(29), tw, theme.S(18)), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                Rectangle tr = new Rectangle(tx, r.Y + theme.S(9), tw, theme.S(20)), sr = new Rectangle(tx, r.Y + theme.S(29), tw, theme.S(18));
+                TextRenderer.DrawText(g, row.Title, fBold, tr, Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, row.Subtitle, fSmall, sr, theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                Tip(Rectangle.Intersect(tr, area), row.Title, fBold);
+                Tip(Rectangle.Intersect(sr, area), row.Subtitle, fSmall);
             }
             if (hitId != null) Hit(Rectangle.Intersect(r, area), hitId);
         }
@@ -941,9 +968,10 @@ namespace ClaudeNotifier.Ui {
             base.OnMouseMove(e);
             string h = HitAt(e.Location);
             if (h != hover) { hover = h; Cursor = h != null ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            UpdateTip(e.Location);
         }
 
-        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); if (hover != null) { hover = null; Invalidate(); } }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); UpdateTip(new Point(-1, -1)); if (hover != null) { hover = null; Invalidate(); } }
 
         protected override void OnMouseWheel(MouseEventArgs e) {
             base.OnMouseWheel(e);

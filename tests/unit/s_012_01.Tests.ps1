@@ -386,7 +386,7 @@ Describe 's_012_01 · контекст, подробности, напомина
             $ui.Switches['remind'].Checked | Should Be $false
             $ui.Switches['context'].Checked | Should Be $false
             $ui.Switches['hotkey'].Checked | Should Be $false
-            $ui.HotkeyRow.Tag.Subtitle.Text | Should Match 'выключено'
+            $ui.HotkeyRow.Tag.Subtitle.Text | Should Match 'Выключена'
             $c = Get-NotifierConfig -DataRoot $script:TrayDataRoot
             $c.approvals.waitSeconds | Should Be 600   # остальные поля раздела сохранены
         }

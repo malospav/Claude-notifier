@@ -43,13 +43,13 @@ function Get-NotifierDefaultConfig {
         quickReplies    = @{ enabled = $true; minutes = 60 }
         showPrompt      = $false  # хранить начало запроса пользователя для подробностей сеанса (по умолчанию нет — приватность)
         context         = @{ enabled = $true; warnPercent = 85 }   # уведомление «контекст почти заполнен» (скоро автосжатие)
-        hotkey          = @{ enabled = $true }                     # Win+Shift+C — мини-окно у трея
+        hotkey          = @{ enabled = $true; keys = 'auto' }      # keys — сочетание (Get-NotifierHotKeyChoices); auto — Win+Shift+C, а если занято — Ctrl+Alt+C
         stalled         = @{ enabled = $true; minutes = 10 }       # «Работает», но журнал молчит столько минут — «сеанс, похоже, остановился»
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
         notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{} }   # mascots — маскот сеансов с других устройств: { id устройства: sphynx | flame }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
-        quiet           = @{ enabled = $false }                    # звук уведомлений выключен (кнопка в шторке)
+        quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
     }
 }
 
@@ -246,6 +246,22 @@ function Get-NotifierConfig {
     Merge-OptionSection $config $user 'inactive' @{ hours = @(1, 72) } $DataRoot
     Merge-OptionSection $config $user 'notch' @{} $DataRoot
     Merge-OptionSection $config $user 'quiet' @{} $DataRoot
+    $hk = Get-JsonProperty $user 'hotkey'
+    if ($hk.found -and $hk.value -is [System.Management.Automation.PSCustomObject]) {
+        $keys = Get-JsonProperty $hk.value 'keys'
+        if ($keys.found) {
+            if ((Get-NotifierHotKeyChoices) -contains [string]$keys.value) { $config.hotkey.keys = [string]$keys.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'hotkey.keys' — неизвестное сочетание, используется auto" -DataRoot $DataRoot }
+        }
+    }
+    $q = Get-JsonProperty $user 'quiet'
+    if ($q.found -and $q.value -is [System.Management.Automation.PSCustomObject]) {
+        $sch = Get-JsonProperty $q.value 'schedule'
+        if ($sch.found) {
+            if ([string]$sch.value -eq '' -or [string]$sch.value -match '^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$') { $config.quiet.schedule = [string]$sch.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'quiet.schedule' должно быть «HH:mm-HH:mm» или пустой строкой" -DataRoot $DataRoot }
+        }
+    }
     $notch = Get-JsonProperty $user 'notch'
     if ($notch.found -and $notch.value -is [System.Management.Automation.PSCustomObject]) {
         $scr = Get-JsonProperty $notch.value 'screen'
@@ -282,6 +298,29 @@ function Get-NotifierHookPort {
     return 47611
 }
 
+function Get-NotifierHotKeyChoices {
+    <# .SYNOPSIS Сочетания, которые можно выбрать для горячей клавиши шторки (auto — Win+Shift+C, иначе Ctrl+Alt+C). #>
+    return @('auto', 'Win+Shift+C', 'Ctrl+Alt+C', 'Ctrl+Shift+Space', 'Win+Alt+C', 'Ctrl+Alt+Space')
+}
+
+function Test-NotifierQuietTime {
+    <#
+    .SYNOPSIS
+    Звук сейчас выключен? Кнопка «Без звука» или расписание quiet.schedule «HH:mm-HH:mm» (через полночь — тоже:
+    23:00-08:00 значит с вечера до утра). Время — местное.
+    #>
+    param([Parameter(Mandatory = $true)]$Config, [datetime]$Now = [DateTime]::Now)
+    if ($Config.quiet.enabled) { return $true }
+    $s = [string]$Config.quiet.schedule
+    if ($s -notmatch '^(\d\d):(\d\d)-(\d\d):(\d\d)$') { return $false }
+    $from = [int]$Matches[1] * 60 + [int]$Matches[2]
+    $to = [int]$Matches[3] * 60 + [int]$Matches[4]
+    $m = $Now.Hour * 60 + $Now.Minute
+    if ($from -eq $to) { return $false }
+    if ($from -lt $to) { return ($m -ge $from -and $m -lt $to) }
+    return ($m -ge $from -or $m -lt $to)
+}
+
 function Get-NotifierHookSecret {
     <#
     .SYNOPSIS
@@ -306,4 +345,4 @@ function Get-NotifierHookSecret {
     return $s
 }
 
-Export-ModuleMember -Function Get-NotifierHookPort, Get-NotifierHookSecret, Get-NotifierDefaultConfig, Get-NotifierConfig, Get-NotifierEventTitle, Set-NotifierConfigValue -Variable NotifierStrings
+Export-ModuleMember -Function Get-NotifierHookPort, Get-NotifierHookSecret, Get-NotifierHotKeyChoices, Test-NotifierQuietTime, Get-NotifierDefaultConfig, Get-NotifierConfig, Get-NotifierEventTitle, Set-NotifierConfigValue -Variable NotifierStrings

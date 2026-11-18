@@ -220,14 +220,111 @@ Describe 's_015_01 · шторка вверху экрана' {
         New-Item -ItemType Directory $script:TrayDataRoot -Force | Out-Null
         $keys = @(Get-NotifierNotchSettingsRows | ForEach-Object { $_.Key } | Where-Object { $_ })
         foreach ($k in @('event.done', 'sound.done', 'quiet', 'approvals', 'quickReplies', 'showPrompt', 'context', 'stalled', 'remind', 'longTasks', 'inactive', 'hotkey', 'notch.screen', 'notch.position', 'notch', 'autostart', 'data')) { ($keys -contains $k) | Should Be $true }
-        Invoke-NotifierNotchSetting -Key 'event.done'
+        foreach ($k in @('export', 'import')) { ($keys -contains $k) | Should Be $true }
+        # Числа, звук, клавиша и расписание — селекты (kind choice)
+        foreach ($k in @('sound.done', 'quiet', 'longTasks', 'remind', 'context', 'stalled', 'inactive', 'hotkey', 'notch.screen', 'notch.position', 'mascot:')) {
+            @(Get-NotifierNotchSettingsRows | Where-Object { $_.Key -eq $k })[0].Kind | Should Be 'choice'
+        }
+        Invoke-NotifierNotchSetting -Key 'event.done' | Should Be $false
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).events.done.enabled | Should Be $false
-        Invoke-NotifierNotchSetting -Key 'remind'
-        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).approvals.remindMinutes | Should Be 0
-        Invoke-NotifierNotchSetting -Key 'inactive'
-        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).inactive.enabled | Should Be $false
-        Invoke-NotifierNotchSetting -Key 'quiet'
+        # Кнопка-динамик в шторке переключает «Без звука» (а не открывает список)
+        Mock Push-NotifierNotchLimits { }
+        Switch-NotifierQuiet
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).quiet.enabled | Should Be $true
+        Get-NotifierSelectLabel -Key 'quiet' | Should Be 'Всегда'
+        Switch-NotifierQuiet
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).quiet.enabled | Should Be $false
+        # Числа: «Выкл» и готовые значения; текущее — с галочкой; число не из списка (правка config.json) тоже видно
+        @(Get-NotifierSelectOptions -Key 'remind' | Where-Object { $_.Current })[0].Label | Should Be '3 мин'
+        Set-NotifierSelectValue -Key 'remind' -Value '0'
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).approvals.remindMinutes | Should Be 0
+        Set-NotifierSelectValue -Key 'remind' -Value '7'   # нет в списке — не записывается
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).approvals.remindMinutes | Should Be 0
+        Set-NotifierSelectValue -Key 'inactive' -Value 'off'
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).inactive.enabled | Should Be $false
+        Get-NotifierSelectLabel -Key 'inactive' | Should Be 'Выкл'
+        Set-NotifierSelectValue -Key 'inactive' -Value '8'
+        $cfg = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+        $cfg.inactive.enabled | Should Be $true
+        $cfg.inactive.hours | Should Be 8
+        Set-NotifierSelectValue -Key 'longTasks' -Value 'off'
+        Get-NotifierSelectLabel -Key 'longTasks' | Should Be 'Всегда'
+        Set-NotifierSelectValue -Key 'context' -Value '90'
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).context.warnPercent | Should Be 90
+        Set-NotifierOptionValue -Name stalled -Field minutes -Value 7
+        $st = @(Get-NotifierSelectOptions -Key 'stalled')
+        @($st | Where-Object { $_.Current })[0].Label | Should Be '7 мин'
+        # Звук: системные WAV, «Свой файл…», «Прослушать»; выбор сразу проигрывается
+        $snd = @(Get-NotifierSelectOptions -Key 'sound.done')
+        $snd[0].Label | Should Be 'Системный'
+        @($snd | Where-Object { $_.Value -eq '*file' }).Count | Should Be 1
+        @($snd | Where-Object { $_.Value -eq '*play' }).Count | Should Be 1
+        Mock Invoke-NotifierSound { $true }
+        $wav = @($snd | Where-Object { $_.Value -like '*.wav' })[0]
+        Set-NotifierSelectValue -Key 'sound.done' -Value $wav.Value
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).events.done.sound | Should Be $wav.Value
+        Assert-MockCalled Invoke-NotifierSound -Times 1 -Exactly -Scope It
+        Get-NotifierSelectLabel -Key 'sound.done' | Should Be $wav.Label
+        Set-NotifierSelectValue -Key 'sound.done' -Value '*play'
+        Assert-MockCalled Invoke-NotifierSound -Times 2 -Exactly -Scope It
+        Set-NotifierSelectValue -Key 'sound.done' -Value 'C:\evil.wav'   # не из списка — не записывается
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).events.done.sound | Should Be $wav.Value
+        # Горячая клавиша: выбор сочетания и «Выкл»
+        Mock Register-NotifierHotKey { 'x' }
+        Set-NotifierSelectValue -Key 'hotkey' -Value 'Ctrl+Shift+Space'
+        $cfg = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+        $cfg.hotkey.enabled | Should Be $true
+        $cfg.hotkey.keys | Should Be 'Ctrl+Shift+Space'
+        Set-NotifierSelectValue -Key 'hotkey' -Value 'off'
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).hotkey.enabled | Should Be $false
+        Assert-MockCalled Register-NotifierHotKey -Times 2 -Exactly -Scope It
+        $hk = ConvertTo-NotifierHotKey 'Ctrl+Shift+Space'
+        $hk.Key | Should Be ([System.Windows.Forms.Keys]::Space)
+        $hk.Mods | Should Be ([ClaudeNotifier.Ui.HotKey]::ModControl -bor [ClaudeNotifier.Ui.HotKey]::ModShift)
+        ConvertTo-NotifierHotKey 'Ctrl+Nope' | Should Be $null
+        # Без звука по расписанию: через полночь и днём; кнопка «Без звука» сильнее расписания
+        Set-NotifierSelectValue -Key 'quiet' -Value '23:00-08:00'
+        $cfg = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+        $cfg.quiet.schedule | Should Be '23:00-08:00'
+        $cfg.quiet.enabled | Should Be $false
+        Test-NotifierQuietTime -Config $cfg -Now ([datetime]'2026-11-18 23:30') | Should Be $true
+        Test-NotifierQuietTime -Config $cfg -Now ([datetime]'2026-11-18 07:59') | Should Be $true
+        Test-NotifierQuietTime -Config $cfg -Now ([datetime]'2026-11-18 08:00') | Should Be $false
+        Test-NotifierQuietTime -Config $cfg -Now ([datetime]'2026-11-18 15:00') | Should Be $false
+        Test-NotifierQuietTime -Config @{ quiet = @{ enabled = $false; schedule = '09:00-18:00' } } -Now ([datetime]'2026-11-18 12:00') | Should Be $true
+        Test-NotifierQuietTime -Config @{ quiet = @{ enabled = $true; schedule = '' } } -Now ([datetime]'2026-11-18 12:00') | Should Be $true
+        Get-NotifierSelectLabel -Key 'quiet' | Should Be "23:00$([char]0x2013)08:00"
+        # Экспорт → импорт на «другом ПК»: настройки переносятся, своя строка статуса остаётся
+        Set-NotifierConfigValue -Name chainStatusLine -Value ([pscustomobject]@{ command = 'my-status.exe' }) -DataRoot $script:TrayDataRoot
+        $file = Join-Path $TestDrive 'export.json'
+        Export-NotifierSettings -Path $file
+        (Get-Content $file -Raw) | Should Not Match 'my-status'
+        $other = Join-Path $TestDrive 'other-pc'
+        New-Item -ItemType Directory $other -Force | Out-Null
+        Set-NotifierConfigValue -Name chainStatusLine -Value ([pscustomobject]@{ command = 'other.exe' }) -DataRoot $other
+        Import-NotifierSettings -Path $file -DataRoot $other | Should Be ''
+        $imp = Get-NotifierConfig -DataRoot $other
+        $imp.quiet.schedule | Should Be '23:00-08:00'
+        $imp.inactive.hours | Should Be 8
+        $imp.chainStatusLine.command | Should Be 'other.exe'
+        Test-Path (Join-Path $other 'config.json.before-import') | Should Be $true
+        [IO.File]::WriteAllText((Join-Path $TestDrive 'foreign.json'), '{"a":1}', [Text.Encoding]::UTF8)
+        Import-NotifierSettings -Path (Join-Path $TestDrive 'foreign.json') -DataRoot $other | Should Match 'Это не файл настроек'
+        Import-NotifierSettings -Path $file -DataRoot $other | Out-Null
+        # Маскот устройства: «Как у этого ПК» снимает свой
+        Set-NotifierSelectValue -Key 'mascot:dev-x' -Value 'flame'
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascots.ContainsKey('dev-x') | Should Be $true
+        Get-NotifierSelectLabel -Key 'mascot:dev-x' | Should Be 'Огонёк'
+        Set-NotifierSelectValue -Key 'mascot:dev-x' -Value ''
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascots.ContainsKey('dev-x') | Should Be $false
+        Get-NotifierSelectLabel -Key 'mascot:dev-x' | Should Be 'Как у ПК'
+        # Монитор: «Автоматически» возвращает выбор по умолчанию
+        Mock Set-NotifierNotchPlacement { }
+        Set-NotifierSelectValue -Key 'notch.screen' -Value ([string]([System.Windows.Forms.Screen]::AllScreens[0].DeviceName))
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.screen | Should Not Be ''
+        Set-NotifierSelectValue -Key 'notch.screen' -Value ''
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.screen | Should Be ''
+        Get-NotifierSelectLabel -Key 'notch.screen' | Should Be 'Авто'
         # Маскот этого ПК — селект: щелчок открывает список под кнопкой, выбор применяется сразу.
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should Be 'sphynx'
         @(Get-NotifierNotchSettingsRows | Where-Object { $_.Key -eq 'mascot:' })[0].Value | Should Be 'Сфинкс'
@@ -325,7 +422,9 @@ Describe 's_015_01 · шторка вверху экрана' {
             Update-NotifierSettingsView
             $ui.NotchPosition.Text | Should Be "Слева  $([char]0x25BE)"
             $screens = @(Get-NotifierSelectOptions -Key 'notch.screen')
-            $screens.Count | Should Be @([System.Windows.Forms.Screen]::AllScreens).Count
+            $screens.Count | Should Be (@([System.Windows.Forms.Screen]::AllScreens).Count + 1)   # + «Автоматически»
+            $screens[0].Value | Should Be ''
+            $screens[0].Label | Should Match '^Автоматически'
             @($screens | Where-Object { $_.Current }).Count | Should Be 1
             Set-NotifierSelectValue -Key 'notch.screen' -Value $screens[-1].Value
             (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.screen | Should Be $screens[-1].Value

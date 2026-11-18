@@ -539,16 +539,37 @@ function Register-NotifierHotKey {
     if (-not $config.hotkey.enabled) { return '' }
     $hk = New-Object ClaudeNotifier.Ui.HotKey
     $hk.add_Pressed({ Invoke-NotifierHotKey })
-    $c = [System.Windows.Forms.Keys]::C
-    if ($hk.Register(([ClaudeNotifier.Ui.HotKey]::ModWin -bor [ClaudeNotifier.Ui.HotKey]::ModShift), $c)) { $script:HotKeyText = 'Win+Shift+C' }
-    elseif ($hk.Register(([ClaudeNotifier.Ui.HotKey]::ModControl -bor [ClaudeNotifier.Ui.HotKey]::ModAlt), $c)) { $script:HotKeyText = 'Ctrl+Alt+C' }
-    else {
+    # auto — Win+Shift+C, если занято — Ctrl+Alt+C; иначе — ровно выбранное сочетание.
+    $want = [string]$config.hotkey.keys
+    $tries = if ($want -eq '' -or $want -eq 'auto') { @('Win+Shift+C', 'Ctrl+Alt+C') } else { @($want) }
+    foreach ($text in $tries) {
+        $parsed = ConvertTo-NotifierHotKey $text
+        if ($parsed -and $hk.Register($parsed.Mods, $parsed.Key)) { $script:HotKeyText = $text; break }
+    }
+    if (-not $script:HotKeyText) {
         $hk.Dispose()
-        Write-NotifierLog -Level WARN -Message 'tray: горячая клавиша не зарегистрирована — Win+Shift+C и Ctrl+Alt+C заняты' -DataRoot $DataRoot
+        Write-NotifierLog -Level WARN -Message "tray: горячая клавиша не зарегистрирована $([char]0x2014) $($tries -join ' и ') заняты" -DataRoot $DataRoot
         return ''
     }
     $script:HotKey = $hk
     return $script:HotKeyText
+}
+
+function ConvertTo-NotifierHotKey([string]$Text) {
+    # «Ctrl+Alt+C» → @{ Mods; Key } для RegisterHotKey; неизвестное — $null.
+    $mods = [uint32]0
+    $key = $null
+    foreach ($part in ($Text -split '\+')) {
+        switch ($part) {
+            'Win' { $mods = $mods -bor [ClaudeNotifier.Ui.HotKey]::ModWin }
+            'Ctrl' { $mods = $mods -bor [ClaudeNotifier.Ui.HotKey]::ModControl }
+            'Alt' { $mods = $mods -bor [ClaudeNotifier.Ui.HotKey]::ModAlt }
+            'Shift' { $mods = $mods -bor [ClaudeNotifier.Ui.HotKey]::ModShift }
+            default { try { $key = [System.Windows.Forms.Keys]$part } catch { return $null } }
+        }
+    }
+    if ($null -eq $key -or $mods -eq 0) { return $null }
+    return @{ Mods = $mods; Key = $key }
 }
 
 function Invoke-NotifierHotKey {
