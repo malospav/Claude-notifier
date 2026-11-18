@@ -392,23 +392,74 @@ namespace ClaudeNotifier.Ui {
             g.SmoothingMode = sm;
         }
 
-        // ---------------------------------------------------------------- Листик
-        // Зелёный семипалый листок на черешке, мордочка в центре; лапка держит самокрутку с огоньком и дымком.
+        // ---------------------------------------------------------------- Шмалючька (leaf)
+        // Зелёный семипалый листок курит самокрутку. Цикл ~6 с, у каждого сеанса свой сдвиг (seed):
+        //   затяжка (0–1,3 с) — огонёк разгорается, самокрутка приподнимается, глаза зажмурены, щёки надуваются;
+        //   задержка (1,3–1,9) — щёки круглые, лист чуть приподнимается от удовольствия;
+        //   выдох (1,9–3,4) — ротик «о», изо рта плывут клубы дыма (через раз — колечко), лист откидывается назад;
+        //   отдых (3,4–6) — блаженные «^ ^», лист покачивается, от огонька вьётся струйка, пепел растёт и в конце падает.
+        // Работает — цикл быстрее и облачко «…»; ждёт решения — замирает с круглыми глазами, огонёк тлеет, «!»;
+        // ошибка — кашляет: трясётся, дым вылетает рывками; остановился — курит медленно; спит — огонёк погас,
+        // самокрутка опущена, «z».
+        const float ShmalCycle = 6f;
+
+        static float Smooth01(float x) { x = FlatFx.Clamp(x, 0, 1); return x * x * (3 - 2 * x); }
+
+        // Мягкий клуб дыма: прозрачный по краям круг.
+        static void SmokePuff(Graphics g, PointF c, float radius, int alpha, Color col) {
+            if (radius < 1f || alpha <= 2) return;
+            using (GraphicsPath gp = new GraphicsPath()) {
+                gp.AddEllipse(c.X - radius, c.Y - radius, radius * 2, radius * 2);
+                using (PathGradientBrush pg = new PathGradientBrush(gp)) {
+                    pg.CenterColor = Color.FromArgb(Math.Min(255, alpha), col);
+                    pg.SurroundColors = new Color[] { Color.FromArgb(0, col) };
+                    pg.FocusScales = new PointF(0.45f, 0.45f);
+                    g.FillPath(pg, gp);
+                }
+            }
+        }
+
         public static void Leaf(Graphics g, RectangleF r, string state, float t, int seed, bool animate, CatMood mood) {
             if (r.Width < 2 || r.Height < 2) return;
             FlatState s = FlatState.Of(r, state, t, seed, animate, mood);
             float u = s.U, cx = s.Cx, by = s.By;
             Func<float, float, PointF> P = delegate (float x, float y) { return new PointF(cx + x * u, by + y * u); };
             Color leaf = s.Tint(Theme.Hex(0x9CBB72), 0.5f), leafBot = s.Tint(Theme.Hex(0x7A9A54), 0.5f), vein = s.Tint(Theme.Hex(0x6C8A4A), 0.5f);
+            Color smoke = Theme.Hex(0xECE8F2);
+
+            // Фаза цикла курения.
+            bool smoking = !s.Sleep && !s.Perm && !s.Err;
+            float speed = s.Working ? 1.35f : s.Stalled ? 0.6f : 1f;
+            double clock = t * speed + seed * 1.37;
+            float c = animate ? (float)(((clock % ShmalCycle) + ShmalCycle) % ShmalCycle) : 4.5f;
+            long cycleNo = animate ? (long)Math.Floor(clock / ShmalCycle) : 0;
+            bool inhale = smoking && c < 1.3f, hold = smoking && c >= 1.3f && c < 1.9f, exhale = smoking && c >= 1.9f && c < 3.4f;
+            float puff = !smoking ? 0f : c < 1.3f ? Smooth01(c / 1.3f) : c < 1.9f ? 1f : c < 2.4f ? 1f - Smooth01((c - 1.9f) / 0.5f) : 0f;   // щёки
+            float glow = s.Sleep ? 0f : !smoking ? 0.45f + 0.1f * s.Sin(1.2, 1) * s.A
+                : c < 1.3f ? 0.5f + 0.5f * Smooth01(c / 1.3f) : c < 2.4f ? 1f - 0.45f * Smooth01((c - 1.3f) / 1.1f) : 0.55f + 0.08f * s.Sin(3.1, 1) * s.A;
+            float cough = s.Err ? (float)Math.Max(0, Math.Sin(t * 7.5)) * s.A : 0f;
+
+            // Поза: покачивание в отдыхе, откидывается на выдохе, приподнимается на задержке, трясётся при кашле.
+            float tilt = Tilt(s, 4f);
+            if (smoking && animate) {
+                if (exhale) tilt -= 4f * (float)Math.Sin(Math.PI * (c - 1.9f) / 1.5f);
+                else if (c >= 3.4f) tilt += 3f * (float)Math.Sin((c - 3.4f) * 2.4f);
+            }
+            if (s.Err) tilt += 3.5f * (float)Math.Sin(t * 34) * cough;
+            float lift = (Hop(s) + 0.012f * puff) * u;
             SmoothingMode sm = Begin(g, s, P(0, -0.45f), Theme.Hex(0xBFD79A), 0.34f);
-            GraphicsState st = Rigid(g, cx, by, Tilt(s, 5f), Hop(s) * u);   // весь лист качается вокруг черешка
+            GraphicsState st = Rigid(g, cx, by, tilt, lift);
+
+            // Лист.
             PointF root = P(0, -0.20f);
             using (Pen stem = new Pen(leafBot, Math.Max(1.6f, u * 0.045f))) { stem.StartCap = stem.EndCap = LineCap.Round; g.DrawLine(stem, P(0, -0.24f), P(0, -0.01f)); }
             float[] ang = { -84, -56, -29, 0, 29, 56, 84 };
             float[] len = { 0.34f, 0.50f, 0.64f, 0.78f, 0.64f, 0.50f, 0.34f };
             for (int i = 0; i < 7; i++) {
-                double a = (ang[i] - 90) * Math.PI / 180;
-                float L = len[i] * u, W = (i == 3 ? 0.12f : 0.10f) * u;
+                // Кончики лепестков чуть «дышат» (основание у всех в одной точке — лист не рассыпается).
+                float flutter = animate ? 2.5f * (float)Math.Sin(t * 1.7 + i * 0.9 + s.Ph) * (i == 3 ? 0.3f : 1f) : 0f;
+                double a = (ang[i] + flutter - 90) * Math.PI / 180;
+                float L = len[i] * u * (1f + 0.02f * puff), W = (i == 3 ? 0.12f : 0.10f) * u;
                 float dx = (float)Math.Cos(a), dy = (float)Math.Sin(a), nx = -dy, ny = dx;
                 PointF tip = new PointF(root.X + dx * L, root.Y + dy * L);
                 PointF m1 = new PointF(root.X + dx * L * 0.42f + nx * W, root.Y + dy * L * 0.42f + ny * W);
@@ -421,27 +472,118 @@ namespace ClaudeNotifier.Ui {
                 }
                 if (u >= 30 && i != 3) using (Pen vp = new Pen(Color.FromArgb(110, vein), Math.Max(1f, u * 0.012f))) g.DrawLine(vp, root, new PointF(root.X + dx * L * 0.8f, root.Y + dy * L * 0.8f));
             }
-            FillOval(g, P(0, -0.50f), 0.17f * u, 0.15f * u, leaf, Draw.Mix(leaf, leafBot, 0.35f));
+
+            // Мордочка: щёки надуваются на затяжке.
+            float cheek = 1f + 0.13f * puff;
+            FillOval(g, P(0, -0.50f), 0.17f * u * cheek, 0.15f * u * (1f + 0.04f * puff), leaf, Draw.Mix(leaf, leafBot, 0.35f));
             Color ink = Theme.Hex(0x2C3322);
             float fx = s.Gx * 0.035f, fy = -s.Gy * 0.025f;
-            FaceEyes(g, s, P(-0.075f + fx, -0.52f + fy), P(0.075f + fx, -0.52f + fy), u, ink, 0.8f, true);
-            Blush(g, P(-0.125f, -0.455f), P(0.125f, -0.455f), u, Theme.Hex(0xF29AA0), s.Sleep ? 40 : 110);
-            FlatFx.Mouth(g, P(fx * 0.6f, -0.455f), u * 0.75f, s.Mouth("smile"), ink);
-            // Самокрутка — в уголке рта, огонёк на дальнем конце.
-            PointF j0 = P(0.025f + fx * 0.6f, -0.45f), j1 = P(0.30f, -0.51f);
-            using (Pen jp = new Pen(Theme.Hex(0xF5F2EA), Math.Max(1.6f, u * 0.04f))) { jp.StartCap = jp.EndCap = LineCap.Round; g.DrawLine(jp, j0, j1); }
-            if (!s.Sleep) {
-                float ember = 0.65f + 0.35f * (float)Math.Abs(Math.Sin(t * 2.5 + s.Ph)) * s.A;
-                using (SolidBrush eb = new SolidBrush(Color.FromArgb((int)(255 * ember), 0xF0, 0x7A, 0x3A))) g.FillEllipse(eb, j1.X - u * 0.024f, j1.Y - u * 0.024f, u * 0.048f, u * 0.048f);
+            PointF eL = P(-0.075f + fx, -0.525f + fy), eR = P(0.075f + fx, -0.525f + fy);
+            if (smoking && (inhale || hold)) FlatFx.Eyes(g, eL, eR, (eL.X + eR.X) / 2, u, "closed", ink, 0.85f);   // зажмурился
+            else if (smoking) HappyArcs(g, eL, eR, u, ink, 0.8f);                                                   // блаженство
+            else FlatFx.Eyes(g, eL, eR, (eL.X + eR.X) / 2, u, s.Eyes, ink, 0.8f);
+            Blush(g, P(-0.125f * cheek, -0.455f), P(0.125f * cheek, -0.455f), u, Theme.Hex(0xF29AA0), s.Sleep ? 40 : (int)(110 + 60 * puff));
+            PointF mouth = P(-0.012f + fx * 0.5f, -0.455f);
+            string mk = exhale || cough > 0.3f ? "o" : inhale || hold ? "flat" : s.Mouth("smile");
+            FlatFx.Mouth(g, mouth, u * 0.75f, mk, ink);
+
+            // Самокрутка в уголке рта: на затяжке приподнимается, во сне повисает.
+            float jangDeg = -12f - 8f * puff + (s.Sleep ? 22f : 0f) + (s.Err ? 6f * (float)Math.Sin(t * 30) * cough : 0f);
+            double ja = jangDeg * Math.PI / 180;
+            float jl = 0.27f * u;
+            PointF j0 = P(0.03f + fx * 0.5f, -0.452f);
+            PointF jd = new PointF((float)Math.Cos(ja), (float)Math.Sin(ja));
+            Func<float, PointF> J = delegate (float k) { return new PointF(j0.X + jd.X * jl * k, j0.Y + jd.Y * jl * k); };
+            float jw = Math.Max(1.6f, u * 0.042f);
+            using (Pen paper = new Pen(Theme.Hex(0xF6F3EC), jw)) { paper.StartCap = paper.EndCap = LineCap.Round; g.DrawLine(paper, J(0.05f), J(0.92f)); }
+            using (Pen filter = new Pen(Theme.Hex(0xD9B07A), jw)) { filter.StartCap = LineCap.Round; g.DrawLine(filter, J(0f), J(0.14f)); }
+            // Пепел растёт за цикл и падает в конце отдыха.
+            float ash = smoking ? 0.03f + 0.10f * Smooth01(c / 5.6f) : 0.06f;
+            if (smoking && c > 5.65f) ash = 0.03f;
+            using (Pen ap = new Pen(Theme.Hex(0x9A968F), jw)) { ap.StartCap = ap.EndCap = LineCap.Round; g.DrawLine(ap, J(0.92f), J(0.92f + ash)); }
+            PointF ember = J(0.92f + ash + 0.02f);
+            if (glow > 0.02f) {
+                if (u >= 16) FlatFx.Glow(g, ember, u * (0.06f + 0.07f * glow), Theme.Hex(0xFF8A3D), (int)(60 + 150 * glow));
+                float er = u * (0.020f + 0.010f * glow);
+                using (SolidBrush eb = new SolidBrush(Color.FromArgb((int)(150 + 105 * glow), 0xF2, (int)(0x6A + 0x40 * glow), 0x2E))) g.FillEllipse(eb, ember.X - er, ember.Y - er, er * 2, er * 2);
             }
             Exclaim(g, P(-0.34f, -1.0f), u, Theme.Hex(0xFFB340), s.Spark);
             g.Restore(st);
-            // Дымок поднимается вверх от огонька (вне наклона листа).
-            if (!s.Sleep && !s.Err && u >= 18) using (Pen sp = new Pen(Color.FromArgb(140, 228, 224, 232), Math.Max(1.4f, u * 0.032f))) {
-                sp.StartCap = sp.EndCap = LineCap.Round;
-                PointF e = P(0.30f, -0.55f - Hop(s));
-                float w = u * 0.05f * (float)Math.Sin(t * 1.6 + s.Ph) * s.A;
-                g.DrawBezier(sp, e.X, e.Y, e.X + u * 0.09f + w, e.Y - u * 0.13f, e.X - u * 0.06f - w, e.Y - u * 0.25f, e.X + u * 0.05f, e.Y - u * 0.38f);
+
+            // Дальше — дым и пепел в пространстве экрана (поднимаются вверх, не наклоняются с листом).
+            using (Matrix rm = new Matrix()) {
+                rm.Translate(cx, by); rm.Rotate(tilt); rm.Translate(-cx, -by - lift);
+                PointF[] pts = { mouth, ember };
+                rm.TransformPoints(pts);
+                PointF mw = pts[0], ew = pts[1];
+                if (u >= 18 && animate) {
+                    // Струйка от огонька: две тонкие волнистые нити, на затяжке почти пропадает (дым втягивается).
+                    if (glow > 0.02f) {
+                        float wa = (inhale ? 0.35f : 1f) * (s.Perm ? 0.7f : 1f);
+                        for (int k = 0; k < 2; k++) {
+                            using (Pen sp = new Pen(Color.FromArgb((int)(120 * wa), smoke), Math.Max(1.2f, u * (0.026f - 0.008f * k)))) {
+                                sp.StartCap = sp.EndCap = LineCap.Round;
+                                float ph = (float)(t * (1.3 + 0.4 * k) + s.Ph + k * 2.1);
+                                float w1 = u * 0.06f * (float)Math.Sin(ph), w2 = u * 0.07f * (float)Math.Sin(ph * 1.3 + 1.1);
+                                float h = u * (0.42f + 0.06f * k);
+                                g.DrawBezier(sp, ew.X, ew.Y - u * 0.02f, ew.X + w1, ew.Y - h * 0.35f, ew.X - w2 + k * u * 0.03f, ew.Y - h * 0.7f, ew.X + w1 * 0.6f + k * u * 0.05f, ew.Y - h);
+                            }
+                        }
+                    }
+                    // Выдох: клубы дыма изо рта (и хвосты прошлого цикла), плывут вверх-влево, растут и тают.
+                    if (smoking) {
+                        for (int prev = 0; prev <= 1; prev++) {
+                            for (int i = 0; i < 6; i++) {
+                                float born = 1.95f + i * 0.24f;
+                                float age = c - born + prev * ShmalCycle;
+                                if (age < 0 || age > 2.8f) continue;
+                                float life = age / 2.8f;
+                                float drift = (i % 2 == 0 ? -1f : -0.6f);
+                                PointF pc = new PointF(
+                                    mw.X + u * (drift * 0.12f * age - 0.03f * i + 0.035f * (float)Math.Sin(age * 2.3 + i)),
+                                    mw.Y - u * (0.06f + 0.20f * age + 0.02f * age * age));
+                                float rad = u * (0.04f + 0.07f * (float)Math.Sqrt(age));
+                                int al = (int)(215 * (1 - life) * Math.Min(1f, age / 0.12f));
+                                SmokePuff(g, pc, rad, al, smoke);
+                            }
+                            // Через цикл — колечко: выплывает после клубов, растёт и поднимается.
+                            if (((cycleNo - prev) & 1) == 0) {
+                                float age = c - 2.95f + prev * ShmalCycle;
+                                if (age >= 0 && age < 2.4f) {
+                                    float life = age / 2.4f;
+                                    float rr = u * (0.035f + 0.07f * Smooth01(age / 1.2f));
+                                    PointF rc = new PointF(mw.X - u * (0.05f + 0.10f * age), mw.Y - u * (0.10f + 0.24f * age));
+                                    using (Pen ring = new Pen(Color.FromArgb((int)(170 * (1 - life) * Math.Min(1f, age / 0.15f)), smoke), Math.Max(1.4f, u * 0.03f)))
+                                        g.DrawEllipse(ring, rc.X - rr, rc.Y - rr * 0.62f, rr * 2, rr * 1.24f);
+                                }
+                            }
+                        }
+                        // Пепел падает с кончика в конце отдыха.
+                        if (c > 5.65f) {
+                            float fa = (c - 5.65f) / 0.35f;
+                            float fy2 = u * (0.02f + 0.30f * fa * fa);
+                            using (SolidBrush ab = new SolidBrush(Color.FromArgb((int)(200 * (1 - fa)), 0x9A, 0x96, 0x8F)))
+                                g.FillEllipse(ab, ew.X - u * 0.04f - u * 0.015f, ew.Y + fy2 - u * 0.012f, u * 0.03f, u * 0.024f);
+                        }
+                    }
+                    // Кашель: рывки дыма изо рта.
+                    if (s.Err) {
+                        float ca = (float)((t % 0.84) / 0.84);
+                        for (int i = 0; i < 3; i++) {
+                            float age = ca * 1.2f - i * 0.12f;
+                            if (age <= 0) continue;
+                            PointF pc = new PointF(mw.X - u * (0.08f + 0.25f * age) + i * u * 0.03f, mw.Y - u * (0.02f + 0.10f * age) + i * u * 0.02f);
+                            SmokePuff(g, pc, u * (0.03f + 0.05f * age), (int)(140 * (1 - age / 1.2f)), smoke);
+                        }
+                    }
+                }
+                else if (u >= 18 && glow > 0.02f) {
+                    // Неподвижный кадр (превью): одна спокойная струйка.
+                    using (Pen sp = new Pen(Color.FromArgb(120, smoke), Math.Max(1.2f, u * 0.026f))) {
+                        sp.StartCap = sp.EndCap = LineCap.Round;
+                        g.DrawBezier(sp, ew.X, ew.Y - u * 0.02f, ew.X + u * 0.06f, ew.Y - u * 0.15f, ew.X - u * 0.05f, ew.Y - u * 0.28f, ew.X + u * 0.03f, ew.Y - u * 0.42f);
+                    }
+                }
             }
             Finish(g, s, mood, new PointF(cx - 0.64f * u, by - 0.98f * u));
             g.SmoothingMode = sm;
