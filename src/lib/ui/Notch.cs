@@ -1107,7 +1107,8 @@ namespace ClaudeNotifier.Ui {
                 // проверить, не перекрыло ли шторку другое окно «поверх всех».
                 int wantOut = View.Expanded ? 80 : 800;
                 if (outside.Interval != wantOut) { outside.Interval = wantOut; topTicks = 0; }
-                if (!View.Expanded || ++topTicks >= 10) { topTicks = 0; RaiseToTop(); }
+                // Пока открыт список, меню или диалог трея (Hold), шторка наверх не лезет — они должны быть выше.
+                if (!View.Expanded || ++topTicks >= 10) { topTicks = 0; if (!Hold) RaiseToTop(); }
                 if (!View.Expanded || Hold || (DateTime.UtcNow - expandedAt).TotalMilliseconds < 400) return;
                 if (Control.MouseButtons == MouseButtons.None || ShapeOnScreen().Contains(NotchView.SafeCursor())) return;
                 SetExpanded(false, null);

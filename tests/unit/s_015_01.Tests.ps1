@@ -595,6 +595,27 @@ Describe 's_015_01 · шторка вверху экрана' {
         [ClaudeNotifier.Ui.Mascot]::Kind = 'whatever'; [ClaudeNotifier.Ui.Mascot]::Kind | Should Be 'sphynx'
     }
 
+    It 'шторка не поднимается над своими окнами приложения (выпадающие списки, меню) — они остаются выше' {
+        # «Шторка» и «список» — оба поверх всех, список выше и перекрывает шторку, оба окна этого процесса.
+        $mk = {
+            param($x)
+            $f = New-Object System.Windows.Forms.Form
+            $f.FormBorderStyle = 'None'; $f.ShowInTaskbar = $false; $f.TopMost = $true; $f.StartPosition = 'Manual'
+            $f.Bounds = New-Object System.Drawing.Rectangle $x, -3000, 200, 120
+            $f.Show(); $f
+        }
+        $notch = & $mk -3000
+        $list = & $mk -2950
+        try {
+            [ClaudeNotifier.Ui.Native]::BringToTop($list.Handle)
+            [System.Windows.Forms.Application]::DoEvents()
+            # Своё окно поверх — не повод подниматься: KeepOnTop ничего не делает.
+            [ClaudeNotifier.Ui.Native]::KeepOnTop($notch.Handle, (New-Object System.Drawing.Rectangle -3000, -3000, 200, 120)) | Should Be $false
+            [ClaudeNotifier.Ui.Native]::BringToTop([IntPtr]::Zero)   # без окна — без ошибки
+        }
+        finally { $list.Dispose(); $notch.Dispose() }
+    }
+
     It 'плоские маскоты: список совпадает с настройками и config.json, каждый рисуется во всех состояниях' {
         $kinds = @([ClaudeNotifier.Ui.Mascot]::Kinds)
         ($kinds -join ',') | Should Be ($script:NotchMascots -join ',')

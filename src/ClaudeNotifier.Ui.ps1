@@ -542,7 +542,8 @@ function New-NotifierMenu {
     $menu.Font = [ClaudeNotifier.Ui.Fonts]::Text(9.5)
     $menu.ShowImageMargin = $false
     $menu.Padding = New-Object System.Windows.Forms.Padding(0, $Theme.S(4), 0, $Theme.S(4))
-    $menu.add_Opened({ [ClaudeNotifier.Ui.Native]::RoundPopup($this.Handle) })
+    # Меню и выпадающие списки — выше шторки (она тоже «поверх всех»).
+    $menu.add_Opened({ [ClaudeNotifier.Ui.Native]::RoundPopup($this.Handle); [ClaudeNotifier.Ui.Native]::BringToTop($this.Handle) })
     foreach ($i in $Items) {
         if ($i -is [string] -and $i -eq '-') { [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)); continue }
         $mi = New-Object System.Windows.Forms.ToolStripMenuItem $i[0]

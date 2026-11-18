@@ -183,14 +183,19 @@ namespace ClaudeNotifier.Ui {
         [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
         [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        static readonly uint ownPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
 
         // Поднять окно на самый верх среди «поверх всех» (без фокуса). Возвращает true, если пришлось поднимать:
-        // над окном было видимое окно, перекрывающее area (координаты экрана).
+        // над окном было видимое окно, перекрывающее area (координаты экрана). Свои окна приложения (выпадающие
+        // списки, меню, подсказки, диалоги) перекрытием не считаются: они должны оставаться над шторкой.
         public static bool KeepOnTop(IntPtr h, Rectangle area) {
             try {
                 bool covered = false;
                 for (IntPtr w = GetWindow(h, 3 /* GW_HWNDPREV */); w != IntPtr.Zero; w = GetWindow(w, 3)) {
                     if (!IsWindowVisible(w) || IsIconic(w)) continue;
+                    uint pid; GetWindowThreadProcessId(w, out pid);
+                    if (pid == ownPid) continue;
                     int cloaked;
                     if (DwmGetWindowAttribute(w, 14 /* DWMWA_CLOAKED */, out cloaked, 4) == 0 && cloaked != 0) continue;
                     RECT r;
@@ -202,6 +207,11 @@ namespace ClaudeNotifier.Ui {
                 SetWindowPosZ(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);
                 return true;
             } catch { return false; }
+        }
+
+        // Поставить окно (выпадающий список, меню) на самый верх «поверх всех» без фокуса — выше шторки.
+        public static void BringToTop(IntPtr h) {
+            try { if (h != IntPtr.Zero) SetWindowPosZ(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200); } catch { }
         }
 
         [DllImport("dwmapi.dll")] static extern int DwmFlush();
