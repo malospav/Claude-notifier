@@ -19,9 +19,12 @@ jobs:
         shell: powershell
         run: |
           Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
+      # Только латиница в скриптах шагов: Windows PowerShell 5.1 читает временный .ps1 без BOM как ANSI,
+      # и кириллица ломает разбор (тесты тогда вовсе не запускаются). Файлы тестов — UTF-8 с BOM, с ними всё в порядке.
       - name: Тесты
         shell: powershell
         run: |
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
           Import-Module Pester -RequiredVersion 5.7.1
           $c = New-PesterConfiguration
           $c.Run.Path = 'tests\unit'
@@ -30,7 +33,14 @@ jobs:
           $c.TestResult.Enabled = $true
           $c.TestResult.OutputPath = 'pester.xml'
           $r = Invoke-Pester -Configuration $c
-          "Прошло: $($r.PassedCount), упало: $($r.FailedCount), пропущено: $($r.SkippedCount), не загрузилось файлов: $($r.FailedContainersCount)"
+          "Passed: $($r.PassedCount), failed: $($r.FailedCount), skipped: $($r.SkippedCount), failed files: $($r.FailedContainersCount)"
+          # Each failure as a GitHub annotation: visible on the run page and via the API without signing in.
+          foreach ($f in $r.Failed) {
+            $msg = ($f.ErrorRecord | Select-Object -First 1).Exception.Message -replace '\s+', ' '
+            if ($msg.Length -gt 400) { $msg = $msg.Substring(0, 400) }
+            Write-Output ("::error title=" + ($f.ExpandedPath -replace '[:,\r\n]', ' ') + "::" + $msg)
+          }
+          foreach ($f in $r.FailedContainers) { Write-Output ("::error title=Failed test file::" + $f.Item) }
           if ($r.FailedCount -gt 0 -or $r.FailedContainersCount -gt 0) { exit 1 }
       - name: Отчёт
         if: always()
@@ -138,7 +148,7 @@ jobs:
 
   macos:
     name: Скрипты Mac (sh, BSD-утилиты, osascript)
-    runs-on: macos-latest
+    runs-on: macos-14   # явный образ: macos-latest здесь ни разу не получил машину
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
