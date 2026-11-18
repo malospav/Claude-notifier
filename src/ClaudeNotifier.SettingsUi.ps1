@@ -280,12 +280,17 @@ function New-NotifierSettingsPage {
         Set-NotifierOptionValue -Name notch -Value $this.Checked
         try { Initialize-NotifierNotch; [void](Invoke-NotifierSessionsRefresh) } catch { }
     }
-    $btnScreen = New-NotifierButton -Theme $t -Text (Format-NotifierScreenName (Get-NotifierNotchScreen -Config $config)) -Plain -OnClick { Switch-NotifierNotchScreen; Update-NotifierSettingsView }
-    $btnPos = New-NotifierButton -Theme $t -Text (Format-NotifierNotchPosition ([string]$config.notch.position)) -Plain -OnClick { Switch-NotifierNotchPosition; Update-NotifierSettingsView }
+    # Монитор и положение — выпадающий список под кнопкой (как в шторке).
+    $btnScreen = New-NotifierButton -Theme $t -Text "$(Format-NotifierScreenName (Get-NotifierNotchScreen -Config $config))  $([char]0x25BE)" -Plain -OnClick {
+        Show-NotifierSelect -Key notch.screen -Location ($this.PointToScreen((New-Object System.Drawing.Point 0, ($this.Height + 2)))) -Width $this.Width -After { Update-NotifierSettingsView }
+    }
+    $btnPos = New-NotifierButton -Theme $t -Text "$(Format-NotifierNotchPosition ([string]$config.notch.position))  $([char]0x25BE)" -Plain -OnClick {
+        Show-NotifierSelect -Key notch.position -Location ($this.PointToScreen((New-Object System.Drawing.Point 0, ($this.Height + 2)))) -Width $this.Width -After { Update-NotifierSettingsView }
+    }
     $ui.Switches['notch'] = $swNotch; $ui.NotchScreen = $btnScreen; $ui.NotchPosition = $btnPos
     Add-Group (New-NotifierSettingsGroup -Theme $t -Width $width -Rows @(
             @{ Title = 'Шторка вверху экрана'; Subtitle = 'Персонажи сеансов; щелчок — панель с ответами'; Control = $swNotch },
-            @{ Title = 'Монитор'; Subtitle = 'Щелчок — следующий монитор'; Control = $btnScreen },
+            @{ Title = 'Монитор'; Subtitle = 'Где показывать шторку'; Control = $btnScreen },
             @{ Title = 'Положение'; Subtitle = 'У верхнего края: слева, по центру или справа'; Control = $btnPos }
         )) 'Щелчок мимо раскрытой шторки сворачивает её. Горячая клавиша тоже раскрывает шторку.'
 
@@ -334,8 +339,8 @@ function Update-NotifierSettingsView {
     }
     if ($ui.Switches.ContainsKey('notch')) {
         $ui.Switches['notch'].SetChecked([bool]$config.notch.enabled)
-        $ui.NotchScreen.Text = Format-NotifierScreenName (Get-NotifierNotchScreen -Config $config); $ui.NotchScreen.FitWidth(); $ui.NotchScreen.Parent.PerformLayout()
-        $ui.NotchPosition.Text = Format-NotifierNotchPosition ([string]$config.notch.position); $ui.NotchPosition.FitWidth(); $ui.NotchPosition.Parent.PerformLayout()
+        $ui.NotchScreen.Text = "$(Format-NotifierScreenName (Get-NotifierNotchScreen -Config $config))  $([char]0x25BE)"; $ui.NotchScreen.FitWidth(); $ui.NotchScreen.Parent.PerformLayout()
+        $ui.NotchPosition.Text = "$(Format-NotifierNotchPosition ([string]$config.notch.position))  $([char]0x25BE)"; $ui.NotchPosition.FitWidth(); $ui.NotchPosition.Parent.PerformLayout()
         if ($ui.HotkeyRow) { $ui.HotkeyRow.Tag.Subtitle.Text = Format-NotifierHotKeySubtitle }
     }
     $ui.Autostart.SetChecked((Test-NotifierAutostart))

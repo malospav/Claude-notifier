@@ -37,10 +37,11 @@ function Get-NotifierNotchScreen {
 
 function Format-NotifierScreenName {
     <# .SYNOPSIS «Монитор 2 · 1440 × 2560» (основной — с пометкой). #>
-    param([Parameter(Mandatory = $true)]$Screen)
+    param([Parameter(Mandatory = $true)]$Screen, [switch]$Short)   # -Short — «Монитор 2» (для кнопки-селекта)
     $all = @([System.Windows.Forms.Screen]::AllScreens)
     $i = 1
     for ($k = 0; $k -lt $all.Count; $k++) { if ($all[$k].DeviceName -eq $Screen.DeviceName) { $i = $k + 1 } }
+    if ($Short) { return "Монитор $i" }
     $text = "Монитор $i $([char]0x00B7) $($Screen.Bounds.Width) $([char]0x00D7) $($Screen.Bounds.Height)"
     if ($Screen.Primary) { $text += ' (основной)' }
     return $text
@@ -269,8 +270,8 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow switch 'stalled' 'Сеанс завис или упал' "Тишина $([int]$c.stalled.minutes) мин или ошибка API" -On ([bool]$c.stalled.enabled)
     $rows += New-NotifierNotchRow switch 'inactive' 'Убирать давние сеансы' "Ждёт ответа дольше $([int]$c.inactive.hours) ч $([char]0x2014) в конец" -On ([bool]$c.inactive.enabled)
     $rows += New-NotifierNotchRow header -Title 'Шторка'
-    $rows += New-NotifierNotchRow choice 'notch.screen' 'Монитор' 'Щелчок — следующий' -Value (Format-NotifierScreenName (Get-NotifierNotchScreen -Config $c))
-    $rows += New-NotifierNotchRow choice 'notch.position' 'Положение' 'У верхнего края экрана' -Value (Format-NotifierNotchPosition ([string]$c.notch.position))
+    $rows += New-NotifierNotchRow choice 'notch.screen' 'Монитор' 'Экран для шторки' -Value (Format-NotifierScreenName (Get-NotifierNotchScreen -Config $c) -Short)
+    $rows += New-NotifierNotchRow choice 'notch.position' 'Положение' 'У верхнего края' -Value (Format-NotifierNotchPosition ([string]$c.notch.position))
     $rows += New-NotifierNotchRow switch 'hotkey' 'Горячая клавиша' (Format-NotifierHotKeySubtitle) -On ([bool]$c.hotkey.enabled)
     $rows += New-NotifierNotchRow switch 'notch' 'Шторка вместо окна' 'Выключить — прежнее окно «Сеансы»' -On $true
     $rows += New-NotifierNotchRow header -Title 'Маскоты'
@@ -394,7 +395,7 @@ function Show-NotifierSoundMenuAt {
 
 function Invoke-NotifierNotchSetting {
     <# .SYNOPSIS Тумблер или выбор на страницах «Настройки» и «Устройства». #>
-    param([Parameter(Mandatory = $true)][string]$Key, [System.Drawing.Point]$Location = [System.Windows.Forms.Cursor]::Position)
+    param([Parameter(Mandatory = $true)][string]$Key, [System.Drawing.Point]$Location = [System.Windows.Forms.Cursor]::Position, [int]$Width = 0)
     $c = Get-NotifierConfig -DataRoot $script:TrayDataRoot
     switch -Regex ($Key) {
         '^event\.(done|permission|error|limit)$' { Set-NotifierEventOption -Type $Matches[1] -Enabled (-not [bool]$c.events[$Matches[1]].enabled) }
@@ -402,10 +403,11 @@ function Invoke-NotifierNotchSetting {
         '^showPrompt$' { Set-NotifierOptionValue -Name showPrompt -Value (-not [bool]$c.showPrompt) }
         '^remind$' { Set-NotifierOptionValue -Name approvals -Field remindMinutes -Value @(3, 0)[[int]([int]$c.approvals.remindMinutes -gt 0)] }
         '^hotkey$' { Set-NotifierOptionValue -Name hotkey -Value (-not [bool]$c.hotkey.enabled); try { [void](Register-NotifierHotKey) } catch { } }
-        '^notch\.screen$' { Switch-NotifierNotchScreen }
-        '^notch\.position$' { Switch-NotifierNotchPosition }
-        '^notch\.mascot$' { Switch-NotifierMascot }
-        '^mascot:(.*)$' { Switch-NotifierMascot -Device $Matches[1] }
+        # Монитор, положение и маскоты — выпадающий список под кнопкой; страница обновится после выбора.
+        '^(notch\.screen|notch\.position|notch\.mascot|mascot:.*)$' {
+            Show-NotifierSelect -Key $Key -Location $Location -Width $Width -After { Push-NotifierNotchPage -Page settings }
+            return
+        }
         '^notch$' {
             # Шторку выключили — дальше работает прежнее окно (открываем его на настройках).
             Set-NotifierOptionValue -Name notch -Value $false
@@ -473,6 +475,103 @@ function Switch-NotifierNotchPosition {
     Set-NotifierNotchPlacement
 }
 
+function Get-NotifierSelectOptions {
+    <#
+    .SYNOPSIS
+    Варианты селекта настроек: @{ Value; Label; Current } по порядку. Ключи: notch.screen, notch.position,
+    mascot:<id устройства> ('' — этот ПК). Неизвестный ключ — пусто.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Key, $Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
+    switch -Regex ($Key) {
+        '^notch\.screen$' {
+            $cur = Get-NotifierNotchScreen -Config $Config
+            foreach ($s in @([System.Windows.Forms.Screen]::AllScreens)) {
+                @{ Value = [string]$s.DeviceName; Label = (Format-NotifierScreenName $s); Current = ($s.DeviceName -eq $cur.DeviceName) }
+            }
+        }
+        '^notch\.position$' {
+            $cur = [string]$Config.notch.position
+            if (@('left', 'right') -notcontains $cur) { $cur = 'center' }
+            foreach ($v in @('left', 'center', 'right')) { @{ Value = $v; Label = (Format-NotifierNotchPosition $v); Current = ($v -eq $cur) } }
+        }
+        '^(?:notch\.mascot|mascot:(.*))$' {
+            $dev = if ($Matches[1]) { $Matches[1] } else { '' }
+            $cur = Get-NotifierMascotOf -Device $dev -Config $Config
+            foreach ($v in $script:NotchMascots) { @{ Value = $v; Label = (Format-NotifierMascot $v); Current = ($v -eq $cur) } }
+        }
+    }
+}
+
+function Set-NotifierSelectValue {
+    <# .SYNOPSIS Записать вариант, выбранный в селекте настроек, и сразу применить (место шторки, маскот). #>
+    param([Parameter(Mandatory = $true)][string]$Key, [Parameter(Mandatory = $true)][string]$Value)
+    switch -Regex ($Key) {
+        '^notch\.screen$' {
+            if (@([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -eq $Value }).Count -eq 0) { return }
+            Set-NotifierOptionValue -Name notch -Field screen -Value $Value
+            Set-NotifierNotchPlacement
+        }
+        '^notch\.position$' {
+            if (@('left', 'center', 'right') -notcontains $Value) { return }
+            Set-NotifierOptionValue -Name notch -Field position -Value $Value
+            Set-NotifierNotchPlacement
+        }
+        '^(?:notch\.mascot|mascot:(.*))$' {
+            if ($script:NotchMascots -notcontains $Value) { return }
+            $dev = if ($Matches[1]) { $Matches[1] } else { '' }
+            if ($dev -eq '') { Set-NotifierOptionValue -Name notch -Field mascot -Value $Value }
+            else {
+                $config = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+                $map = @{}
+                foreach ($k in @($config.notch.mascots.Keys)) { $map[$k] = $config.notch.mascots[$k] }
+                $map[$dev] = $Value
+                Set-NotifierOptionValue -Name notch -Field mascots -Value ([pscustomobject]$map)
+            }
+            Set-NotifierMascot
+        }
+    }
+}
+
+function Show-NotifierSelect {
+    <#
+    .SYNOPSIS
+    Выпадающий список вариантов настройки под кнопкой-селектом (шторка или прежнее окно): текущий — с галочкой.
+    Location — левый нижний угол кнопки на экране, Width — её ширина (список не уже кнопки). After — что сделать после выбора.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [System.Drawing.Point]$Location = [System.Windows.Forms.Cursor]::Position,
+        [int]$Width = 0,
+        [scriptblock]$After
+    )
+    $options = @(Get-NotifierSelectOptions -Key $Key)
+    if ($options.Count -eq 0) { return }
+    if ($script:SelectMenu -and -not $script:SelectMenu.IsDisposed) { $script:SelectMenu.Dispose() }
+    $theme = [ClaudeNotifier.Ui.Theme]::Create($true)
+    $menu = New-NotifierMenu -Theme $theme
+    $menu.ShowCheckMargin = $true
+    if ($Width -gt 0) { $menu.MinimumSize = New-Object System.Drawing.Size($Width, 0) }
+    $script:SelectAfter = $After
+    foreach ($o in $options) {
+        $mi = New-Object System.Windows.Forms.ToolStripMenuItem ([string]$o.Label)
+        $mi.Padding = New-Object System.Windows.Forms.Padding($theme.S(4), $theme.S(5), $theme.S(8), $theme.S(5))
+        $mi.Checked = [bool]$o.Current
+        $mi.Tag = @{ Key = $Key; Value = [string]$o.Value }
+        $mi.add_Click({
+                $t = $this.Tag
+                try { Set-NotifierSelectValue -Key $t.Key -Value $t.Value }
+                catch { Write-NotifierLog -Level ERROR -Message "settings: $($t.Key): $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+                if ($script:SelectAfter) { & $script:SelectAfter }
+            })
+        [void]$menu.Items.Add($mi)
+    }
+    $script:SelectMenu = $menu
+    # Пока список открыт, щелчок по нему не должен сворачивать шторку.
+    if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($true) }
+    $menu.add_Closed({ if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($false) } })
+    $menu.Show($Location)
+}
+
 function Show-NotifierNotchSessionMenu {
     <# .SYNOPSIS Правый щелчок по сеансу в шторке: то же меню, что в окне (перейти, файлы, папка, имя, закрепить, без уведомлений, убрать). #>
     param([Parameter(Mandatory = $true)]$Card, [System.Drawing.Point]$Location = [System.Windows.Forms.Cursor]::Position)
@@ -517,7 +616,11 @@ function Invoke-NotifierNotchCommand {
                 finally { $script:DialogOpen = $false }
                 [void](Invoke-NotifierSessionsRefresh)
             }
-            'set' { Invoke-NotifierNotchSetting -Key ([string]$Event.Id) -Location $Event.Location; Push-NotifierNotchPage }
+            'set' {
+                $w = 0; [void][int]::TryParse([string]$Event.Action, [ref]$w)   # у селекта — ширина кнопки
+                Invoke-NotifierNotchSetting -Key ([string]$Event.Id) -Location $Event.Location -Width $w
+                Push-NotifierNotchPage
+            }
             'remove' {
                 # Крестик на плашке: сеанс убирается из списка (вернётся при следующем событии в нём).
                 Remove-NotifierSession -SessionId ([string]$Event.Id)

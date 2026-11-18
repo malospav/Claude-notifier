@@ -324,6 +324,8 @@ namespace ClaudeNotifier.Ui {
         }
 
         void Hit(Rectangle r, string id) { r.Offset(origin); hits.Add(new KeyValuePair<Rectangle, string>(r, id)); }
+        // Кнопки-селекты (строки choice): где нарисованы — список вариантов открывается ровно под кнопкой.
+        readonly Dictionary<string, Rectangle> selectAnchors = new Dictionary<string, Rectangle>();
 
         // --- Раскрытие без рывков: окно на время анимации не меняет размер и форму (это дорого и дёргается),
         // а внутри прозрачного окна плавно растёт нарисованная фигура шторки. Содержимое не перекладывается:
@@ -740,6 +742,23 @@ namespace ClaudeNotifier.Ui {
             TextRenderer.DrawText(g, text, fBold, br, tc, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
         }
 
+        void PaintSelect(Graphics g, Rectangle br, string text, bool hot) {
+            float rad = theme.S(8);
+            Draw.Fill(g, br, rad, hot ? Theme.Hex(0x3A3A3C) : Theme.Hex(0x2C2C2E));
+            using (GraphicsPath path = Draw.Round(new RectangleF(br.X + 0.5f, br.Y + 0.5f, br.Width - 1, br.Height - 1), rad))
+            using (Pen border = new Pen(hot ? Theme.Hex(0x5A5A5E) : Theme.Hex(0x48484A)))
+                g.DrawPath(border, path);
+            int chev = theme.S(26);
+            TextRenderer.DrawText(g, text, fBody, new Rectangle(br.X + theme.S(12), br.Y, br.Width - theme.S(12) - chev, br.Height), Color.White,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            // Стрелка вниз — как у системного выпадающего списка.
+            float cx = br.Right - chev / 2f - theme.S(2), cy = br.Y + br.Height / 2f, w = theme.S(4.5f);
+            using (Pen p = new Pen(Theme.Hex(0xAEAEB2), theme.S(1.6f))) {
+                p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+                g.DrawLines(p, new PointF[] { new PointF(cx - w, cy - w / 2), new PointF(cx, cy + w / 2), new PointF(cx + w, cy - w / 2) });
+            }
+        }
+
         void PaintOthers(Graphics g, Rectangle r) {
             NotchItem sel = Selected;
             int pad = theme.S(12), chH = theme.S(40), gap = theme.S(8);
@@ -843,8 +862,16 @@ namespace ClaudeNotifier.Ui {
                 float kx = row.On ? t.Right - theme.S(2) - kd : t.X + theme.S(2);
                 Draw.Fill(g, new RectangleF(kx, t.Y + theme.S(2), kd, kd), kd / 2, Color.White);
                 rightW = sw + theme.S(10);
-            } else if (row.Kind == "choice" || row.Kind == "button") {
-                string text = row.Value + (row.Kind == "choice" ? "  ›" : "");
+            } else if (row.Kind == "choice") {
+                // Селект: значение слева, стрелка вниз справа; щелчок — выпадающий список под кнопкой.
+                int bw = Math.Min(r.Width / 2, Math.Max(theme.S(120), TextRenderer.MeasureText(row.Value, fBody).Width + theme.S(56)));
+                Rectangle b = new Rectangle(r.Right - pad - bw, r.Y + (r.Height - theme.S(30)) / 2, bw, theme.S(30));
+                PaintSelect(g, b, row.Value, hot);
+                Rectangle a = b; a.Offset(origin);
+                selectAnchors[hitId] = a;
+                rightW = bw + theme.S(10);
+            } else if (row.Kind == "button") {
+                string text = row.Value;
                 int bw = Math.Min(r.Width / 2, TextRenderer.MeasureText(text, fBold).Width + theme.S(24));
                 Rectangle b = new Rectangle(r.Right - pad - bw, r.Y + (r.Height - theme.S(28)) / 2, bw, theme.S(28));
                 PaintPill(g, b, text, "secondary", hot);
@@ -975,7 +1002,12 @@ namespace ClaudeNotifier.Ui {
             }
             string kind = hit, action = null;
             if (hit.StartsWith("act:")) { kind = "action"; action = hit.Substring(4); }
-            else if (hit.StartsWith("set:")) { kind = "set"; id = hit.Substring(4); }
+            else if (hit.StartsWith("set:")) {
+                kind = "set"; id = hit.Substring(4);
+                // Селект: список — под левым краем кнопки и не уже её (ширина — в action).
+                Rectangle a;
+                if (selectAnchors.TryGetValue(hit, out a)) { p = PointToScreen(new Point(a.X, a.Bottom + theme.S(4))); action = a.Width.ToString(); }
+            }
             else if (hit.StartsWith("row:")) {
                 kind = "row";
                 string rest = hit.Substring(4);

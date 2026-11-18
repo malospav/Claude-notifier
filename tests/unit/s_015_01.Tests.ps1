@@ -228,22 +228,32 @@ Describe 's_015_01 · шторка вверху экрана' {
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).inactive.enabled | Should Be $false
         Invoke-NotifierNotchSetting -Key 'quiet'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).quiet.enabled | Should Be $true
-        # Маскот этого ПК: сфинкс → огонёк → сфинкс; строка в разделе «Маскоты»; применяется сразу.
+        # Маскот этого ПК — селект: щелчок открывает список под кнопкой, выбор применяется сразу.
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should Be 'sphynx'
         @(Get-NotifierNotchSettingsRows | Where-Object { $_.Key -eq 'mascot:' })[0].Value | Should Be 'Сфинкс'
-        Invoke-NotifierNotchSetting -Key 'mascot:'
+        Mock Show-NotifierSelect { }
+        Invoke-NotifierNotchSetting -Key 'mascot:' -Location (New-Object System.Drawing.Point 10, 20) -Width 160
+        Assert-MockCalled Show-NotifierSelect -Times 1 -Exactly -ParameterFilter { $Key -eq 'mascot:' -and $Width -eq 160 -and $Location.Y -eq 20 }
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should Be 'sphynx'   # щелчок сам ничего не меняет
+        $opts = @(Get-NotifierSelectOptions -Key 'mascot:')
+        ($opts | ForEach-Object { $_.Label }) -join ',' | Should Be 'Сфинкс,Огонёк'
+        @($opts | Where-Object { $_.Current })[0].Value | Should Be 'sphynx'
+        Set-NotifierSelectValue -Key 'mascot:' -Value 'flame'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should Be 'flame'
         [ClaudeNotifier.Ui.Mascot]::Kind | Should Be 'flame'
         @(Get-NotifierNotchSettingsRows | Where-Object { $_.Key -eq 'mascot:' })[0].Value | Should Be 'Огонёк'
-        Invoke-NotifierNotchSetting -Key 'mascot:'
+        @(Get-NotifierSelectOptions -Key 'mascot:' | Where-Object { $_.Current })[0].Value | Should Be 'flame'
+        Set-NotifierSelectValue -Key 'mascot:' -Value 'bogus'   # неизвестное значение не записывается
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should Be 'flame'
+        Set-NotifierSelectValue -Key 'mascot:' -Value 'sphynx'
         [ClaudeNotifier.Ui.Mascot]::Kind | Should Be 'sphynx'
         # Свой маскот у устройства: только у него, этот ПК — прежний.
-        Invoke-NotifierNotchSetting -Key 'mascot:dev-mac'
+        Set-NotifierSelectValue -Key 'mascot:dev-mac' -Value 'flame'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascots['dev-mac'] | Should Be 'flame'
         [ClaudeNotifier.Ui.Mascot]::For('dev-mac') | Should Be 'flame'
         [ClaudeNotifier.Ui.Mascot]::For('') | Should Be 'sphynx'
         [ClaudeNotifier.Ui.Mascot]::For('other') | Should Be 'sphynx'
-        Invoke-NotifierNotchSetting -Key 'mascot:dev-mac'
+        Set-NotifierSelectValue -Key 'mascot:dev-mac' -Value 'sphynx'
         [ClaudeNotifier.Ui.Mascot]::For('dev-mac') | Should Be 'sphynx'
         # Разделы настроек — заголовки строк; на странице — боковое меню, раздел по щелчку.
         $titles = @(Get-NotifierNotchSettingsRows | Where-Object { $_.Kind -eq 'header' } | ForEach-Object { $_.Title })
@@ -254,8 +264,10 @@ Describe 's_015_01 · шторка вверху экрана' {
         $v.SettingsSection | Should Be 4
         ($v.ContentHeight('settings', 732) -lt 420) | Should Be $true   # самый большой раздел — без прокрутки
         $v.Dispose()
-        Invoke-NotifierNotchSetting -Key 'notch.position'
+        Set-NotifierSelectValue -Key 'notch.position' -Value 'right'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.position | Should Be 'right'
+        # Строки «Монитор» и «Положение» — селекты (kind choice): в шторке рисуются кнопкой со стрелкой вниз
+        @(Get-NotifierNotchSettingsRows | Where-Object { @('notch.screen', 'notch.position', 'mascot:') -contains $_.Key } | Where-Object { $_.Kind -ne 'choice' }).Count | Should Be 0
     }
 
     It 'страницы «Устройства» и «Статистика»: строки из данных трея' {
@@ -293,7 +305,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         Assert-MockCalled Invoke-NotifierSound -Times 0 -Exactly -Scope It
     }
 
-    It 'настройки: группа «Шторка» — тумблер, монитор и положение по кругу' {
+    It 'настройки: группа «Шторка» — тумблер, монитор и положение выбираются из списка' {
         $script:TrayDataRoot = Join-Path $TestDrive 'set'
         New-Item -ItemType Directory $script:TrayDataRoot -Force | Out-Null
         Initialize-NotifierNet -DataRoot $script:TrayDataRoot
@@ -301,16 +313,22 @@ Describe 's_015_01 · шторка вверху экрана' {
         try {
             $ui = $script:SessionsForm.Tag.Settings
             $ui.Switches['notch'].Checked | Should Be $true
-            $ui.NotchPosition.Text | Should Be 'По центру'
+            $ui.NotchPosition.Text | Should Be "По центру  $([char]0x25BE)"   # кнопка-селект со стрелкой вниз
             Mock Initialize-NotifierNotch { }
-            Switch-NotifierNotchPosition
-            (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.position | Should Be 'right'
-            Switch-NotifierNotchPosition
+            $pos = @(Get-NotifierSelectOptions -Key 'notch.position')
+            ($pos | ForEach-Object { $_.Label }) -join ',' | Should Be 'Слева,По центру,Справа'
+            @($pos | Where-Object { $_.Current })[0].Value | Should Be 'center'
+            Set-NotifierSelectValue -Key 'notch.position' -Value 'left'
+            (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.position | Should Be 'left'
+            Set-NotifierSelectValue -Key 'notch.position' -Value 'top'   # чужое значение не записывается
             (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.position | Should Be 'left'
             Update-NotifierSettingsView
-            $ui.NotchPosition.Text | Should Be 'Слева'
-            Switch-NotifierNotchScreen
-            (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.screen | Should Not Be ''
+            $ui.NotchPosition.Text | Should Be "Слева  $([char]0x25BE)"
+            $screens = @(Get-NotifierSelectOptions -Key 'notch.screen')
+            $screens.Count | Should Be @([System.Windows.Forms.Screen]::AllScreens).Count
+            @($screens | Where-Object { $_.Current }).Count | Should Be 1
+            Set-NotifierSelectValue -Key 'notch.screen' -Value $screens[-1].Value
+            (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.screen | Should Be $screens[-1].Value
         }
         finally { $script:SessionsForm.Dispose(); $script:SessionsForm = $null }
     }
