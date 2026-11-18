@@ -6,6 +6,36 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [void](Import-NotifierUi)
 
 Describe 's_010_02 · подробности сеанса в хуке' {
+    It 'служебный Claude внутри другого сеанса (сводка через «claude -p»): не сеанс, ни разрешения, ни быстрого ответа' {
+        # Claude Code — claude.exe не из папки самого приложения Claude
+        Test-NotifierClaudeCodePath 'C:\Users\u\AppData\Local\Claude-Data\c\claude-code\2.1.326\d\claude.exe' | Should Be $true
+        Test-NotifierClaudeCodePath 'C:\Users\u\.local\bin\claude.exe' | Should Be $true
+        Test-NotifierClaudeCodePath 'C:\Program Files\WindowsApps\Claude_6.6395.0.0_x64__pzs8sxrjxfjjc\app\claude.exe' | Should Be $false
+        Test-NotifierClaudeCodePath 'C:\Users\u\AppData\Local\AnthropicClaude\app-1.0.0\claude.exe' | Should Be $false
+        Test-NotifierClaudeCodePath '' | Should Be $false
+        [ClaudeNotifier.Ui.ProcInfo]::IsClaudeCodePath('C:\x\claude-code\2\claude.exe') | Should Be $true
+        [ClaudeNotifier.Ui.ProcInfo]::IsClaudeCodePath('C:\Program Files\WindowsApps\Claude_6\app\claude.exe') | Should Be $false
+        # Обычный запуск этих тестов — не вложенный
+        Test-NotifierNestedClaude | Should Be $false
+        $root = Join-Path $TestDrive 'nested'
+        New-Item -ItemType Directory $root -Force | Out-Null
+        $json = '{"session_id":"helper","cwd":"C:\\dev\\x","last_assistant_message":"## Session Summary\nПродолжить?"}'
+        Mock Test-NotifierNestedClaude { $true }
+        Mock Send-NotifierEventToTray { 'sent' }
+        Invoke-NotifierHookBridge -Kind sessionstart -InputJson $json -DataRoot $root | Should Be 'nested'
+        Assert-MockCalled Send-NotifierEventToTray -Times 0 -Exactly -Scope It
+        Invoke-NotifierReplyHook -InputJson $json -DataRoot $root | Should Be $null
+        Invoke-NotifierPermissionHook -InputJson '{"session_id":"helper","tool_name":"Bash","tool_input":{"command":"ls"}}' -DataRoot $root | Should Be ''
+        @(Get-ChildItem (Join-Path $root 'requests') -ErrorAction SilentlyContinue).Count | Should Be 0   # ни ожиданий, ни запросов
+        # Хук от curl: трей отбрасывает вложенный вызов, обычный — принимает
+        $call = New-Object ClaudeNotifier.Ui.HookCall
+        $call.Kind = 'stop'; $call.Body = $json; $call.Nested = $true
+        ConvertFrom-NotifierHookCall -Call $call -DataRoot $root | Should Be $null
+        $call.Nested = $false
+        (ConvertFrom-NotifierHookCall -Call $call -DataRoot $root).session_id | Should Be 'helper'
+        Mock Test-NotifierNestedClaude { $false }   # в Pester 3 мок живёт до конца Describe — вернуть обычное поведение
+    }
+
     It 'Stop: статистика журнала добавляется к событию; prompt — только если включено showPrompt' {
         $root = Join-Path $TestDrive 'det'
         New-Item -ItemType Directory $root -Force | Out-Null

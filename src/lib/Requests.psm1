@@ -81,7 +81,12 @@ function New-NotifierPermissionRequest {
     Записывает запрос разрешения из входа хука PermissionRequest. Возвращает объект запроса (id, session_id, …).
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)]$HookInput, [Parameter(Mandatory = $true)][int]$WaitSeconds, [string]$DataRoot)
+    param(
+        [Parameter(Mandatory = $true)]$HookInput,
+        [Parameter(Mandatory = $true)][int]$WaitSeconds,
+        [string]$DataRoot,
+        [string]$Device = ''   # запрос с другого устройства (Mac): его хук спрашивает решение у ПК по сети
+    )
     $tool = [string](Get-Prop $HookInput 'tool_name')
     $toolInput = Get-Prop $HookInput 'tool_input'
     $suggestions = Get-Prop $HookInput 'permission_suggestions'
@@ -102,6 +107,7 @@ function New-NotifierPermissionRequest {
         detail      = $summary.detail
         options     = @($summary.options)
         canAlways   = $summary.canAlways
+        device      = $Device
     }
     Write-JsonAtomic (Join-Path (Get-RequestsDir $DataRoot) "perm-$($req.id).json") $req
     return $req
@@ -167,9 +173,16 @@ function Wait-NotifierDecision {
 function New-NotifierReplyWait {
     <# .SYNOPSIS Отмечает, что сеанс ждёт быстрого ответа (хук Stop с asyncRewake). #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$SessionId, [Parameter(Mandatory = $true)][int]$Minutes, [string]$DataRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$Minutes,
+        [string]$DataRoot,
+        [string]$Device = '',        # ожидание хука с другого устройства (Mac)
+        [int]$TtlSeconds = 0         # > 0 — срок в секундах (Mac продлевает его каждым опросом), вместо Minutes
+    )
     $now = [DateTime]::UtcNow
-    $wait = [pscustomobject][ordered]@{ type = 'reply'; session_id = $SessionId; pid = $PID; created = $now.ToString('o'); expires = $now.AddMinutes($Minutes).ToString('o') }
+    $exp = if ($TtlSeconds -gt 0) { $now.AddSeconds($TtlSeconds) } else { $now.AddMinutes($Minutes) }
+    $wait = [pscustomobject][ordered]@{ type = 'reply'; session_id = $SessionId; pid = $PID; created = $now.ToString('o'); expires = $exp.ToString('o'); device = $Device }
     Write-JsonAtomic (Join-Path (Get-RequestsDir $DataRoot) "reply-$(ConvertTo-SafeName $SessionId).json") $wait
     return $wait
 }
@@ -281,6 +294,76 @@ function Write-NotifierReply {
     return $true
 }
 
+# --- Запросы с другого устройства (Mac) ---
+# Хук на Mac создаёт запрос или ожидание через сервер ПК (pid в нём — трея, он жив) и опрашивает ПК.
+# Каждый опрос продлевает срок на TtlSeconds: перестал опрашивать (вы ответили прямо в Claude на Mac, сеть
+# пропала) — через TtlSeconds запрос истекает, трей его убирает и переводит сеанс в «Работает».
+
+function Set-RequestExpiry([string]$Path, $Object, [int]$Seconds) {
+    $Object.expires = [DateTime]::UtcNow.AddSeconds($Seconds).ToString('o')
+    Write-JsonAtomic $Path $Object
+}
+
+function Get-NotifierRemoteDecision {
+    <#
+    .SYNOPSIS
+    Опрос хука Mac: решение по его запросу. @{ Status = pending | decided | gone; Output = JSON для Claude Code }.
+    Только своё устройство (Device); pending — срок продлевается; decided — файлы запроса удаляются.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$RequestId, [Parameter(Mandatory = $true)][string]$Device, [string]$DataRoot, [int]$TtlSeconds = 20)
+    if ($RequestId -notmatch '^[0-9a-fA-F-]{36}$') { return @{ Status = 'gone'; Output = '' } }
+    $dir = Get-RequestsDir $DataRoot
+    $reqPath = Join-Path $dir "perm-$RequestId.json"
+    $decPath = Join-Path $dir "perm-$RequestId.decision.json"
+    $req = if (Test-Path -LiteralPath $reqPath) { Read-JsonFile $reqPath } else { $null }
+    if ($null -eq $req -or [string](Get-Prop $req 'device') -ne $Device) { return @{ Status = 'gone'; Output = '' } }
+    if (Test-Path -LiteralPath $decPath) {
+        $dec = Read-JsonFile $decPath
+        Remove-Item -LiteralPath $reqPath, $decPath -Force -ErrorAction SilentlyContinue
+        if ($null -eq $dec) { return @{ Status = 'gone'; Output = '' } }
+        return @{ Status = 'decided'; Output = (ConvertTo-NotifierDecisionOutput -Request $req -Decision $dec) }
+    }
+    Set-RequestExpiry $reqPath $req $TtlSeconds
+    return @{ Status = 'pending'; Output = '' }
+}
+
+function Remove-NotifierRequest {
+    <# .SYNOPSIS Хук Mac закончил ждать (решили в Claude, истёк срок): убрать его запрос. Только своё устройство. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$RequestId, [Parameter(Mandatory = $true)][string]$Device, [string]$DataRoot)
+    if ($RequestId -notmatch '^[0-9a-fA-F-]{36}$') { return $false }
+    $dir = Get-RequestsDir $DataRoot
+    $reqPath = Join-Path $dir "perm-$RequestId.json"
+    $req = if (Test-Path -LiteralPath $reqPath) { Read-JsonFile $reqPath } else { $null }
+    if ($null -eq $req -or [string](Get-Prop $req 'device') -ne $Device) { return $false }
+    Remove-Item -LiteralPath $reqPath, (Join-Path $dir "perm-$RequestId.decision.json") -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
+function Get-NotifierRemoteReply {
+    <#
+    .SYNOPSIS
+    Опрос хука Mac: быстрый ответ его сеансу. @{ Status = pending | replied | gone; Text }. Только своё устройство;
+    pending — срок ожидания продлевается; replied — ожидание и текст удаляются.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$SessionId, [Parameter(Mandatory = $true)][string]$Device, [string]$DataRoot, [int]$TtlSeconds = 30)
+    $dir = Get-RequestsDir $DataRoot
+    $name = ConvertTo-SafeName $SessionId
+    $waitPath = Join-Path $dir "reply-$name.json"
+    $textPath = Join-Path $dir "reply-$name.txt"
+    $wait = if (Test-Path -LiteralPath $waitPath) { Read-JsonFile $waitPath } else { $null }
+    if ($null -eq $wait -or [string](Get-Prop $wait 'device') -ne $Device) { return @{ Status = 'gone'; Text = '' } }
+    if (Test-Path -LiteralPath $textPath) {
+        $text = [IO.File]::ReadAllText($textPath, [Text.Encoding]::UTF8)
+        Remove-Item -LiteralPath $textPath, $waitPath -Force -ErrorAction SilentlyContinue
+        return @{ Status = 'replied'; Text = $text }
+    }
+    Set-RequestExpiry $waitPath $wait $TtlSeconds
+    return @{ Status = 'pending'; Text = '' }
+}
+
 function Remove-NotifierReplyWait {
     <# .SYNOPSIS Снимает ожидание быстрого ответа (вы написали прямо в Claude — ждущий хук завершится сам). #>
     [CmdletBinding()]
@@ -289,4 +372,4 @@ function Remove-NotifierReplyWait {
     Remove-Item -LiteralPath (Join-Path $dir "reply-$(ConvertTo-SafeName $SessionId).json") -Force -ErrorAction SilentlyContinue
 }
 
-Export-ModuleMember -Function Get-NotifierRequestSummary, New-NotifierPermissionRequest, ConvertTo-NotifierDecisionOutput, Wait-NotifierDecision, New-NotifierReplyWait, Wait-NotifierReply, Get-NotifierPendingRequests, Write-NotifierDecision, Write-NotifierReply, Remove-NotifierReplyWait
+Export-ModuleMember -Function Get-NotifierRequestSummary, New-NotifierPermissionRequest, ConvertTo-NotifierDecisionOutput, Wait-NotifierDecision, New-NotifierReplyWait, Wait-NotifierReply, Get-NotifierPendingRequests, Write-NotifierDecision, Write-NotifierReply, Remove-NotifierReplyWait, Get-NotifierRemoteDecision, Remove-NotifierRequest, Get-NotifierRemoteReply

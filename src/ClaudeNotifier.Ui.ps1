@@ -108,7 +108,8 @@ function ConvertTo-NotifierSessionCard {
     $card.Details = Format-NotifierSessionDetails -Session $Session -Now $Now -NoAgents
     if ([string]$Session.state -eq 'working') { $card.SubLines = [string[]]@(Format-NotifierAgentLines $Session 3) }   # агенты — подстроками
     $card.Chips = [string[]]@(Get-NotifierSessionChips $Session)
-    if ($deviceId -eq '') { Add-NotifierCardRequest -Card $card -Session $Session }   # ответы — для сеансов этого ПК
+    # Ответы — для сеансов этого ПК и Mac с новыми хуками (у старых установок Mac нет ни запросов, ни ожиданий).
+    Add-NotifierCardRequest -Card $card -Session $Session
     # Без запроса — кнопки изменённых файлов и папки проекта (видны, когда карточка раскрыта).
     if ($deviceId -eq '' -and $card.Actions.Length -eq 0) {
         $acts = @()

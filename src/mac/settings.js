@@ -4,13 +4,18 @@
 // Чужие хуки и настройки не трогаются; перед изменением рядом сохраняется settings.json.bak-<время>.
 
 var MARKER = '.claude-notifier/hook.sh';
+// [событие, matcher, режим hook.sh, параметры хука]. Без параметров — асинхронный (Claude не ждёт).
+// permreq — синхронный: Claude ждёт решения с ПК (у приложения Claude параллельно свой диалог, «кто первый»);
+// replywait — asyncRewake: после «Готово» ждёт быстрого ответа с ПК и будит Claude, если он пришёл.
 var SPECS = [
   ['Stop', null, 'stop'],
   ['Notification', 'permission_prompt|elicitation_dialog|agent_needs_input', 'notification'],
   ['StopFailure', null, 'stopfailure'],
   ['SessionStart', null, 'sessionstart'],
   ['UserPromptSubmit', null, 'prompt'],
-  ['SessionEnd', null, 'sessionend']
+  ['SessionEnd', null, 'sessionend'],
+  ['PermissionRequest', null, 'permreq', { timeout: 610 }],
+  ['Stop', null, 'replywait', { asyncRewake: true, timeout: 14700 }]
 ];
 
 function isOurs(hook) {
@@ -38,7 +43,10 @@ function mergeHooks(settings, mode, hookPath) {
     SPECS.forEach(function (spec) {
       var group = {};
       if (spec[1]) group.matcher = spec[1];
-      group.hooks = [{ type: 'command', command: quoted + ' ' + spec[2], async: true }];
+      var hook = { type: 'command', command: quoted + ' ' + spec[2] };
+      var opts = spec[3];
+      if (opts) Object.keys(opts).forEach(function (k) { hook[k] = opts[k]; }); else hook.async = true;
+      group.hooks = [hook];
       if (!Array.isArray(hooks[spec[0]])) hooks[spec[0]] = [];
       hooks[spec[0]].push(group);
     });

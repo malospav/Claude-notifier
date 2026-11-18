@@ -387,6 +387,110 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
     }
 }
 
+Describe 's_007_01 · ответы на Mac' {
+    It 'сервер: запрос разрешения с Mac → решение с телефона → хук получает JSON; чужой сеанс — нельзя; срок продлевается опросом' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'macreq')
+        $mac = (Add-NotifierDevice -Network $ctx.Network -Name 'MacBook').Device
+        $hookTok = Add-NotifierDeviceToken -Device $mac -Hook
+        $phoneTok = (Add-NotifierDevice -Network $ctx.Network -Name 'iPhone').Token
+        $mb = @{ authorization = "Bearer $hookTok" }
+        # hello с replies — у устройства есть ответы
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/hello' '{"name":"MacBook","replies":true}' $mb) -Ctx $ctx).Status | Should Be 200
+        $mac.replies | Should Be $true
+        $perm = '{"session_id":"m1","cwd":"/Users/a/dev/shop","tool_name":"Bash","tool_input":{"command":"npm test"}}'
+        # CLI без ожидания (cliWaitSeconds = 0) — запрос не создаётся, Claude спросит сам
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/mac/permreq' $perm $mb @{ entry = 'cli' }) -Ctx $ctx).Status | Should Be 204
+        $r = Invoke-NotifierHttpRequest -Request (New-Req POST '/api/mac/permreq' $perm $mb @{ entry = 'claude-desktop' }) -Ctx $ctx
+        $r.Status | Should Be 200
+        $j = $r.Body | ConvertFrom-Json
+        $j.wait | Should Be 600
+        $ctx.Events[-1].type | Should Be 'request'   # как от моста на ПК: статус «Нужно разрешение» и кнопки
+        $ctx.Events[-1].device | Should Be $mac.id
+        $ctx.Events[-1].request_id | Should Be $j.id
+        # Пока не решено — 204, срок продлевается
+        $reqFile = Join-Path $ctx.DataRoot "requests\perm-$($j.id).json"
+        $e0 = (Get-Content $reqFile -Raw | ConvertFrom-Json).expires
+        Start-Sleep -Milliseconds 30
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/mac/decision' '' $mb @{ id = $j.id }) -Ctx $ctx).Status | Should Be 204
+        ((Get-Content $reqFile -Raw | ConvertFrom-Json).expires -gt $e0) | Should Be $true
+        # Решение с телефона (cookie браузера) → хук Mac получает JSON для Claude Code
+        $ph = @{ cookie = "cn_token=$phoneTok" }
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/decision' (ConvertTo-Json @{ id = $j.id; behavior = 'allow' }) $ph) -Ctx $ctx).Status | Should Be 200
+        $d = Invoke-NotifierHttpRequest -Request (New-Req GET '/api/mac/decision' '' $mb @{ id = $j.id }) -Ctx $ctx
+        $d.Status | Should Be 200
+        ($d.Body | ConvertFrom-Json).hookSpecificOutput.decision.behavior | Should Be 'allow'
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/mac/decision' '' $mb @{ id = $j.id }) -Ctx $ctx).Status | Should Be 410
+        # Снять запрос (решили в Claude на Mac)
+        $j2 = (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/mac/permreq' $perm $mb @{ entry = 'claude-desktop' }) -Ctx $ctx).Body | ConvertFrom-Json
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/mac/done' '{}' $mb @{ id = $j2.id }) -Ctx $ctx).Status | Should Be 200
+        Test-Path (Join-Path $ctx.DataRoot "requests\perm-$($j2.id).json") | Should Be $false
+        # Чужой сеанс (этого ПК) — ни запроса, ни ожидания
+        Save-NotifierSessions -Sessions @([pscustomobject]@{ session_id = 'pc1'; device = ''; state = 'waiting'; project = 'p' }) -DataRoot $ctx.DataRoot
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/mac/permreq' '{"session_id":"pc1","tool_name":"Bash","tool_input":{}}' $mb @{ entry = 'claude-desktop' }) -Ctx $ctx).Status | Should Be 403
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/mac/replywait' '{"session_id":"pc1"}' $mb) -Ctx $ctx).Status | Should Be 403
+        # Быстрый ответ: ожидание → ответ с телефона → хук Mac получает текст
+        $w = Invoke-NotifierHttpRequest -Request (New-Req POST '/api/mac/replywait' '{"session_id":"m1"}' $mb) -Ctx $ctx
+        ($w.Body | ConvertFrom-Json).minutes | Should Be 60
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/mac/reply' '' $mb @{ session = 'm1' }) -Ctx $ctx).Status | Should Be 204
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/reply' '{"session":"m1","text":"Да, продолжай"}' $ph) -Ctx $ctx).Status | Should Be 200
+        $t = Invoke-NotifierHttpRequest -Request (New-Req GET '/api/mac/reply' '' $mb @{ session = 'm1' }) -Ctx $ctx
+        $t.Status | Should Be 200
+        $t.Body | Should Be 'Да, продолжай'
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/mac/reply' '' $mb @{ session = 'm1' }) -Ctx $ctx).Status | Should Be 410
+        # Служебное «Работает» после ответа не уводит сеанс Mac на этот ПК
+        $list = Update-NotifierSessionList -Sessions @([pscustomobject]@{ session_id = 'm1'; device = $mac.id; state = 'waiting'; project = 'shop' }) -Event ([pscustomobject]@{ type = 'working'; session_id = 'm1'; ts = '2026-11-18T10:00:00Z' })
+        @($list)[0].device | Should Be $mac.id
+    }
+
+    It 'hook.sh permreq и replywait (через sh): ждут ответа с ПК и отдают его Claude' -Skip:(-not $shPath) {
+        $ctx = New-Ctx (Join-Path $TestDrive 'macsh')
+        $mac = (Add-NotifierDevice -Network $ctx.Network -Name 'MacBook').Device
+        $hookTok = Add-NotifierDeviceToken -Device $mac -Hook
+        $port = (Get-FreePort)
+        $macHome = Join-Path $TestDrive 'machome3'
+        New-Item -ItemType Directory -Path (Join-Path $macHome '.claude-notifier') -Force | Out-Null
+        $utf8 = New-Object Text.UTF8Encoding $false
+        [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\env'), "CN_URL='http://localhost:$port'`nCN_URL2=''`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\auth'), "Authorization: Bearer $hookTok`n", $utf8)
+        $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $server = Start-NotifierHttpServer -Prefix "http://localhost:$port/" -Queue $q
+        $oldHome = $env:HOME; $oldEntry = $env:CLAUDE_CODE_ENTRYPOINT
+        $serve = { param($Until) $deadline = [DateTime]::UtcNow.AddSeconds(25); while (-not (& $Until) -and [DateTime]::UtcNow -lt $deadline) { $c = $null; if ($q.TryDequeue([ref]$c)) { Write-NotifierHttpResponse -Context $c -Response (Invoke-NotifierHttpRequest -Request (ConvertFrom-NotifierHttpContext -Context $c) -Ctx $ctx) }; Start-Sleep -Milliseconds 20 } }
+        $hook = (Join-Path $repoRoot 'src\mac\hook.sh')
+        try {
+            $env:HOME = $macHome; $env:CLAUDE_CODE_ENTRYPOINT = 'claude-desktop'
+            # Запрос разрешения: хук ждёт, решение «разрешить» с ПК → JSON на stdout, код 0
+            $in = Join-Path $TestDrive 'perm.json'; $out = Join-Path $TestDrive 'perm.out'
+            [IO.File]::WriteAllText($in, '{"session_id":"m2","cwd":"/Users/a/dev/shop","tool_name":"Bash","tool_input":{"command":"npm test"}}', $utf8)
+            $p = Start-Process -FilePath $shPath -ArgumentList @("`"$hook`"", 'permreq') -RedirectStandardInput $in -RedirectStandardOutput $out -NoNewWindow -PassThru
+            [void]$p.Handle
+            & $serve { @((Get-NotifierPendingRequests -DataRoot $ctx.DataRoot).Permissions).Count -gt 0 }
+            $req = @((Get-NotifierPendingRequests -DataRoot $ctx.DataRoot).Permissions)[0]
+            $req.device | Should Be $mac.id
+            [void](Write-NotifierDecision -RequestId $req.id -Behavior allow -DataRoot $ctx.DataRoot)
+            & $serve { $p.HasExited }
+            $p.WaitForExit(3000) | Out-Null
+            $p.ExitCode | Should Be 0
+            ((Get-Content $out -Raw) | ConvertFrom-Json).hookSpecificOutput.decision.behavior | Should Be 'allow'
+            # Быстрый ответ: хук ждёт, ответ с ПК → текст в stderr, код 2 (Claude получит сообщение)
+            $in2 = Join-Path $TestDrive 'stop.json'; $err2 = Join-Path $TestDrive 'stop.err'
+            [IO.File]::WriteAllText($in2, '{"session_id":"m2","cwd":"/Users/a/dev/shop"}', $utf8)
+            $p2 = Start-Process -FilePath $shPath -ArgumentList @("`"$hook`"", 'replywait') -RedirectStandardInput $in2 -RedirectStandardError $err2 -NoNewWindow -PassThru
+            [void]$p2.Handle
+            & $serve { (Get-NotifierPendingRequests -DataRoot $ctx.DataRoot).Replies.ContainsKey('m2') }
+            (Write-NotifierReply -SessionId 'm2' -Text 'Да, продолжай' -DataRoot $ctx.DataRoot) | Should Be $true
+            & $serve { $p2.HasExited }
+            $p2.WaitForExit(3000) | Out-Null
+            $p2.ExitCode | Should Be 2
+            [IO.File]::ReadAllText($err2, [Text.Encoding]::UTF8) | Should Match 'Да, продолжай'
+        }
+        finally {
+            $env:HOME = $oldHome; $env:CLAUDE_CODE_ENTRYPOINT = $oldEntry
+            [void](Stop-NotifierHttpServer -Server $server)
+        }
+    }
+}
+
 Describe 's_007_01 · settings.js (слияние хуков на Mac)' {
     It 'install добавляет 6 хуков, чужие сохраняет, повтор без дублей; uninstall убирает только свои' -Skip:(-not $node) {
         $js = (Join-Path $repoRoot 'src\mac\settings.js').Replace('\', '/')
@@ -398,16 +502,23 @@ s = mergeHooks(s, 'install', hook);
 s = mergeHooks(s, 'install', hook);
 const ours = Object.values(s.hooks).flat().flatMap(g => g.hooks).filter(h => h.command.includes('.claude-notifier/hook.sh'));
 const out = { events: Object.keys(s.hooks).sort(), ours: ours.length, stop: s.hooks.Stop.length,
-  cmd: s.hooks.UserPromptSubmit[0].hooks[0].command, async: ours.every(h => h.async === true),
+  cmd: s.hooks.UserPromptSubmit[0].hooks[0].command,
+  async: ours.filter(h => !/ (permreq|replywait)$/.test(h.command)).every(h => h.async === true),
+  perm: s.hooks.PermissionRequest[0].hooks[0], rewake: s.hooks.Stop.flatMap(g => g.hooks).find(h => / replywait$/.test(h.command)),
   matcher: s.hooks.Notification[0].matcher };
 const u = mergeHooks(s, 'uninstall', hook);
 out.after = JSON.stringify(u);
 console.log(JSON.stringify(out));
 "@
         $r = node -e $code | ConvertFrom-Json
-        ($r.events -join ',') | Should Be 'Notification,SessionEnd,SessionStart,Stop,StopFailure,UserPromptSubmit'
-        $r.ours | Should Be 6
-        $r.stop | Should Be 2
+        ($r.events -join ',') | Should Be 'Notification,PermissionRequest,SessionEnd,SessionStart,Stop,StopFailure,UserPromptSubmit'
+        $r.ours | Should Be 8
+        $r.stop | Should Be 3   # свой хук пользователя + событие + ожидание быстрого ответа
+        # Запрос разрешения — синхронный (Claude ждёт решения с ПК); быстрый ответ — asyncRewake
+        $r.perm.timeout | Should Be 610
+        $null -eq $r.perm.async | Should Be $true
+        $r.rewake.asyncRewake | Should Be $true
+        $r.rewake.timeout | Should Be 14700
         $r.cmd | Should Be "'/Users/a b/.claude-notifier/hook.sh' prompt"
         $r.async | Should Be $true
         $r.matcher | Should Be 'permission_prompt|elicitation_dialog|agent_needs_input'

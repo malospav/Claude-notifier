@@ -166,7 +166,13 @@ function Get-NotifierToastButtons {
     param([Parameter(Mandatory = $true)]$Event, [Parameter(Mandatory = $true)]$Config, [switch]$Request, [string]$DataRoot = $script:TrayDataRoot)
     $sid = ''
     if ($Event.PSObject.Properties['session_id']) { $sid = [string]$Event.session_id }
-    if ($sid -eq '' -or ($Event.PSObject.Properties['device'] -and [string]$Event.device -ne '')) { return @() }
+    if ($sid -eq '') { return @() }
+    # Сеанс другого устройства — кнопки, только если его хуки умеют ждать ответа от ПК (новая установка на Mac).
+    if ($Event.PSObject.Properties['device'] -and [string]$Event.device -ne '') {
+        $dev = $null
+        if ($script:Net -and $script:Net.Network) { $dev = Find-NotifierDevice -Network $script:Net.Network -Id ([string]$Event.device) }
+        if ($null -eq $dev -or -not ($dev.PSObject.Properties['replies'] -and [bool]$dev.replies)) { return @() }
+    }
     $mk = { param($content, $req, $act) @{ Content = $content; Arguments = "cn|$sid|$req|$act" } }
     if ($Request -and $Event.PSObject.Properties['request_id'] -and $Config.approvals.enabled) {
         $rid = [string]$Event.request_id

@@ -422,6 +422,18 @@ function ConvertFrom-NotifierHookCall {
     (неразобранный JSON или тип уведомлений выключен).
     #>
     param([Parameter(Mandatory = $true)]$Call, [string]$DataRoot = $script:TrayDataRoot)
+    # Служебный Claude, запущенный изнутри другого сеанса (хук плагина делает сводку через «claude -p» и т. п.), —
+    # не ваш сеанс: иначе в шторке дубль проекта, а его «вопрос» зажигает свечение.
+    if ($Call.PSObject.Properties['Nested'] -and $Call.Nested) {
+        if (-not $script:NestedLogged) { $script:NestedLogged = @{} }
+        $sid = ''
+        try { $sid = [string](ConvertFrom-Json -InputObject ([string]$Call.Body) -ErrorAction Stop).session_id } catch { }
+        if ($sid -and -not $script:NestedLogged.ContainsKey($sid)) {
+            $script:NestedLogged[$sid] = $true
+            Write-NotifierLog -Level INFO -Message "tray: служебный запуск Claude внутри другого сеанса ($sid) — не показывается" -DataRoot $DataRoot
+        }
+        return $null
+    }
     $config = Get-NotifierConfig -DataRoot $DataRoot
     $event = ConvertTo-NotifierEvent -HookKind ([string]$Call.Kind) -Json ([string]$Call.Body) -EntryPoint ([string]$Call.Entry) -HostSessionId ([string]$Call.HostSession) -Config $config -DataRoot $DataRoot
     if ($null -eq $event) { return $null }

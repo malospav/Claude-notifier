@@ -38,7 +38,8 @@ osascript -l JavaScript "$DIR/settings.js" install "$HOME/.claude/settings.json"
 
 NAME="$(scutil --get ComputerName 2>/dev/null || hostname)"
 SAFE="$(printf '%s' "$NAME" | tr -d '"\\')"
-printf '{"name":"%s"}' "$SAFE" | curl -fsS -m 5 -X POST \
+# replies — эти хуки умеют ждать решения и быстрого ответа с ПК: у сеансов Mac на ПК появятся кнопки ответа.
+printf '{"name":"%s","replies":true}' "$SAFE" | curl -fsS -m 5 -X POST \
   -H @"$DIR/auth" -H 'Content-Type: application/json; charset=utf-8' \
   --data-binary @- "$BASE/api/hello" >/dev/null || true
 

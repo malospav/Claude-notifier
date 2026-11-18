@@ -275,7 +275,8 @@ function Get-NotifierSessionsPayload {
             request     = $null
             can_reply   = $false
         }
-        if ($dev -eq '') {
+        # Кнопки ответа — у сеансов этого ПК и у Mac с новыми хуками (у остальных нет ни запросов, ни ожиданий).
+        if ($true) {
             $sid = [string]$s.session_id
             $req = @($pending.Permissions | Where-Object { [string]$_.session_id -eq $sid }) | Select-Object -First 1
             if ($req) {
@@ -385,7 +386,8 @@ function Invoke-NotifierHttpRequest {
     }
     $device = $auth.Device
     # Токен хуков Mac ходит по сети открытым текстом: ему — только отправка событий и знакомство.
-    if ($auth.Scope -eq 'hook' -and -not ($method -eq 'POST' -and ($path -eq '/api/event' -or $path -eq '/api/hello'))) {
+    # Токен хуков — события, знакомство и ответы своим сеансам (/api/mac/*: свои запросы и ожидания).
+    if ($auth.Scope -eq 'hook' -and -not (($method -eq 'POST' -and ($path -eq '/api/event' -or $path -eq '/api/hello')) -or $path -like '/api/mac/*')) {
         return (New-JsonResponse 403 @{ error = 'hook token' })
     }
     # POST от браузера — только JSON: такой запрос со сторонней страницы требует CORS-проверки и не пройдёт.
@@ -440,9 +442,75 @@ function Invoke-NotifierHttpRequest {
         if ($name -ne '') { $device.name = $name }
         $device.kind = 'mac'
         $device.hooks = $true
+        # Новые хуки Mac умеют ждать решения и быстрого ответа от ПК — тогда у его сеансов есть кнопки ответа.
+        $replies = $false
+        try { $replies = [bool](ConvertFrom-Json -InputObject $Request.Body -ErrorAction Stop).replies } catch { }
+        if ($null -eq $device.PSObject.Properties['replies']) { $device | Add-Member -NotePropertyName replies -NotePropertyValue $replies } else { $device.replies = $replies }
         $Ctx.Paired = $device
         Write-NotifierLog -Level INFO -Message "network: на устройстве $($device.id) установлены хуки" -DataRoot $Ctx.DataRoot
         return (New-JsonResponse 200 @{ ok = $true })
+    }
+    # --- Ответы на Mac: хук Mac создаёт запрос разрешения или ожидание быстрого ответа и опрашивает ПК ---
+    if ($path -like '/api/mac/*') {
+        $devId = [string]$device.id
+        $config = Get-NotifierConfig -DataRoot $Ctx.DataRoot
+        $hookJson = $null
+        if ($method -eq 'POST' -and $Request.Body) { try { $hookJson = ConvertFrom-Json -InputObject $Request.Body -ErrorAction Stop } catch { } }
+        # Чужой сеанс (этого ПК или другого устройства) — нельзя: ни запроса, ни ожидания от его имени.
+        $ownedBy = {
+            param([string]$Sid)
+            $o = @(Get-NotifierSessions -DataRoot $Ctx.DataRoot) | Where-Object { [string]$_.session_id -eq $Sid } | Select-Object -First 1
+            if ($null -eq $o) { return $true }
+            return ($o.PSObject.Properties['device'] -and [string]$o.device -eq $devId)
+        }
+        switch ("$method $path") {
+            'POST /api/mac/permreq' {
+                # Как на ПК: в приложении Claude ждём полный срок (у него свой диалог параллельно), в CLI — cliWaitSeconds.
+                if (-not $config.approvals.enabled -or $null -eq $hookJson) { return (New-HttpResponse 204 '') }
+                $wait = if ([string]$Request.Query['entry'] -eq 'claude-desktop') { [int]$config.approvals.waitSeconds } else { [int]$config.approvals.cliWaitSeconds }
+                if ($wait -le 0) { return (New-HttpResponse 204 '') }
+                if (-not (& $ownedBy ([string]$hookJson.session_id))) { return (New-JsonResponse 403 @{ error = 'foreign session' }) }
+                $req = New-NotifierPermissionRequest -HookInput $hookJson -WaitSeconds 20 -Device $devId -DataRoot $Ctx.DataRoot
+                # Событие «нужно разрешение» — как от моста на ПК: статус сеанса, уведомление с кнопками.
+                $event = ConvertTo-NotifierEvent -HookKind permreq -Json $Request.Body -EntryPoint ([string]$Request.Query['entry']) -HostSessionId '' -DataRoot $Ctx.DataRoot
+                if ($event) {
+                    $title = Get-NotifierEventTitle -Type permission
+                    if ($event.project) { $title = "$title $([char]0x00B7) $($event.project)" }
+                    $event.title = "$title $([char]0x00B7) $($device.name)"
+                    $event.preview = [string]$req.title
+                    $event | Add-Member -NotePropertyName request_id -NotePropertyValue $req.id -Force
+                    $event | Add-Member -NotePropertyName device -NotePropertyValue $devId -Force
+                    [void]$Ctx.Events.Add($event)
+                }
+                return (New-JsonResponse 200 @{ id = [string]$req.id; wait = $wait })
+            }
+            'GET /api/mac/decision' {
+                $r = Get-NotifierRemoteDecision -RequestId ([string]$Request.Query['id']) -Device $devId -DataRoot $Ctx.DataRoot
+                if ($r.Status -eq 'decided') { return (New-HttpResponse 200 $r.Output 'application/json; charset=utf-8') }
+                if ($r.Status -eq 'gone') { return (New-JsonResponse 410 @{ error = 'gone' }) }
+                return (New-HttpResponse 204 '')
+            }
+            'POST /api/mac/done' {
+                [void](Remove-NotifierRequest -RequestId ([string]$Request.Query['id']) -Device $devId -DataRoot $Ctx.DataRoot)
+                return (New-JsonResponse 200 @{ ok = $true })
+            }
+            'POST /api/mac/replywait' {
+                if (-not $config.quickReplies.enabled -or $null -eq $hookJson -or [string]$hookJson.session_id -eq '') { return (New-HttpResponse 204 '') }
+                if (-not (& $ownedBy ([string]$hookJson.session_id))) { return (New-JsonResponse 403 @{ error = 'foreign session' }) }
+                [void](New-NotifierReplyWait -SessionId ([string]$hookJson.session_id) -Minutes 0 -TtlSeconds 30 -Device $devId -DataRoot $Ctx.DataRoot)
+                return (New-JsonResponse 200 @{ minutes = [int]$config.quickReplies.minutes })
+            }
+            'GET /api/mac/reply' {
+                $r = Get-NotifierRemoteReply -SessionId ([string]$Request.Query['session']) -Device $devId -DataRoot $Ctx.DataRoot
+                if ($r.Status -eq 'replied') {
+                    Write-NotifierLog -Level INFO -Message "network: быстрый ответ передан на устройство $devId" -DataRoot $Ctx.DataRoot
+                    return (New-HttpResponse 200 $r.Text 'text/plain; charset=utf-8')
+                }
+                if ($r.Status -eq 'gone') { return (New-JsonResponse 410 @{ error = 'gone' }) }
+                return (New-HttpResponse 204 '')
+            }
+        }
+        return (New-JsonResponse 404 @{ error = 'not found' })
     }
     if ($method -eq 'POST' -and $path -eq '/api/event') {
         $kind = [string]$Request.Query['kind']

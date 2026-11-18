@@ -122,6 +122,9 @@ function Update-NotifierSessionList {
     $origin = [string](Get-Prop $Event 'origin')
     if ($origin -eq '' -and $old) { $origin = [string](Get-Prop $old 'origin') }
     $device = [string](Get-Prop $Event 'device')   # '' — этот ПК; иначе id устройства из network.json
+    # Служебные события без поля device («Работает» после ответа из шторки или с телефона) устройство сеанса
+    # не меняют: иначе сеанс Mac после ответа «переезжал» бы на этот ПК.
+    if ($null -eq $Event.PSObject.Properties['device'] -and $old) { $device = [string](Get-Prop $old 'device') }
 
     # Подробности: начало сеанса (первое событие или начало журнала), статистика журнала, последний запрос.
     $started = $ts

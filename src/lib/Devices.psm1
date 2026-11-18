@@ -36,7 +36,8 @@ function Get-NotifierNetwork {
     if ($p['devices']) {
         foreach ($d in @($p['devices'].Value)) {
             if ($d -isnot [System.Management.Automation.PSCustomObject] -or $null -eq $d.PSObject.Properties['id']) { continue }
-            foreach ($f in @(@('name', ''), @('kind', 'browser'), @('hooks', $false), @('notify', $false), @('created', ''), @('last_seen', ''))) {
+            # replies — хуки Mac умеют ждать решения и быстрого ответа от ПК (новая установка хуков)
+            foreach ($f in @(@('name', ''), @('kind', 'browser'), @('hooks', $false), @('notify', $false), @('replies', $false), @('created', ''), @('last_seen', ''))) {
                 if ($null -eq $d.PSObject.Properties[$f[0]]) { $d | Add-Member -NotePropertyName $f[0] -NotePropertyValue $f[1] }
             }
             foreach ($f in 'tokens', 'hook_tokens') {

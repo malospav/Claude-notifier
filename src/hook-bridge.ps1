@@ -73,6 +73,7 @@ function Invoke-NotifierPermissionHook {
     try {
         $config = Get-NotifierConfig -DataRoot $DataRoot
         if (-not $config.approvals.enabled) { return '' }
+        if (Test-NotifierNestedClaude) { return '' }   # служебный Claude внутри другого сеанса — решает он сам
         # Приложение Claude показывает свой диалог параллельно с хуком («кто решит первым»), поэтому там ждём
         # полный срок. В CLI хук может выполняться до диалога — там ждём только cliWaitSeconds (по умолчанию 0).
         $wait = $config.approvals.waitSeconds
@@ -112,6 +113,7 @@ function Invoke-NotifierReplyHook {
     try {
         $config = Get-NotifierConfig -DataRoot $DataRoot
         if (-not $config.quickReplies.enabled) { return $null }
+        if (Test-NotifierNestedClaude) { return $null }   # служебный Claude (сводка и т. п.) — быстрый ответ не ждём
         $hook = ConvertFrom-Json -InputObject $InputJson -ErrorAction Stop
         $sid = [string]$hook.session_id
         if ($sid -eq '') { return $null }
@@ -140,7 +142,7 @@ function Invoke-NotifierHookBridge {
     Логика bridge без побочных эффектов процесса (exit): удобно тестировать.
 
     .OUTPUTS
-    'sent' | 'sent-after-start' | 'disabled' | 'invalid' | 'undelivered' | 'failed'.
+    'sent' | 'sent-after-start' | 'disabled' | 'invalid' | 'nested' | 'undelivered' | 'failed'.
     #>
     param(
         [string]$Kind,
@@ -148,6 +150,8 @@ function Invoke-NotifierHookBridge {
         [string]$DataRoot = (Get-NotifierDataRoot)
     )
     try {
+        # Служебный Claude внутри другого сеанса (сводка через «claude -p» и т. п.) — не отдельный сеанс в шторке.
+        if (Test-NotifierNestedClaude) { return 'nested' }
         $config = Get-NotifierConfig -DataRoot $DataRoot
         $event = ConvertTo-NotifierEvent -HookKind $Kind -Json $InputJson -Config $config -DataRoot $DataRoot
         if ($null -eq $event) { return 'invalid' }

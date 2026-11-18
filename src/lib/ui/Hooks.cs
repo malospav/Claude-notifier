@@ -18,6 +18,8 @@ namespace ClaudeNotifier.Ui {
         public string HostSession = "";   // CLAUDE_CODE_HOST_SESSION_ID
         public int CallerPid;             // процесс curl
         public int ClaudePid;             // ближайший предок claude.exe
+        public bool Nested;               // над этим Claude Code есть ещё один: служебный запуск из хука или инструмента
+                                          // другого сеанса (например, сводка сеанса через «claude -p») — не отдельный сеанс
         public long ConsoleHwnd;          // окно консоли сеанса → корневой владелец (окно Windows Terminal)
         public long WalkHwnd;             // первый предок с главным окном
         public DateTime At = DateTime.UtcNow;
@@ -260,16 +262,40 @@ namespace ClaudeNotifier.Ui {
             return (root != IntPtr.Zero ? root : found).ToInt64();
         }
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder path, ref int size);
+
+        static string ProcPath(int pid) {
+            IntPtr h = OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, pid);
+            if (h == IntPtr.Zero) return null;
+            try {
+                StringBuilder sb = new StringBuilder(1024);
+                int size = sb.Capacity;
+                return QueryFullProcessImageName(h, 0, sb, ref size) ? sb.ToString(0, size) : null;
+            } finally { CloseHandle(h); }
+        }
+
+        // claude.exe — это Claude Code (CLI), а не само приложение Claude (тоже claude.exe: …\WindowsApps\Claude_…\app\
+        // или …\AnthropicClaude\app-…). Путь не прочитать — не считаем Claude Code, чтобы не спрятать настоящий сеанс.
+        public static bool IsClaudeCodePath(string path) {
+            if (string.IsNullOrEmpty(path) || !path.EndsWith("\\claude.exe", StringComparison.OrdinalIgnoreCase)) return false;
+            return path.IndexOf("\\WindowsApps\\Claude", StringComparison.OrdinalIgnoreCase) < 0 && path.IndexOf("\\AnthropicClaude\\", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
         // Как Find-AncestorWindow в хуке: предки curl до первого с главным окном; по пути — claude.exe.
+        // Встретился второй Claude Code выше первого — запуск вложенный (Nested).
         public static void Resolve(HookCall call) {
             int cur = call.CallerPid;
             HashSet<int> seen = new HashSet<int>();
+            int codes = 0;
             for (int i = 0; i < 15; i++) {
                 int parent = ParentPid(cur);
                 if (parent <= 0 || seen.Contains(parent)) break;
                 seen.Add(cur);
                 cur = parent;
-                if (call.ClaudePid == 0 && string.Equals(ProcName(cur), "claude.exe", StringComparison.OrdinalIgnoreCase)) call.ClaudePid = cur;
+                if (string.Equals(ProcName(cur), "claude.exe", StringComparison.OrdinalIgnoreCase)) {
+                    if (call.ClaudePid == 0) call.ClaudePid = cur;
+                    if (IsClaudeCodePath(ProcPath(cur)) && ++codes >= 2) call.Nested = true;
+                }
                 long hw = MainWindow(cur);
                 if (hw != 0) { call.WalkHwnd = hw; break; }
             }

@@ -141,6 +141,38 @@ function Find-AncestorWindow([int]$StartPid) {
     return @{ hwnd = [int64]0; claudePid = $claudePid }
 }
 
+function Test-NotifierClaudeCodePath([AllowEmptyString()][string]$Path) {
+    # claude.exe — Claude Code (CLI), а не само приложение Claude (…\WindowsApps\Claude_…\app\ или …\AnthropicClaude\app-…).
+    if ([string]::IsNullOrEmpty($Path) -or $Path -notmatch '\\claude\.exe$') { return $false }
+    return ($Path -notmatch '\\WindowsApps\\Claude' -and $Path -notmatch '\\AnthropicClaude\\')
+}
+
+function Test-NotifierNestedClaude {
+    <#
+    .SYNOPSIS
+    Хук вызван из служебного Claude, запущенного внутри другого сеанса (например, хук плагина делает сводку через
+    «claude -p»): среди предков два Claude Code. Такой запуск — не отдельный сеанс: мост его не показывает
+    и ни ответа, ни решения не ждёт. Путь процесса не прочитать — не считаем Claude Code (не прячем настоящий сеанс).
+    #>
+    param([int]$ProcessId = $PID)
+    try {
+        $codes = 0
+        $current = $ProcessId
+        $seen = @{}
+        for ($i = 0; $i -lt $script:MaxParentHops; $i++) {
+            $info = Get-ParentProcessInfo $current
+            if ($null -eq $info -or $info.ParentId -le 0 -or $seen.ContainsKey($info.ParentId)) { break }
+            $seen[$current] = $true
+            $current = $info.ParentId
+            $path = ''
+            try { $path = [string]([System.Diagnostics.Process]::GetProcessById($current).Path) } catch { }
+            if (Test-NotifierClaudeCodePath $path) { $codes++; if ($codes -ge 2) { return $true } }
+        }
+    }
+    catch { }
+    return $false
+}
+
 function Get-SessionWindow {
     <#
     .SYNOPSIS
@@ -196,4 +228,4 @@ function Test-SessionWindow {
     try { return [bool](Test-Win32Window $Hwnd) } catch { return $false }
 }
 
-Export-ModuleMember -Function Get-SessionWindow, Set-SessionWindowFocus, Test-SessionWindow
+Export-ModuleMember -Function Get-SessionWindow, Set-SessionWindowFocus, Test-SessionWindow, Test-NotifierNestedClaude, Test-NotifierClaudeCodePath
