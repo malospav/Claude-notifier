@@ -63,7 +63,7 @@ function Format-NotifierMascot([string]$Mascot) {
         'onigiri' { return 'Онигири' }
         'cupcat' { return 'Котик в чашке' }
         'fox' { return 'Лисёнок' }
-        'leaf' { return 'Листик' }
+        'leaf' { return 'Шмалючька' }
         'bee' { return 'Пчёлка' }
         default { return 'Сфинкс' }
     }

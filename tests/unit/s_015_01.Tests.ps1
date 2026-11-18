@@ -347,7 +347,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         Assert-MockCalled Show-NotifierSelect -Times 1 -Exactly -ParameterFilter { $Key -eq 'mascot:' -and $Width -eq 160 -and $Location.Y -eq 20 }
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'sphynx'   # щелчок сам ничего не меняет
         $opts = @(Get-NotifierSelectOptions -Key 'mascot:')
-        ($opts | ForEach-Object { $_.Label }) -join ',' | Should -Be 'Сфинкс,Плоский сфинкс,Огонёк,Котик в коробке,Пингвин,Белый котик,Привидение,Моти,Динозаврик,Лягушка с чашкой,Жнец,Онигири,Котик в чашке,Лисёнок,Листик,Пчёлка'
+        ($opts | ForEach-Object { $_.Label }) -join ',' | Should -Be 'Сфинкс,Плоский сфинкс,Огонёк,Котик в коробке,Пингвин,Белый котик,Привидение,Моти,Динозаврик,Лягушка с чашкой,Жнец,Онигири,Котик в чашке,Лисёнок,Шмалючька,Пчёлка'
         @($opts | Where-Object { $_.Current })[0].Value | Should -Be 'sphynx'
         Set-NotifierSelectValue -Key 'mascot:' -Value 'flame'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'flame'
