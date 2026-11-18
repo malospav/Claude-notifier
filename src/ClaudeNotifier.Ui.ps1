@@ -103,7 +103,14 @@ function ConvertTo-NotifierSessionCard {
         $card.StateText = 'Похоже, остановился'
         $card.Right = Format-NotifierElapsed -Ts ([string]$Session.stalledSince) -Now $Now
     }
-    $card.Preview = ConvertTo-NotifierPlainText ([string]$Session.preview)   # без **, `, # и ссылок
+    # Сеанс Mac «работает», но Mac давно молчит (уснул, выключен, без сети) — честно: нет связи.
+    $silent = Get-NotifierDeviceSilentSince -Session $Session -Now $Now
+    if ($null -ne $silent) {
+        $card.State = 'error'
+        $card.StateText = 'Нет связи с устройством'
+        $card.Right = Format-NotifierElapsed -Ts ($silent.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)) -Now $Now
+    }
+    $card.Preview =ConvertTo-NotifierPlainText ([string]$Session.preview)   # без **, `, # и ссылок
     $card.Tag = $Session
     $card.Details = Format-NotifierSessionDetails -Session $Session -Now $Now -NoAgents
     if ([string]$Session.state -eq 'working') { $card.SubLines = [string[]]@(Format-NotifierAgentLines $Session 3) }   # агенты — подстроками

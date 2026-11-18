@@ -143,3 +143,27 @@ function Get-NotifierDeviceName {
     return 'Отключено'
 }
 
+$script:DeviceSilentMinutes = 60
+
+function Get-NotifierDeviceSilentSince {
+    <#
+    .SYNOPSIS
+    Сеанс другого устройства «работает», а от устройства давно ни одного запроса (ни событий, ни опроса ответов):
+    Mac выключен, уснул или потерял сеть — статус «работает» больше не правда. Возвращает время последней связи
+    (UTC) или $null, если всё в порядке. Порог — час: долгая задача Claude тоже может молчать минут двадцать.
+    #>
+    param([Parameter(Mandatory = $true)]$Session, [datetime]$Now = [DateTime]::UtcNow, [int]$Minutes = $script:DeviceSilentMinutes)
+    if (-not ($Session.PSObject.Properties['device'] -and [string]$Session.device -ne '')) { return $null }
+    if ([string]$Session.state -ne 'working') { return $null }
+    if (-not $script:Net) { return $null }
+    $d = Find-NotifierDevice -Network $script:Net.Network -Id ([string]$Session.device)
+    if ($null -eq $d) { return $null }
+    $seen = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse([string]$d.last_seen, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$seen)) { return $null }
+    $at = $seen.UtcDateTime
+    $upd = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse([string]$Session.updated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$upd) -and $upd.UtcDateTime -gt $at) { $at = $upd.UtcDateTime }
+    if (($Now - $at).TotalMinutes -lt $Minutes) { return $null }
+    return $at
+}
+

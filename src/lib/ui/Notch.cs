@@ -24,6 +24,7 @@ namespace ClaudeNotifier.Ui {
         public int Tools;                // действий Claude в сеансе: прибавилось — у сфинкса «Ага!»
         public int Agents;               // работающих агентов — огоньки вокруг головы
         public string Device = "";       // id устройства ('' — этот ПК): свой маскот
+        public string Group = "";        // подпись группы в списке «Другие» («Этот ПК», «MacBook Air»)
         public long WaitSince;           // ждёт вас (запрос, ошибка, вопрос в ответе) с этого момента, UTC ticks; 0 — не ждёт
         public string Ask = "";          // что спрашивают — для бегущей строки («Закоммитить и отправить?»)
         public object Tag;
@@ -1054,9 +1055,24 @@ namespace ClaudeNotifier.Ui {
             int pad = theme.S(12), chH = theme.S(40), gap = theme.S(8);
             int x = r.X + pad, y = r.Y + pad, colW = Math.Max(theme.S(120), (r.Width - pad * 2 - gap) / 2);
             int shown = 0, total = 0;
+            // Сеансы нескольких устройств — группами с подписью («Этот ПК», «MacBook Air»): одинаковые проекты не путаются.
+            bool grouped = false;
+            foreach (NotchItem it in items) if (it.Device != items[0].Device) { grouped = true; break; }
+            string group = null;
+            int labelH = theme.S(20);
             foreach (NotchItem it in items) {
                 if (sel != null && it.Id == sel.Id) continue;
                 total++;
+                if (grouped && it.Device != group) {
+                    group = it.Device;
+                    if (x != r.X + pad) { x = r.X + pad; y += chH + gap; }   // группа — с новой строки
+                    if (y + labelH + chH <= r.Bottom - pad + 1) {
+                        TextRenderer.DrawText(g, string.IsNullOrEmpty(it.Group) ? "Этот ПК" : it.Group, fSmall,
+                            new Rectangle(x + theme.S(6), y, r.Width - pad * 2, labelH), theme.Muted,
+                            TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                    }
+                    y += labelH;
+                }
                 if (y + chH > r.Bottom - pad + 1) continue;
                 Rectangle chip = new Rectangle(x, y, colW, chH);
                 bool hot = hover == "item:" + it.Id || hover == "remove:" + it.Id;

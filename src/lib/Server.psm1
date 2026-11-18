@@ -226,6 +226,26 @@ function Get-StaticSha256([string]$Path) {
     return -join ($bytes | ForEach-Object { $_.ToString('x2') })
 }
 
+function Get-NotifierMacHooksVersion {
+    <# .SYNOPSIS Версия хуков Mac — первые 12 знаков SHA-256 hook.sh и settings.js, которые сейчас раздаёт этот ПК. #>
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $text = (Get-StaticText '/mac/hook.sh') + "`n--`n" + (Get-StaticText '/mac/settings.js')
+        $bytes = $sha.ComputeHash((New-Object System.Text.UTF8Encoding $false).GetBytes($text))
+    }
+    finally { $sha.Dispose() }
+    return (-join ($bytes | ForEach-Object { $_.ToString('x2') })).Substring(0, 12)
+}
+
+function Test-NotifierMacHooksOutdated {
+    <# .SYNOPSIS На Mac стоят хуки старее, чем раздаёт ПК (или установка ещё без версии) — их стоит переустановить. #>
+    param([Parameter(Mandatory = $true)]$Device)
+    if ([string]$Device.kind -ne 'mac' -or -not $Device.hooks) { return $false }
+    $ver = ''
+    if ($Device.PSObject.Properties['hooks_ver']) { $ver = [string]$Device.hooks_ver }
+    try { return ($ver -ne (Get-NotifierMacHooksVersion)) } catch { return $false }
+}
+
 function Get-NotifierServerBaseUrl([hashtable]$Ctx) {
     $address = $Ctx.Address
     if ([string]::IsNullOrEmpty($address)) { $address = '127.0.0.1' }
@@ -354,7 +374,7 @@ function Invoke-NotifierHttpRequest {
         # SHA-256 файлов: install.sh сверяет скачанное и не ставит подменённые по дороге скрипты.
         $script = Get-WebTemplate 'install.sh' @{
             URL = $base; URL2 = $alt; TOKEN = $token; PCNAME = $Ctx.PcName
-            SHA_HOOK = (Get-StaticSha256 '/mac/hook.sh'); SHA_SETTINGS = (Get-StaticSha256 '/mac/settings.js'); SHA_UNINSTALL = (Get-StaticSha256 '/mac/uninstall.sh')
+            HOOKS_VER = (Get-NotifierMacHooksVersion); SHA_HOOK = (Get-StaticSha256 '/mac/hook.sh'); SHA_SETTINGS = (Get-StaticSha256 '/mac/settings.js'); SHA_UNINSTALL = (Get-StaticSha256 '/mac/uninstall.sh')
         }
         Write-NotifierLog -Level INFO -Message "network: скрипт установки выдан устройству $($device.id)" -DataRoot $Ctx.DataRoot
         return (New-HttpResponse 200 $script)
@@ -457,6 +477,24 @@ function Invoke-NotifierHttpRequest {
         $replies = $false
         try { $replies = [bool](ConvertFrom-Json -InputObject $Request.Body -ErrorAction Stop).replies } catch { }
         if ($null -eq $device.PSObject.Properties['replies']) { $device | Add-Member -NotePropertyName replies -NotePropertyValue $replies } else { $device.replies = $replies }
+        # Версия установленных хуков: ПК обновился — у устройства появится «Обновите хуки».
+        $ver = ''
+        try { $ver = [string](ConvertFrom-Json -InputObject $Request.Body -ErrorAction Stop).version } catch { }
+        $ver = $ver -replace '[^0-9a-f]', ''
+        if ($ver.Length -gt 64) { $ver = $ver.Substring(0, 64) }
+        $device | Add-Member -NotePropertyName hooks_ver -NotePropertyValue $ver -Force
+        # Тот же Mac подключён заново. Прежнее подключение с этим именем ещё в списке — его сеансы переходят
+        # к новому, а оно удаляется (иначе два «MacBook» и сеансы на мёртвом). Уже отключённое — сеансы возвращаются.
+        if ([string]$device.name -ne '') {
+            $prev = @($Ctx.Network.devices | Where-Object { [string]$_.id -ne [string]$device.id -and [string]$_.kind -eq 'mac' -and [string]$_.name -eq [string]$device.name })
+            foreach ($p in $prev) {
+                $moved = Move-NotifierDeviceSessions -From ([string]$p.id) -To ([string]$device.id) -DataRoot $Ctx.DataRoot
+                [void](Remove-NotifierDevice -Network $Ctx.Network -Id ([string]$p.id))
+                Write-NotifierLog -Level INFO -Message "network: $($device.id) заменяет прежнее подключение $($p.id) того же Mac (сеансов: $moved)" -DataRoot $Ctx.DataRoot
+            }
+            $back = Restore-NotifierRemovedSessions -Name ([string]$device.name) -DeviceId ([string]$device.id) -DataRoot $Ctx.DataRoot
+            if ($back -gt 0) { Write-NotifierLog -Level INFO -Message "network: $($device.id): возвращено сеансов отключённого «$($device.name)»: $back" -DataRoot $Ctx.DataRoot }
+        }
         $Ctx.Paired = $device
         Write-NotifierLog -Level INFO -Message "network: на устройстве $($device.id) установлены хуки" -DataRoot $Ctx.DataRoot
         return (New-JsonResponse 200 @{ ok = $true })
@@ -531,6 +569,16 @@ function Invoke-NotifierHttpRequest {
         # Начало запроса (если включено «Показывать запрос») — как у сеансов ПК: иначе два сеанса Mac
         # в одном проекте не отличить. Журнал Mac на ПК не читается (путь не локальный).
         if ($kind -eq 'prompt') { Add-NotifierEventDetails -Event $event -Kind $kind -InputJson $Request.Body -DataRoot $Ctx.DataRoot -Config (Get-NotifierConfig -DataRoot $Ctx.DataRoot) }
+        # Событие из очереди Mac (ПК был недоступен): время — настоящее; старше 2 минут — только статус,
+        # без уведомления и звука задним числом.
+        $queued = [int64]0
+        if ([int64]::TryParse([string]$Request.Query['queued'], [ref]$queued) -and $queued -gt 0) {
+            $at = [DateTimeOffset]::FromUnixTimeSeconds($queued).UtcDateTime
+            if ($at -le $Now -and ($Now - $at).TotalHours -lt 6) {
+                $event.ts = $at.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+                if (($Now - $at).TotalMinutes -ge 2) { $event | Add-Member -NotePropertyName late -NotePropertyValue $true -Force }
+            }
+        }
         # Устройство меняет только свои сеансы: id сеансов ПК виден в /api/sessions, и без проверки
         # токен Mac мог бы перезаписать или «завершить» чужой сеанс.
         $owner = @(Get-NotifierSessions -DataRoot $Ctx.DataRoot) | Where-Object { [string]$_.session_id -eq [string]$event.session_id } | Select-Object -First 1
@@ -587,4 +635,4 @@ function Invoke-NotifierNetworkSetup {
     return 'failed'
 }
 
-Export-ModuleMember -Function Test-NotifierNetworkSetup, Invoke-NotifierNetworkSetup, Get-NotifierHttpPrefix, Start-NotifierHttpServer, Stop-NotifierHttpServer, ConvertFrom-NotifierHttpContext, Write-NotifierHttpResponse, Get-NotifierSessionsPayload, Invoke-NotifierHttpRequest, Get-NotifierServerBaseUrl
+Export-ModuleMember -Function Get-NotifierMacHooksVersion, Test-NotifierMacHooksOutdated, Test-NotifierNetworkSetup, Invoke-NotifierNetworkSetup, Get-NotifierHttpPrefix, Start-NotifierHttpServer, Stop-NotifierHttpServer, ConvertFrom-NotifierHttpContext, Write-NotifierHttpResponse, Get-NotifierSessionsPayload, Invoke-NotifierHttpRequest, Get-NotifierServerBaseUrl

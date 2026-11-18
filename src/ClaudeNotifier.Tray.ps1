@@ -248,7 +248,8 @@ function Invoke-NotifierEventBatch {
             $wasRequest = $event.type -eq 'request'
             if ($wasRequest) { $event.type = 'permission' }   # уведомление, звук и история — как «Нужно разрешение»
             elseif ($duplicate -and -not ($event.PSObject.Properties['reminder'] -and $event.reminder)) { $shown++; continue }   # дубль уведомления Claude о том же запросе
-            if ($script:SilentTypes -contains $event.type -or $remote -eq 'quiet') { $shown++; continue }
+            $late = $event.PSObject.Properties['late'] -and $event.late   # отложенное событие с Mac: только статус
+            if ($script:SilentTypes -contains $event.type -or $remote -eq 'quiet' -or $late) { $shown++; continue }
             # Сеанс «без уведомлений»: статус обновлён, но ни уведомления, ни звука.
             if ($event.PSObject.Properties['session_id'] -and $event.session_id) {
                 if ($null -eq $prefs) { $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot }

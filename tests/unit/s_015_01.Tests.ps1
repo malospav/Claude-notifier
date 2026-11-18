@@ -89,6 +89,12 @@ Describe 's_015_01 · шторка вверху экрана' {
         $items[0].Actions -join ';' | Should Be 'allow|Разрешить|primary;always|Всегда|secondary;deny|Запретить|destructive'
         $items[0].RequestTitle | Should Be 'Bash: npm i'
         $items[1].Actions.Length | Should Be 0   # «Изменённые файлы» и «Папка проекта» — не в шторке
+        # Сеансы других устройств — группой после сеансов этого ПК (у группы — имя устройства)
+        $m = New-S 'm' 'permission'; $m | Add-Member -NotePropertyName device -NotePropertyValue 'dmac' -Force
+        $g = Get-NotifierNotchItems -Sessions @((New-S 'w' 'working' 'api'), $m, (New-S 'p' 'permission'))   # без @(): иначе массив в массиве
+        ($g | ForEach-Object { $_.Id }) -join ',' | Should Be 'p,w,m'
+        $g[0].Group | Should Be 'Этот ПК'
+        $g[2].Group | Should Not Be 'Этот ПК'
         # Полоски лимитов: осталось 100 − 91 = 9 % от пятичасового; недельного в данных нет.
         $lim = Get-NotifierNotchLimits
         $lim.Left5 | Should Be 9
@@ -392,6 +398,21 @@ Describe 's_015_01 · шторка вверху экрана' {
         $rows = @(Get-NotifierNotchStatsRows)
         ($rows | Where-Object { $_.Kind -eq 'chart' }).Values.Length | Should Be 7
         ($rows | Where-Object { $_.Title -eq 'shop' }).Count | Should Be 2   # сегодня и за неделю
+        ($rows | Where-Object { $_.Title -eq 'Расход за сегодня' }).Value | Should Match '^≈ \$'
+        # Порог расходов: выключен — молчит; дошли до суммы — одно уведомление в день
+        $cost = Get-NotifierTodayCost
+        ($cost -gt 0) | Should Be $true
+        $script:TrayQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $script:BudgetNotifiedDay = ''
+        Test-NotifierBudget | Should Be $false
+        Set-NotifierConfigValue -Name budget -Value ([pscustomobject]@{ enabled = $true; daily = 1 }) -DataRoot $script:TrayDataRoot
+        $script:ActivitySummary.Today[0].cost = 1.5
+        Test-NotifierBudget | Should Be $true
+        Test-NotifierBudget | Should Be $false   # второй раз за день — нет
+        $ev = $null; [void]$script:TrayQueue.TryDequeue([ref]$ev)
+        $ev.type | Should Be 'limit'
+        $ev.option | Should Be 'budget'
+        (Get-NotifierSelectLabel 'budget') | Should Be '$1'
         $script:ActivitySummary = $null
     }
 

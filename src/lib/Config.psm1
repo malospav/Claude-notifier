@@ -43,13 +43,14 @@ function Get-NotifierDefaultConfig {
         # cliWaitSeconds: в CLI хук может выполняться до показа диалога — по умолчанию не ждём, чтобы не задерживать его.
         # remindMinutes: запрос висит без ответа — повторить уведомление через столько минут (до 3 раз; 0 — не напоминать).
         approvals       = @{ enabled = $true; waitSeconds = 600; cliWaitSeconds = 0; remindMinutes = 3 }
-        quickReplies    = @{ enabled = $true; minutes = 60 }
+        quickReplies    = @{ enabled = $true; minutes = 60; texts = @('Продолжай', 'Да', 'Нет') }   # texts — свои кнопки, 1–5 шт. до 40 знаков (в уведомлении Windows не больше 5)
         showPrompt      = $false  # хранить начало запроса пользователя для подробностей сеанса (по умолчанию нет — приватность)
         context         = @{ enabled = $true; warnPercent = 85 }   # уведомление «контекст почти заполнен» (скоро автосжатие)
         hotkey          = @{ enabled = $true; keys = 'auto' }      # keys — сочетание (Get-NotifierHotKeyChoices); auto — Win+Shift+C, а если занято — Ctrl+Alt+C
         stalled         = @{ enabled = $true; minutes = 10 }       # «Работает», но журнал молчит столько минут — «сеанс, похоже, остановился»
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
+        budget          = @{ enabled = $false; daily = 20 }        # расход за сегодня (примерно, по ценам API) дошёл до суммы, $ — одно уведомление в день
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
         notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{}; stats = $true; attention = $true }   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — sphynx | flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
@@ -247,6 +248,7 @@ function Get-NotifierConfig {
     Merge-OptionSection $config $user 'longTasks' @{ minutes = @(1, 60) } $DataRoot
     Merge-OptionSection $config $user 'groups' @{ minSessions = @(2, 20) } $DataRoot
     Merge-OptionSection $config $user 'inactive' @{ hours = @(1, 72) } $DataRoot
+    Merge-OptionSection $config $user 'budget' @{ daily = @(1, 10000) } $DataRoot
     Merge-OptionSection $config $user 'notch' @{} $DataRoot
     Merge-OptionSection $config $user 'quiet' @{} $DataRoot
     $hk = Get-JsonProperty $user 'hotkey'
@@ -297,6 +299,16 @@ function Get-NotifierConfig {
         }
     }
     Merge-OptionSection $config $user 'quickReplies' @{ minutes = @(1, 240) } $DataRoot
+    # Свои тексты быстрых ответов: непустые строки до 40 знаков, не больше 5; иначе — по умолчанию.
+    $qr = Get-JsonProperty $user 'quickReplies'
+    if ($qr.found -and $qr.value -is [System.Management.Automation.PSCustomObject]) {
+        $tx = Get-JsonProperty $qr.value 'texts'
+        if ($tx.found) {
+            $list = @(@($tx.value) | Where-Object { $_ -is [string] } | ForEach-Object { ($_ -replace '[\x00-\x1f|]', ' ').Trim() } | Where-Object { $_ -ne '' -and $_.Length -le 40 } | Select-Object -First 5)
+            if ($list.Count -gt 0) { $config.quickReplies.texts = $list }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'quickReplies.texts' — список строк до 40 знаков; используются ответы по умолчанию" -DataRoot $DataRoot }
+        }
+    }
     $showPrompt = Get-JsonProperty $user 'showPrompt'
     if ($showPrompt.found) {
         if ($showPrompt.value -is [bool]) { $config.showPrompt = $showPrompt.value }

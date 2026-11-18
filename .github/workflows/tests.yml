@@ -1,0 +1,72 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Pester (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pester 4 (понимает синтаксис тестов Pester 3 — «Should Be»)
+        shell: powershell
+        run: |
+          Install-Module Pester -RequiredVersion 4.10.1 -Force -SkipPublisherCheck -Scope CurrentUser
+      - name: Тесты
+        shell: powershell
+        run: |
+          Import-Module Pester -RequiredVersion 4.10.1
+          $r = Invoke-Pester -Script tests\unit -PassThru -OutputFile pester.xml -OutputFormat NUnitXml
+          "Прошло: $($r.PassedCount), упало: $($r.FailedCount), пропущено: $($r.SkippedCount)"
+          if ($r.FailedCount -gt 0) { exit 1 }
+      - name: Отчёт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-windows
+          path: pester.xml
+          if-no-files-found: ignore
+
+  macos:
+    name: Скрипты Mac (sh, BSD-утилиты, osascript)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Синтаксис sh -n
+        run: |
+          for f in src/mac/hook.sh src/mac/uninstall.sh src/web/install.sh; do sh -n "$f"; echo "ok $f"; done
+      - name: hook.sh — ПК недоступен — код 0 и событие в очереди
+        run: |
+          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME/.claude-notifier"
+          printf "CN_URL='http://127.0.0.1:9'\nCN_URL2=''\n" > "$HOME/.claude-notifier/env"
+          printf 'Authorization: Bearer x\n' > "$HOME/.claude-notifier/auth"
+          for i in 1 2 3; do echo '{"session_id":"s1"}' | sh src/mac/hook.sh stop; done
+          n=$(ls "$HOME/.claude-notifier/queue" | wc -l | tr -d ' ')
+          echo "в очереди: $n"; test "$n" = 3
+          # Не больше 50 событий: старые выбрасываются (head без отрицательных чисел — BSD)
+          for i in $(seq 1 55); do echo '{"session_id":"s1"}' | sh src/mac/hook.sh prompt; done
+          n=$(ls "$HOME/.claude-notifier/queue" | wc -l | tr -d ' ')
+          echo "в очереди: $n"; test "$n" = 50
+          # Сводка ECC не отправляется и не копится
+          rm -rf "$HOME/.claude-notifier/queue"
+          echo '{"session_id":"s2"}' | ECC_LLM_SUMMARY_SUBPROCESS=1 sh src/mac/hook.sh stop
+          test ! -d "$HOME/.claude-notifier/queue"
+      - name: settings.js (osascript) — ставит и убирает 8 хуков, чужие не трогает
+        run: |
+          S="$RUNNER_TEMP/settings.json"
+          echo '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}' > "$S"
+          osascript -l JavaScript src/mac/settings.js install "$S" "$HOME/.claude-notifier/hook.sh"
+          n=$(grep -o '.claude-notifier/hook.sh' "$S" | wc -l | tr -d ' ')
+          echo "наших хуков: $n"; test "$n" = 8
+          grep -q 'echo mine' "$S"
+          osascript -l JavaScript src/mac/settings.js uninstall "$S" "$HOME/.claude-notifier/hook.sh"
+          if grep -q '.claude-notifier/hook.sh' "$S"; then echo 'хуки не убраны'; exit 1; fi
+          grep -q 'echo mine' "$S"; grep -q '"model"' "$S"

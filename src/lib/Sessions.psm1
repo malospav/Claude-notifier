@@ -326,4 +326,72 @@ function Set-NotifierSessionPref {
     Move-Item -LiteralPath $tmp -Destination $path -Force
 }
 
-Export-ModuleMember -Function Get-NotifierAgentsStateText, Get-NotifierSessionPrefs, Set-NotifierSessionPref, Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText
+# --- Повторное подключение того же устройства: его сеансы не теряются ---
+# removed-sessions.json — сеансы отключённых устройств: [{ name, at, sessions[] }], хранятся сутки.
+$script:RemovedKeepHours = 24
+
+function Move-NotifierDeviceSessions {
+    <# .SYNOPSIS Сеансы устройства From переходят к устройству To (тот же Mac подключён заново). Возвращает их число. #>
+    param([Parameter(Mandatory = $true)][string]$From, [Parameter(Mandatory = $true)][string]$To, [string]$DataRoot = (Get-NotifierDataRoot))
+    $all = @(Get-NotifierSessions -DataRoot $DataRoot)
+    $n = 0
+    foreach ($s in $all) {
+        if ($s.PSObject.Properties['device'] -and [string]$s.device -eq $From) { $s.device = $To; $n++ }
+    }
+    if ($n -gt 0) { Save-NotifierSessions -Sessions $all -DataRoot $DataRoot }
+    return $n
+}
+
+function Get-RemovedPath([string]$DataRoot) { return (Join-Path $DataRoot 'removed-sessions.json') }
+
+function Read-RemovedSessions([string]$DataRoot, [datetime]$Now) {
+    $path = Get-RemovedPath $DataRoot
+    $list = @()
+    if (Test-Path -LiteralPath $path) {
+        try { $list = @((Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop)) } catch { $list = @() }
+    }
+    return @($list | Where-Object {
+            $at = ConvertTo-UtcTime ([string](Get-Prop $_ 'at'))
+            $null -ne $at -and ($Now - $at).TotalHours -lt $script:RemovedKeepHours })
+}
+
+function Write-RemovedSessions([string]$DataRoot, [object[]]$List) {
+    $path = Get-RemovedPath $DataRoot
+    if ($List.Count -eq 0) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue; return }
+    $json = ConvertTo-Json -InputObject @($List) -Depth 10 -Compress
+    $tmp = "$path.tmp"
+    [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+function Save-NotifierRemovedSessions {
+    <# .SYNOPSIS Устройство отключено: его сеансы — на сутки в removed-sessions.json (вернутся, если его подключат снова). #>
+    param([Parameter(Mandatory = $true)][string]$Name, [AllowEmptyCollection()][object[]]$Sessions = @(), [string]$DataRoot = (Get-NotifierDataRoot), [datetime]$Now = [DateTime]::UtcNow)
+    if ($Sessions.Count -eq 0 -or $Name -eq '') { return }
+    $list = @(Read-RemovedSessions $DataRoot $Now | Where-Object { [string](Get-Prop $_ 'name') -ne $Name })
+    $list += [pscustomobject]@{ name = $Name; at = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture); sessions = @($Sessions) }
+    Write-RemovedSessions $DataRoot $list
+}
+
+function Restore-NotifierRemovedSessions {
+    <# .SYNOPSIS Подключено устройство с тем же именем, что недавно отключённое: его сеансы возвращаются. Возвращает их число. #>
+    param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$DeviceId, [string]$DataRoot = (Get-NotifierDataRoot), [datetime]$Now = [DateTime]::UtcNow)
+    $list = @(Read-RemovedSessions $DataRoot $Now)
+    $entry = $list | Where-Object { [string](Get-Prop $_ 'name') -eq $Name } | Select-Object -First 1
+    if ($null -eq $entry) { return 0 }
+    $all = @(Get-NotifierSessions -DataRoot $DataRoot)
+    $known = @{}
+    foreach ($s in $all) { $known[[string]$s.session_id] = $true }
+    $n = 0
+    foreach ($s in @($entry.sessions)) {
+        if ($null -eq $s -or $known.ContainsKey([string]$s.session_id)) { continue }   # сеанс уже прислал событие сам
+        $s.device = $DeviceId
+        $all += $s
+        $n++
+    }
+    if ($n -gt 0) { Save-NotifierSessions -Sessions $all -DataRoot $DataRoot }
+    Write-RemovedSessions $DataRoot @($list | Where-Object { [string](Get-Prop $_ 'name') -ne $Name })
+    return $n
+}
+
+Export-ModuleMember -Function Move-NotifierDeviceSessions, Save-NotifierRemovedSessions, Restore-NotifierRemovedSessions, Get-NotifierAgentsStateText, Get-NotifierSessionPrefs, Set-NotifierSessionPref, Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText

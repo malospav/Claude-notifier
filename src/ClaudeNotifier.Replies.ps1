@@ -12,7 +12,39 @@ Import-Module (Join-Path $PSScriptRoot 'lib\Transcript.psm1')
 
 $script:Pending = @{ Permissions = @(); Replies = @{}; Gone = @() }
 $script:RecentRequest = @{}
-$script:QuickReplies = @('Продолжай', 'Да', 'Нет')
+$script:QuickReplies = @('Продолжай', 'Да', 'Нет')   # по умолчанию; свои — в настройках (quickReplies.texts)
+
+function ConvertTo-NotifierQuickReplyTexts {
+    <# .SYNOPSIS Строка «Продолжай; Да; Нет» → до 5 текстов до 40 знаков; пусто — ответы по умолчанию. #>
+    param([AllowEmptyString()][string]$Text)
+    $list = @($Text -split '[;\r\n]' | ForEach-Object { ($_ -replace '[\x00-\x1f|]', ' ').Trim() } | Where-Object { $_ -ne '' } |
+        ForEach-Object { if ($_.Length -gt 40) { $_.Substring(0, 40).Trim() } else { $_ } } | Select-Object -First 5)
+    if ($list.Count -eq 0) { return , [string[]]$script:QuickReplies }
+    return , [string[]]$list
+}
+
+function Edit-NotifierQuickReplyTexts {
+    <# .SYNOPSIS Диалог «Кнопки ответа»: свои тексты через «;» (до 5). #>
+    $config = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+    $r = Show-NotifierDialog -Owner $null -Title 'Кнопки быстрого ответа' -Primary 'Сохранить' `
+        -Message 'До 5 ответов через точку с запятой, например: Продолжай; Да; Нет; Запусти тесты. Пусто — как было по умолчанию.' `
+        -InputValue (@($config.quickReplies.texts) -join '; ')
+    if (-not $r.Ok) { return }
+    $section = $config.quickReplies
+    $section.texts = ConvertTo-NotifierQuickReplyTexts ([string]$r.Value)
+    Set-NotifierConfigValue -Name quickReplies -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot
+    $script:SessionsDirty = $true
+}
+
+function Get-NotifierQuickReplyTexts {
+    <# .SYNOPSIS Тексты кнопок быстрого ответа: свои из настроек или «Продолжай / Да / Нет». #>
+    try {
+        $t = @((Get-NotifierConfig -DataRoot $script:TrayDataRoot).quickReplies.texts | Where-Object { $_ })
+        if ($t.Count -gt 0) { return , [string[]]$t }
+    }
+    catch { }
+    return , [string[]]$script:QuickReplies
+}
 $script:RemindMinutes = 3
 
 function Update-NotifierPending {
@@ -87,7 +119,7 @@ function Add-NotifierCardRequest {
         $Card.RequestTitle = 'Быстрый ответ'
         $acts = @()
         $i = 0
-        foreach ($q in $script:QuickReplies) { $acts += "reply:$i|$q|secondary"; $i++ }
+        foreach ($q in (Get-NotifierQuickReplyTexts)) { $acts += "reply:$i|$q|secondary"; $i++ }
         $acts += 'reply-custom|Ответить…|primary'
         $Card.Actions = [string[]]$acts
     }
@@ -129,7 +161,10 @@ function Invoke-NotifierCardAction {
             }
         }
         '^reply:(\d+)$' {
-            $text = $script:QuickReplies[[int]$Matches[1]]
+            $texts = Get-NotifierQuickReplyTexts
+            $n = [int]$Matches[1]
+            if ($n -ge $texts.Count) { $notice = 'Такого ответа больше нет'; break }
+            $text = $texts[$n]
             if (Write-NotifierReply -SessionId $sid -Text $text -DataRoot $DataRoot) {
                 [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $DataRoot)
                 $notice = "Отправлено: $text"
@@ -196,7 +231,7 @@ function Get-NotifierToastButtons {
     }
     if ([string]$Event.type -eq 'done' -and $Config.quickReplies.enabled -and (Test-NotifierSessionAsks -Session $Event -Fallback ([string]$Event.preview))) {
         $out = @(); $i = 0
-        foreach ($q in $script:QuickReplies) { $out += (& $mk $q '' "reply:$i"); $i++ }
+        foreach ($q in (Get-NotifierQuickReplyTexts)) { $out += (& $mk $q '' "reply:$i"); $i++ }
         return $out
     }
     return @()

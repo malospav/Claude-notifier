@@ -229,6 +229,18 @@ Describe 's_010_01 · трей: запросы в карточках' {
         (@(Get-NotifierSessions -DataRoot $script:TrayDataRoot) | Where-Object { $_.session_id -eq 'w' }).state | Should Be 'working'
     }
 
+    It 'свои кнопки быстрого ответа: из настроек; строка через «;» — до 5 по 40 знаков; пусто — по умолчанию' {
+        (ConvertTo-NotifierQuickReplyTexts 'Продолжай; Запусти тесты ;; Да|нет; a; b; c') -join ',' | Should Be 'Продолжай,Запусти тесты,Да нет,a,b'
+        (ConvertTo-NotifierQuickReplyTexts '  ') -join ',' | Should Be 'Продолжай,Да,Нет'
+        (ConvertTo-NotifierQuickReplyTexts ('x' * 50))[0].Length | Should Be 40
+        $root = Join-Path $TestDrive 'qrtexts'
+        New-Item -ItemType Directory $root -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $root 'config.json'), '{"quickReplies":{"texts":["Запусти тесты","",42,"Ок"]}}', (New-Object Text.UTF8Encoding $false))
+        (Get-NotifierConfig -DataRoot $root).quickReplies.texts -join ',' | Should Be 'Запусти тесты,Ок'
+        [IO.File]::WriteAllText((Join-Path $root 'config.json'), '{"quickReplies":{"texts":[]}}', (New-Object Text.UTF8Encoding $false))
+        (Get-NotifierConfig -DataRoot $root).quickReplies.texts -join ',' | Should Be 'Продолжай,Да,Нет'
+    }
+
     It 'запрос исчез без решения (ответили в Claude) → сеанс «Работает»' {
         $dir = Join-Path $script:TrayDataRoot 'requests'
         [IO.File]::WriteAllText("$dir\perm-x.json", (ConvertTo-Json -Compress @{ id = 'x'; type = 'permission'; session_id = 'p'; pid = 999999; expires = [DateTime]::UtcNow.AddMinutes(5).ToString('o') }))

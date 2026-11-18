@@ -161,6 +161,7 @@ function ConvertTo-NotifierNotchItem {
     if ($Session.PSObject.Properties['device']) { $it.Device = [string]$Session.device }   # свой маскот у устройства
     # «Похоже, остановился» — у сфинкса свой вид (сонный, в облачке «z»), не ошибка.
     if ([string]$Session.state -eq 'working' -and $Session.PSObject.Properties['stalledSince'] -and [string]$Session.stalledSince -ne '') { $it.State = 'stalled' }
+    if ($Card.StateText -eq 'Нет связи с устройством') { $it.State = 'stalled' }   # Mac молчит — сонный маскот, не ошибка
     $it.StateText = $Card.StateText
     if ($Session.PSObject.Properties['stats'] -and $Session.stats -and $Session.stats.PSObject.Properties['tools']) { $it.Tools = [int]$Session.stats.tools }
     if ($Session.PSObject.Properties['agents'] -and $Session.agents) { $it.Agents = @(@($Session.agents) | Where-Object { $_ }).Count }
@@ -202,9 +203,17 @@ function Get-NotifierNotchItems {
     foreach ($s in (Get-NotifierSortedSessions -Sessions $Sessions -Pinned $pinned)) {
         $card = ConvertTo-NotifierSessionCard -Session $s -Prefs $prefs -ContextWarn ([int]$Config.context.warnPercent)
         $script:NotchCards[$card.Id] = $card
-        $list.Add((ConvertTo-NotifierNotchItem -Card $card -Session $s))
+        $it = ConvertTo-NotifierNotchItem -Card $card -Session $s
+        $it.Group = [string]$card.Section
+        $list.Add($it)
     }
-    return , $list.ToArray()
+    # По устройствам: сначала этот ПК, затем остальные в порядке самого срочного сеанса; внутри — прежний порядок.
+    $order = New-Object 'System.Collections.Generic.List[string]'
+    $order.Add('')
+    foreach ($it in $list) { if (-not $order.Contains($it.Device)) { $order.Add($it.Device) } }
+    $out = New-Object 'System.Collections.Generic.List[ClaudeNotifier.Ui.NotchItem]'
+    foreach ($dev in $order) { foreach ($it in $list) { if ($it.Device -eq $dev) { $out.Add($it) } } }
+    return , $out.ToArray()
 }
 
 function Get-NotifierNotchLimits {
@@ -290,9 +299,11 @@ function Get-NotifierNotchSettingsRows {
     }
     $rows += New-NotifierNotchRow choice 'quiet' 'Без звука' 'Всегда или по часам' -Value (Get-NotifierSelectLabel 'quiet' -Config $c)
     $rows += New-NotifierNotchRow choice 'longTasks' 'Звук «Готово»' 'После задач дольше (или вас нет)' -Value (Get-NotifierSelectLabel 'longTasks' -Config $c)
+    $rows += New-NotifierNotchRow choice 'budget' 'Расход за день' 'Предупредить, когда дойдёт до суммы' -Value (Get-NotifierSelectLabel 'budget' -Config $c)
     $rows += New-NotifierNotchRow header -Title 'Ответы'
     $rows += New-NotifierNotchRow switch 'approvals' 'Запросы разрешения' 'Разрешать из шторки и с телефона' -On ([bool]$c.approvals.enabled)
     $rows += New-NotifierNotchRow switch 'quickReplies' 'Быстрые ответы' 'Отвечать после «Готово» без перехода в окно' -On ([bool]$c.quickReplies.enabled)
+    $rows += New-NotifierNotchRow button 'replyTexts' 'Кнопки ответа' (@($c.quickReplies.texts) -join ' / ') -Value 'Изменить'
     $rows += New-NotifierNotchRow choice 'remind' 'Напоминание' 'Повторить, если запрос ждёт' -Value (Get-NotifierSelectLabel 'remind' -Config $c)
     $rows += New-NotifierNotchRow switch 'showPrompt' 'Показывать мой запрос' 'Начало запроса в подробностях сеанса' -On ([bool]$c.showPrompt)
     $rows += New-NotifierNotchRow header -Title 'Сеансы'
@@ -345,7 +356,9 @@ function Get-NotifierNotchDevicesRows {
         $state = "Был $seen"; $dot = ''
         if ($seen -eq 'в сети') { $state = 'В сети'; $dot = 'online' }
         if ($seen -eq [string][char]0x2014) { $state = 'Ещё не на связи' }
-        $meta = @($state, (Get-NotifierDeviceKindText $d), (Format-NotifierSessionCount ([int]$counts[[string]$d.id]))) -join " $([char]0x00B7) "
+        $parts = @($state, (Get-NotifierDeviceKindText $d), (Format-NotifierSessionCount ([int]$counts[[string]$d.id])))
+        if (Test-NotifierMacHooksOutdated -Device $d) { $parts += 'обновите хуки' }
+        $meta = $parts -join " $([char]0x00B7) "
         $notify = @('Уведомления: выкл', 'Уведомления: вкл')[[int][bool]$d.notify]
         $rows += New-NotifierNotchRow device ([string]$d.id) ([string]$d.name) $meta -Dot $dot -Actions @("notify|$notify|secondary", 'rename|Имя|secondary', 'remove|Отключить|destructive')
     }
@@ -361,6 +374,12 @@ function Get-NotifierNotchStatsRows {
     $title = "За 7 дней: $(Format-NotifierTokensShort ([int64]$s.Total.tokens)) токенов${dot}$(Format-NotifierDuration ([int64]$s.Total.seconds))"
     if ($s.Total.PSObject.Properties['cost'] -and [double]$s.Total.cost -gt 0) { $title += "${dot}$([char]0x2248) $(Format-NotifierCost ([double]$s.Total.cost))" }
     $rows += New-NotifierNotchRow info -Title $title -Subtitle "Запросов $([int]$s.Total.prompts)${dot}проектов $(@($s.Week).Count)${dot}обновлено в $($s.Updated.ToString('HH:mm'))"
+    # Сегодня — отдельной строкой; с порогом из настроек — «из $20».
+    $today = Get-NotifierTodayCost -Summary $s
+    $cfg = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+    $todaySub = 'Примерно, по ценам API'
+    if ($cfg.budget.enabled) { $todaySub = "Порог $(Format-NotifierCost ([double]$cfg.budget.daily)) в день$($dot)$([int][Math]::Round(100 * $today / [Math]::Max(0.01, [double]$cfg.budget.daily))) %" }
+    $rows += New-NotifierNotchRow info -Title 'Расход за сегодня' -Subtitle $todaySub -Value "$([char]0x2248) $(Format-NotifierCost $today)"
     $c = ConvertTo-NotifierStatsChart -Summary $s
     $chart = New-NotifierNotchRow chart
     $chart.Values = [double[]]$c.Values; $chart.Labels = [string[]]$c.Labels; $chart.ValueLabels = [string[]]$c.ValueLabels; $chart.Highlight = [int]$c.Highlight
@@ -607,6 +626,10 @@ function Get-NotifierSelectOptions {
             $cur = if ($c.inactive.enabled) { [string][int]$c.inactive.hours } else { 'off' }
             Get-NumberSelectOptions -Values 1, 2, 4, 8, 24 -Current $cur -Off 'off' -Format { "$($args[0]) ч" }
         }
+        '^budget$' {
+            $cur = if ($c.budget.enabled) { [string][int]$c.budget.daily } else { 'off' }
+            Get-NumberSelectOptions -Values 5, 10, 20, 50, 100, 200 -Current $cur -Off 'off' -Format { "`$$($args[0])" }
+        }
         '^sound\.(done|permission|error|limit)$' {
             $cur = [string]$c.events[$Matches[1]].sound
             New-SelectOption '' 'Системный' ($cur -eq '')
@@ -682,9 +705,9 @@ function Set-NotifierSelectValue {
             Set-NotifierMascot
         }
         '^remind$' { Set-NotifierOptionValue -Name approvals -Field remindMinutes -Value ([int]$Value) }
-        '^(longTasks|context|stalled|inactive)$' {
+        '^(longTasks|context|stalled|inactive|budget)$' {
             $name = $Matches[1]
-            $field = @{ longTasks = 'minutes'; context = 'warnPercent'; stalled = 'minutes'; inactive = 'hours' }[$name]
+            $field = @{ longTasks = 'minutes'; context = 'warnPercent'; stalled = 'minutes'; inactive = 'hours'; budget = 'daily' }[$name]
             if ($Value -eq 'off') { Set-NotifierOptionValue -Name $name -Value $false }
             else {
                 $section = $config[$name]
@@ -926,6 +949,7 @@ function Invoke-NotifierNotchCommand {
                 elseif ($id -eq 'export') { Export-NotifierSettingsDialog }
                 elseif ($id -eq 'import') { Import-NotifierSettingsDialog }
                 elseif ($id -eq 'connect') { Show-NotifierConnectDialog }
+                elseif ($id -eq 'replyTexts') { Edit-NotifierQuickReplyTexts }
                 elseif ($id -like 'sound.*') { $keepHold = $true; Show-NotifierSoundMenuAt -Type $id.Substring(6) -Location $Event.Location }
                 elseif ($Event.Action) { Invoke-NotifierDeviceActionById -Id $id -Action ([string]$Event.Action) }
                 Push-NotifierNotchPage

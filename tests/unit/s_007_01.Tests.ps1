@@ -328,6 +328,41 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
         }
     }
 
+    It 'тот же Mac подключён заново: сеансы прежнего подключения переходят к новому, отключённого — возвращаются' {
+        $ctx = New-Ctx (Join-Path $TestDrive 'repair')
+        $old = Add-NotifierDevice -Network $ctx.Network -Name 'MacBook Air' -Kind mac
+        $old.Device.hooks = $true
+        Save-NotifierSessions -Sessions @(
+            [pscustomobject]@{ session_id = 's1'; device = $old.Device.id; state = 'working'; project = 'shop' },
+            [pscustomobject]@{ session_id = 'pc'; device = ''; state = 'waiting'; project = 'x' }) -DataRoot $ctx.DataRoot
+        $new = Add-NotifierDevice -Network $ctx.Network -Name 'Mac'
+        $tok = Add-NotifierDeviceToken -Device $new.Device -Hook
+        $bearer = @{ authorization = "Bearer $tok" }
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/hello' '{"name":"MacBook Air","replies":true}' $bearer) -Ctx $ctx).Status | Should Be 200
+        @($ctx.Network.devices).Count | Should Be 1
+        $ctx.Network.devices[0].id | Should Be $new.Device.id
+        (@(Get-NotifierSessions -DataRoot $ctx.DataRoot) | Where-Object session_id -eq 's1').device | Should Be $new.Device.id
+        # Отключили и подключили снова: сеансы хранятся сутки и возвращаются новому подключению с тем же именем
+        $all = @(Get-NotifierSessions -DataRoot $ctx.DataRoot)
+        Save-NotifierRemovedSessions -Name 'MacBook Air' -Sessions @($all | Where-Object session_id -eq 's1') -DataRoot $ctx.DataRoot
+        Save-NotifierSessions -Sessions @($all | Where-Object session_id -ne 's1') -DataRoot $ctx.DataRoot
+        [void](Remove-NotifierDevice -Network $ctx.Network -Id $new.Device.id)
+        $third = Add-NotifierDevice -Network $ctx.Network -Name 'Mac'
+        $tok3 = Add-NotifierDeviceToken -Device $third.Device -Hook
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/hello' '{"name":"MacBook Air"}' @{ authorization = "Bearer $tok3" }) -Ctx $ctx).Status | Should Be 200
+        (@(Get-NotifierSessions -DataRoot $ctx.DataRoot) | Where-Object session_id -eq 's1').device | Should Be $third.Device.id
+        Test-Path (Join-Path $ctx.DataRoot 'removed-sessions.json') | Should Be $false   # возвращено — запись удалена
+        Restore-NotifierRemovedSessions -Name 'MacBook Air' -DeviceId 'x' -DataRoot $ctx.DataRoot | Should Be 0
+        # Версия хуков: без неё (старая установка) или другая — «обновите хуки»; текущая — всё в порядке
+        $ver = Get-NotifierMacHooksVersion
+        $ver | Should Match '^[0-9a-f]{12}$'
+        Test-NotifierMacHooksOutdated -Device $third.Device | Should Be $true
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/hello' "{`"name`":`"MacBook Air`",`"version`":`"$ver`"}" @{ authorization = "Bearer $tok3" }) -Ctx $ctx).Status | Should Be 200
+        Test-NotifierMacHooksOutdated -Device $third.Device | Should Be $false
+        $ctx.InstallCodes['codever12345'] = @{ DeviceId = $third.Device.id; Expires = [DateTime]::UtcNow.AddMinutes(5) }
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/install/codever12345') -Ctx $ctx).Body | Should Match "`"version`":`"$ver`""
+    }
+
     It 'hook.sh (через sh) отправляет событие хука на сервер' -Skip:(-not $shPath) {
         $root = Join-Path $TestDrive 'hooksh'
         $ctx = New-Ctx $root
@@ -342,6 +377,11 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
         [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\auth'), "Authorization: Bearer $hookToken`n", $utf8)
         $stdin = Join-Path $TestDrive 'stdin.json'
         [IO.File]::WriteAllText($stdin, '{"session_id":"mac-1","cwd":"/Users/a/dev/shop","message":"Разрешить?"}', (New-Object Text.UTF8Encoding $false))
+        # Отложенное событие (ПК был недоступен 5 минут назад) уходит первым — без уведомления задним числом
+        $qdir = Join-Path $macHome '.claude-notifier\queue'
+        New-Item -ItemType Directory -Path $qdir -Force | Out-Null
+        $old = [DateTimeOffset]::UtcNow.AddMinutes(-5).ToUnixTimeSeconds()
+        [IO.File]::WriteAllText((Join-Path $qdir "$old.77.stop.claude-desktop.ev"), '{"session_id":"mac-1","cwd":"/Users/a/dev/shop","last_assistant_message":"Готово"}', $utf8)
         $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
         $server = Start-NotifierHttpServer -Prefix "http://localhost:$port/" -Queue $q
         $oldHome = $env:HOME
@@ -360,11 +400,17 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
             }
             $p.WaitForExit(2000) | Out-Null
             $p.ExitCode | Should Be 0
-            $ctx.Events.Count | Should Be 1
-            $ctx.Events[0].type | Should Be 'permission'
-            $ctx.Events[0].preview | Should Be 'Разрешить?'
-            $ctx.Events[0].project | Should Be 'shop'
-            $ctx.Events[0].device | Should Be $a.Device.id
+            $ctx.Events.Count | Should Be 2
+            $ctx.Events[0].type | Should Be 'done'
+            $ctx.Events[0].origin | Should Be 'desktop'
+            $ctx.Events[0].late | Should Be $true
+            $ctx.Events[0].ts | Should Be ([DateTimeOffset]::FromUnixTimeSeconds($old).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'"))
+            @(Get-ChildItem $qdir).Count | Should Be 0
+            $ctx.Events[1].type | Should Be 'permission'
+            $ctx.Events[1].PSObject.Properties['late'] | Should Be $null
+            $ctx.Events[1].preview | Should Be 'Разрешить?'
+            $ctx.Events[1].project | Should Be 'shop'
+            $ctx.Events[1].device | Should Be $a.Device.id
         }
         finally {
             $env:HOME = $oldHome
@@ -379,9 +425,13 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
         $oldHome = $env:HOME
         try {
             $env:HOME = $macHome
-            $out = '{}' | & $shPath (Join-Path $repoRoot 'src\mac\hook.sh') stop 2>&1
+            $out = '{"session_id":"q1"}' | & $shPath (Join-Path $repoRoot 'src\mac\hook.sh') stop 2>&1
             $LASTEXITCODE | Should Be 0
             "$out" | Should Be ''
+            # Событие не потеряно: ждёт в очереди до следующей связи с ПК
+            $queued = @(Get-ChildItem (Join-Path $macHome '.claude-notifier\queue') -Filter '*.ev')
+            $queued.Count | Should Be 1
+            $queued[0].Name | Should Match '^\d+\.\d+\.stop\.[A-Za-z0-9_-]+\.ev$'
         }
         finally { $env:HOME = $oldHome }
     }

@@ -37,6 +37,8 @@ function ConvertTo-NotifierDeviceCard {
     if ($seen -eq '—') { $card.StateText = 'Ещё не на связи' }
     $meta = @((Get-NotifierDeviceKindText $Device), (Format-NotifierSessionCount $Sessions))
     if ($Device.notify) { $meta += 'уведомления на ПК' }
+    # ПК обновился, а на Mac старые хуки: подсказка и команда в меню устройства («Получить команду установки»).
+    if (Test-NotifierMacHooksOutdated -Device $Device) { $meta += 'обновите хуки: «Получить команду установки»' }
     $card.Meta = $meta -join " $([char]0x00B7) "
     $card.Tag = $Device
     return $card
@@ -143,10 +145,17 @@ function Remove-NotifierDeviceAndSessions {
     <# .SYNOPSIS Отключает устройство: удаляет его из network.json и его сеансы из sessions.json. #>
     param([Parameter(Mandatory = $true)][string]$Id)
     $net = $script:Net
+    $d = Find-NotifierDevice -Network $net.Network -Id $Id
+    $name = ''
+    if ($d) { $name = [string]$d.name }
     if (-not (Remove-NotifierDevice -Network $net.Network -Id $Id)) { return $false }
     $net.NetworkDirty = $true
     Save-NotifierNet -Force
-    $rest = @(Get-NotifierSessions -DataRoot $net.DataRoot | Where-Object { -not ($_.PSObject.Properties['device'] -and [string]$_.device -eq $Id) })
+    $all = @(Get-NotifierSessions -DataRoot $net.DataRoot)
+    $mine = @($all | Where-Object { $_.PSObject.Properties['device'] -and [string]$_.device -eq $Id })
+    # Отключили, чтобы подключить заново (переустановка хуков): сеансы вернутся, когда тот же Mac снова подключится.
+    try { Save-NotifierRemovedSessions -Name $name -Sessions $mine -DataRoot $net.DataRoot } catch { }
+    $rest = @($all | Where-Object { -not ($_.PSObject.Properties['device'] -and [string]$_.device -eq $Id) })
     Save-NotifierSessions -Sessions $rest -DataRoot $net.DataRoot
     $script:SessionsDirty = $true
     return $true

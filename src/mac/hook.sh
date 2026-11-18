@@ -26,17 +26,40 @@ OUT="$TMP/out"
 cleanup() { rm -rf "$TMP" 2>/dev/null; }
 trap cleanup EXIT
 
-# POST тела хука на первый отвечающий адрес ПК. Выставляет BASE и CODE; ответ — в $OUT.
+# POST тела хука ($3, по умолчанию тело этого вызова) на первый отвечающий адрес ПК. Выставляет BASE и CODE; ответ — в $OUT.
 post() {
   for BASE in "$CN_URL" "$CN_URL2"; do
     [ -n "$BASE" ] || continue
     CODE="$(curl -s -m "$1" -o "$OUT" -w '%{http_code}' -X POST \
       -H "$AUTH" -H 'Content-Type: application/json; charset=utf-8' \
-      --data-binary @"$TMP/body" "$BASE$2" 2>/dev/null)"
+      --data-binary @"${3:-$TMP/body}" "$BASE$2" 2>/dev/null)"
     case "$CODE" in 2??|4??) return 0 ;; esac
   done
   BASE=''
   return 1
+}
+
+# Очередь событий: ПК выключен, спит или трей перезапускается — событие ждёт в queue/ и уходит перед следующим
+# (иначе сеанс на ПК навсегда «работает»). Не больше 50 событий и не старше 6 часов.
+QUEUE="$DIR/queue"
+enqueue() {
+  mkdir -p "$QUEUE" 2>/dev/null || return 0
+  # Имя: <время>.<pid>.<тип>.<точка входа без точек>.ev — по нему отправляется в том же порядке.
+  cp "$TMP/body" "$QUEUE/$(date +%s).$$.$KIND.$(printf '%s' "$ENTRY" | tr -d '.').ev" 2>/dev/null
+  N="$(ls -1 "$QUEUE" 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "${N:-0}" -gt 50 ]; then
+    ls -1 "$QUEUE" | sort | head -n $((N - 50)) | while read -r f; do rm -f "$QUEUE/$f"; done
+  fi
+}
+flush() {
+  [ -d "$QUEUE" ] || return 0
+  NOW="$(date +%s)"
+  for f in $(ls -1 "$QUEUE" 2>/dev/null | sort); do
+    TS="${f%%.*}"; REST="${f#*.}"; REST="${REST#*.}"; QK="${REST%%.*}"; QE="${REST#*.}"; QE="${QE%.ev}"
+    if [ $((NOW - TS)) -gt 21600 ] 2>/dev/null; then rm -f "$QUEUE/$f"; continue; fi
+    post 2 "/api/event?kind=$QK&entry=$QE&queued=$TS" "$QUEUE/$f" || return 1
+    rm -f "$QUEUE/$f"
+  done
 }
 get() { CODE="$(curl -s -m 5 -o "$OUT" -w '%{http_code}' -H "$AUTH" "$BASE$1" 2>/dev/null)"; }
 
@@ -88,7 +111,9 @@ case "$KIND" in
     exit 0
     ;;
   *)
-    post 2 "/api/event?kind=$KIND&entry=$ENTRY"
+    # Сначала — отложенные события (порядок важен: «запрос» после «готово» снова сделал бы сеанс «работающим»).
+    if flush && post 2 "/api/event?kind=$KIND&entry=$ENTRY"; then exit 0; fi
+    enqueue
     exit 0
     ;;
 esac

@@ -57,10 +57,56 @@ function Test-NotifierStatsVisible {
 }
 
 function Invoke-NotifierActivityTick {
-    <# .SYNOPSIS Из таймера трея: забрать готовый итог; пока страница открыта — пересчитывать раз в 10 минут. #>
+    <#
+    .SYNOPSIS
+    Из таймера трея: забрать готовый итог; пока страница открыта или включён порог расходов — пересчитывать
+    раз в 10 минут.
+    #>
     param([datetime]$Now = [DateTime]::UtcNow)
-    [void](Complete-NotifierActivityScan)
-    if ((Test-NotifierStatsVisible) -and $Now -ge $script:ActivityNextAt) { [void](Start-NotifierActivityScan -Now $Now) }
+    if (Complete-NotifierActivityScan) { [void](Test-NotifierBudget -Now $Now) }
+    $budget = $false
+    try { $budget = [bool](Get-NotifierConfig -DataRoot $script:TrayDataRoot).budget.enabled } catch { }
+    if (((Test-NotifierStatsVisible) -or $budget) -and $Now -ge $script:ActivityNextAt) { [void](Start-NotifierActivityScan -Now $Now) }
+}
+
+function Get-NotifierTodayCost {
+    <# .SYNOPSIS Примерный расход за сегодня ($) по итогу статистики: сумма по проектам за сегодня. #>
+    param($Summary = $script:ActivitySummary)
+    if ($null -eq $Summary) { return 0.0 }
+    $sum = 0.0
+    foreach ($p in @($Summary.Today)) { if ($p -and $p.PSObject.Properties['cost']) { $sum += [double]$p.cost } }
+    return $sum
+}
+
+$script:BudgetNotifiedDay = ''
+
+function Test-NotifierBudget {
+    <#
+    .SYNOPSIS
+    Расход за сегодня дошёл до порога из настроек — одно уведомление в день (тип «Лимит», свой тумблер).
+    Возвращает $true, если уведомление поставлено в очередь.
+    #>
+    param([datetime]$Now = [DateTime]::UtcNow, $Summary = $script:ActivitySummary, $Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
+    if (-not $Config.budget.enabled -or $null -eq $Summary) { return $false }
+    $day = $Now.ToLocalTime().ToString('yyyy-MM-dd')
+    if ($script:BudgetNotifiedDay -eq $day) { return $false }
+    $cost = Get-NotifierTodayCost -Summary $Summary
+    $limit = [double]$Config.budget.daily
+    if ($cost -lt $limit) { return $false }
+    $script:BudgetNotifiedDay = $day
+    $script:TrayQueue.Enqueue([pscustomobject][ordered]@{
+            v       = 1
+            id      = [guid]::NewGuid().ToString()
+            ts      = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+            type    = 'limit'
+            option  = 'budget'      # включается своим порогом в настройках, а не тумблером «Лимит»
+            origin  = 'cli'
+            project = ''
+            title   = "Расход за сегодня $([char]0x2248) $(Format-NotifierCost $cost)"
+            preview = "Дошли до порога $(Format-NotifierCost $limit) в день (примерно, по ценам API, по журналам на этом ПК)."
+            window  = $null
+        })
+    return $true
 }
 
 function Format-NotifierTokensShort {

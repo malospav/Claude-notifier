@@ -68,6 +68,24 @@ Describe 's_010_02 · подробности сеанса в хуке' {
         Test-NotifierHelperEvent -Event ([pscustomobject]@{ session_id = 'h' }) -DataRoot $root | Should Be $true   # запомнен
     }
 
+    It 'сеанс Mac «работает», а Mac молчит час — «нет связи»; недавно был на связи или ждёт ответа — как есть' {
+        $now = [datetime]::Parse('2026-11-18T12:00:00Z').ToUniversalTime()
+        $devs = New-Object System.Collections.ArrayList
+        [void]$devs.Add([pscustomobject]@{ id = 'dm'; name = 'MacBook'; last_seen = '2026-11-18T10:30:00.000Z' })
+        $saved = $script:Net
+        try {
+            $script:Net = @{ Network = @{ devices = $devs } }
+            $s = [pscustomobject]@{ session_id = 'a'; device = 'dm'; state = 'working'; updated = '2026-11-18T10:20:00.000Z' }
+            (Get-NotifierDeviceSilentSince -Session $s -Now $now).ToString('HH:mm') | Should Be '10:30'
+            $s.state = 'waiting'
+            Get-NotifierDeviceSilentSince -Session $s -Now $now | Should Be $null
+            $s.state = 'working'; $devs[0].last_seen = '2026-11-18T11:30:00.000Z'
+            Get-NotifierDeviceSilentSince -Session $s -Now $now | Should Be $null
+            Get-NotifierDeviceSilentSince -Session ([pscustomobject]@{ session_id = 'p'; device = ''; state = 'working'; updated = '2026-11-18T01:00:00.000Z' }) -Now $now | Should Be $null
+        }
+        finally { $script:Net = $saved }
+    }
+
     It 'hook.sh на Mac: сводка ECC не отправляется, обычный сеанс — отправляется (дерево процессов не проверяется)' {
         $hook = Join-Path $repoRoot 'src\mac\hook.sh'
         (Get-Content -Raw $hook) | Should Match 'ECC_LLM_SUMMARY_SUBPROCESS'

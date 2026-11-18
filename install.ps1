@@ -48,9 +48,23 @@ try {
         if (Test-Path -LiteralPath $legacyApp) { Remove-Item -LiteralPath $legacyApp -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    # 2. Копируем приложение начисто.
+    # 2. Копируем приложение начисто. Трей и мосты хуков, запущенные из app\, держат его файлы — закрываем их
+    #    (мост, ждущий решения или быстрого ответа, просто выходит: Claude спросит как обычно), трей потом запускаем снова.
     $app = Join-Path $DataRoot 'app'
-    if (Test-Path -LiteralPath $app) { Remove-Item -LiteralPath $app -Recurse -Force }
+    $trayWasRunning = $false
+    $appPrefix = [regex]::Escape((Join-Path $app ''))
+    $holders = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessId -ne $PID -and [string]$_.CommandLine -match $appPrefix })
+    foreach ($p in $holders) {
+        if ([string]$p.CommandLine -match 'ClaudeNotifier\.Tray\.ps1') { $trayWasRunning = $true }
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $app) {
+        for ($try = 1; ; $try++) {
+            try { Remove-Item -LiteralPath $app -Recurse -Force; break }
+            catch { if ($try -ge 10) { throw }; Start-Sleep -Milliseconds 300 }   # процессы ещё выходят
+        }
+    }
     New-Item -ItemType Directory -Path $app -Force | Out-Null
     Copy-Item -Path (Join-Path $SourceRoot '*') -Destination $app -Recurse -Force
     Get-ChildItem -LiteralPath $app -Recurse -File | Unblock-File
@@ -81,6 +95,11 @@ try {
     Write-Output "Ярлыки Claude Notifier: $($links -join ', ')"
     if ($migrated.Count -gt 0) { Write-Output "Перенесено из $($LegacyDataRoot): $($migrated -join ', ')" }
     if ($backup) { Write-Output "Резервная копия настроек: $backup" }
+    if ($trayWasRunning) {
+        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+            '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $app 'ClaudeNotifier.Tray.ps1'))
+        Write-Output 'Трей перезапущен с новой версией'
+    }
     exit 0
 }
 catch {
