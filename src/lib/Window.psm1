@@ -155,6 +155,9 @@ function Test-NotifierNestedClaude {
     и ни ответа, ни решения не ждёт. Путь процесса не прочитать — не считаем Claude Code (не прячем настоящий сеанс).
     #>
     param([int]$ProcessId = $PID)
+    # Сводка ECC запускает «claude -p» с этими переменными, хуки вложенного Claude их наследуют — надёжнее дерева
+    # процессов (сводка идёт при завершении сеанса, и родитель к хуку может уже выйти).
+    if ($env:ECC_LLM_SUMMARY_SUBPROCESS -or $env:ECC_SKIP_LLM_SUMMARY) { return $true }
     try {
         $codes = 0
         $current = $ProcessId

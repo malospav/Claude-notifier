@@ -216,6 +216,16 @@ function Invoke-NotifierEventBatch {
                 continue
             }
             if ($event.type -eq 'show') { Show-NotifierSessionsWindow; $shown++; continue }   # щелчок по ярлыку
+            if (Test-NotifierHelperEvent -Event $event -DataRoot $DataRoot) {
+                # Уже попавший в список служебный сеанс (распознан не с первого события) — убрать.
+                if ($null -eq $sessions) { $sessions = @(Get-NotifierSessions -DataRoot $DataRoot) }
+                $sid = [string]$event.session_id
+                if (@($sessions | Where-Object { [string]$_.session_id -eq $sid }).Count -gt 0) {
+                    $sessions = @($sessions | Where-Object { [string]$_.session_id -ne $sid })
+                    Save-NotifierSessions -Sessions $sessions -DataRoot $DataRoot
+                }
+                continue
+            }
             $remote = Test-NotifierRemoteEventMuted -Event $event   # show | quiet | drop (события других устройств)
             $duplicate = Test-NotifierDuplicatePermissionToast -Event $event
             # Новый запрос или ответ прямо в Claude: ожидание быстрого ответа по этому сеансу больше не нужно.
@@ -415,6 +425,40 @@ function Get-NotifierTickInterval {
     return $script:IdleTickMs
 }
 
+function Add-NotifierHelperSession {
+    <# .SYNOPSIS Запомнить служебный сеанс: все его дальнейшие события отбрасываются. В журнал — один раз. #>
+    param([AllowEmptyString()][string]$SessionId, [string]$DataRoot = $script:TrayDataRoot)
+    if ([string]::IsNullOrEmpty($SessionId)) { return }
+    if (-not $script:NestedLogged) { $script:NestedLogged = @{} }
+    if ($script:NestedLogged.ContainsKey($SessionId)) { return }
+    $script:NestedLogged[$SessionId] = $true
+    Write-NotifierLog -Level INFO -Message "tray: служебный запуск Claude внутри другого сеанса ($SessionId) — не показывается" -DataRoot $DataRoot
+}
+
+function Test-NotifierHelperEvent {
+    <#
+    .SYNOPSIS
+    Событие служебного запуска Claude (сводка сеанса через «claude -p»)? Однажды распознанный сеанс запоминается:
+    проверка по дереву процессов срабатывает не на каждый хук — сводка идёт при завершении сеанса, и к хуку Stop
+    его родитель уже может выйти. Поэтому ещё и по журналу: первый запрос — «Below is a conversation log…».
+    #>
+    param([Parameter(Mandatory = $true)]$Event, [string]$DataRoot = $script:TrayDataRoot)
+    if (-not ($Event.PSObject.Properties['session_id'] -and $Event.session_id)) { return $false }
+    $sid = [string]$Event.session_id
+    if (-not $script:NestedLogged) { $script:NestedLogged = @{} }
+    if ($script:NestedLogged.ContainsKey($sid)) { return $true }
+    if ($Event.PSObject.Properties['helper'] -and $Event.helper) { Add-NotifierHelperSession -SessionId $sid -DataRoot $DataRoot; return $true }
+    if (-not $script:HelperChecked) { $script:HelperChecked = @{} }
+    if ($script:HelperChecked.ContainsKey($sid)) { return $false }
+    $path = ''
+    if ($Event.PSObject.Properties['transcript'] -and $Event.transcript) { $path = [string]$Event.transcript }
+    $helper = Test-NotifierHelperTranscript -Path $path
+    if ($null -eq $helper) { return $false }   # журнала ещё нет — проверим на следующем событии
+    $script:HelperChecked[$sid] = $true
+    if ($helper) { Add-NotifierHelperSession -SessionId $sid -DataRoot $DataRoot }
+    return [bool]$helper
+}
+
 function ConvertFrom-NotifierHookCall {
     <#
     .SYNOPSIS
@@ -425,13 +469,9 @@ function ConvertFrom-NotifierHookCall {
     # Служебный Claude, запущенный изнутри другого сеанса (хук плагина делает сводку через «claude -p» и т. п.), —
     # не ваш сеанс: иначе в шторке дубль проекта, а его «вопрос» зажигает свечение.
     if ($Call.PSObject.Properties['Nested'] -and $Call.Nested) {
-        if (-not $script:NestedLogged) { $script:NestedLogged = @{} }
         $sid = ''
         try { $sid = [string](ConvertFrom-Json -InputObject ([string]$Call.Body) -ErrorAction Stop).session_id } catch { }
-        if ($sid -and -not $script:NestedLogged.ContainsKey($sid)) {
-            $script:NestedLogged[$sid] = $true
-            Write-NotifierLog -Level INFO -Message "tray: служебный запуск Claude внутри другого сеанса ($sid) — не показывается" -DataRoot $DataRoot
-        }
+        Add-NotifierHelperSession -SessionId $sid -DataRoot $DataRoot
         return $null
     }
     $config = Get-NotifierConfig -DataRoot $DataRoot

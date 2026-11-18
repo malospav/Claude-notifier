@@ -148,6 +148,10 @@ Describe 's_007_01 · маршруты HTTP' {
         $r.Body | Should Match 'name="pin"'
         (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/sessions') -Ctx $ctx).Status | Should Be 401
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{}' @{ authorization = 'Bearer nope' }) -Ctx $ctx).Status | Should Be 401
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{}' @{ authorization = 'Bearer nope' }) -Ctx $ctx).Status | Should Be 401
+        # Хук с недействующим токеном — след в журнале, один раз (не на каждый запрос)
+        $log = Join-Path $TestDrive 'r1\log.txt'
+        @(Get-Content -LiteralPath $log -Encoding UTF8 | Where-Object { $_ -match 'токен не действует' }).Count | Should Be 1
     }
 
     It 'вход с формы страницы: свой Origin — вход; Origin null — понятная страница, а не JSON' {
@@ -253,6 +257,14 @@ Describe 's_007_01 · маршруты HTTP' {
             [pscustomobject]@{ session_id = 'm1'; device = $d.id; state = 'working'; project = 'site' }) -DataRoot $ctx.DataRoot
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{"session_id":"pc1"}' $bearer @{ kind = 'stop'; entry = 'cli' }) -Ctx $ctx).Status | Should Be 403
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{"session_id":"m1"}' $bearer @{ kind = 'stop'; entry = 'cli' }) -Ctx $ctx).Status | Should Be 200
+        # Запрос с Mac: начало текста — если включено «Показывать запрос»; сводка ECC помечена служебной
+        Set-NotifierConfigValue -Name showPrompt -Value $true -DataRoot $ctx.DataRoot
+        $ctx.Events.Clear()
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{"session_id":"m2","cwd":"/Users/a/dev/site","prompt":"Почини кнопку"}' $bearer @{ kind = 'prompt'; entry = 'cli' }) -Ctx $ctx).Status | Should Be 200
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{"session_id":"m3","cwd":"/Users/a/dev/site","prompt":"Below is a conversation log from a Claude Code coding session.\n\nx"}' $bearer @{ kind = 'prompt'; entry = 'cli' }) -Ctx $ctx).Status | Should Be 200
+        $ctx.Events[0].prompt | Should Be 'Почини кнопку'
+        $ctx.Events[0].PSObject.Properties['helper'] | Should Be $null
+        $ctx.Events[1].helper | Should Be $true
     }
 
     It 'просроченная ссылка установки не выдаёт токен' {

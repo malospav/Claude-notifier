@@ -36,6 +36,44 @@ Describe 's_010_02 · подробности сеанса в хуке' {
         Mock Test-NotifierNestedClaude { $false }   # в Pester 3 мок живёт до конца Describe — вернуть обычное поведение
     }
 
+    It 'сводка ECC: распознаётся по переменной окружения, по журналу; уже попавший в список сеанс убирается' {
+        $old = $env:ECC_LLM_SUMMARY_SUBPROCESS
+        try {
+            $env:ECC_LLM_SUMMARY_SUBPROCESS = '1'
+            # В отдельном процессе (он наследует переменную, как хук вложенного Claude) — мимо мока из прошлого теста
+            $win = Join-Path $repoRoot 'src\lib\Window.psm1'
+            (& powershell -NoProfile -Command "Import-Module '$win'; Test-NotifierNestedClaude") | Should Be 'True'
+        }
+        finally { $env:ECC_LLM_SUMMARY_SUBPROCESS = $old }
+        $root = Join-Path $TestDrive 'helper'
+        New-Item -ItemType Directory $root -Force | Out-Null
+        $utf8 = New-Object Text.UTF8Encoding $false
+        $help = Join-Path $root 'h.jsonl'
+        [IO.File]::WriteAllText($help, '{"type":"queue-operation","sessionId":"h"}' + "`n" + '{"type":"user","message":{"role":"user","content":"Below is a conversation log from a Claude Code coding session.\n\n## x"}}' + "`n", $utf8)
+        $mine = Join-Path $root 'm.jsonl'
+        [IO.File]::WriteAllText($mine, '{"type":"user","message":{"role":"user","content":"Сделай шторку"}}' + "`n", $utf8)
+        Test-NotifierHelperTranscript -Path $help | Should Be $true
+        Test-NotifierHelperTranscript -Path $mine | Should Be $false
+        Test-NotifierHelperTranscript -Path (Join-Path $root 'нет.jsonl') | Should Be $null
+        # Сеанс уже в списке (первое событие проскочило): следующее событие его убирает, дальнейшие — отбрасываются
+        Save-NotifierSessions -Sessions @(
+            [pscustomobject]@{ session_id = 'h'; state = 'waiting'; transcript = $help },
+            [pscustomobject]@{ session_id = 'm'; state = 'working'; transcript = $mine }) -DataRoot $root
+        $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        foreach ($s in 'h', 'm') {
+            $q.Enqueue([pscustomobject]@{ v = 1; type = 'working'; title = 'p'; preview = ''; session_id = $s; project = 'p'; origin = 'desktop'; transcript = (Join-Path $root "$s.jsonl"); timestamp = (Get-Date).ToUniversalTime().ToString('o') })
+        }
+        [void](Invoke-NotifierEventBatch -Queue $q -DataRoot $root -NoOutput)
+        @(Get-NotifierSessions -DataRoot $root | ForEach-Object { $_.session_id }) -join ',' | Should Be 'm'
+        Test-NotifierHelperEvent -Event ([pscustomobject]@{ session_id = 'h' }) -DataRoot $root | Should Be $true   # запомнен
+    }
+
+    It 'hook.sh на Mac: сводка ECC не отправляется, обычный сеанс — отправляется (дерево процессов не проверяется)' {
+        $hook = Join-Path $repoRoot 'src\mac\hook.sh'
+        (Get-Content -Raw $hook) | Should Match 'ECC_LLM_SUMMARY_SUBPROCESS'
+        (Get-Content -Raw $hook) | Should Not Match 'ps -o comm='
+    }
+
     It 'Stop: статистика журнала добавляется к событию; prompt — только если включено showPrompt' {
         $root = Join-Path $TestDrive 'det'
         New-Item -ItemType Directory $root -Force | Out-Null

@@ -395,6 +395,32 @@ function Get-NotifierJournalWriteTime {
     return $t
 }
 
+function Test-NotifierHelperTranscript {
+    <#
+    .SYNOPSIS
+    Журнал служебного запуска Claude — сводки сеанса, которую плагин (ECC) делает через «claude -p» при завершении
+    сеанса: первый запрос начинается с «Below is a conversation log from a Claude Code coding session».
+    $true / $false; $null — журнала ещё нет или первого запроса в нём пока нет (решить позже).
+    #>
+    param([AllowEmptyString()][string]$Path)
+    if ([string]::IsNullOrEmpty($Path)) { return $null }
+    $reader = $null
+    try {
+        if (-not [IO.File]::Exists($Path)) { return $null }
+        $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        $reader = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8)
+        for ($i = 0; $i -lt 40; $i++) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { break }
+            if ($line -notmatch '"type"\s*:\s*"user"') { continue }
+            return ($line -match 'Below is a conversation log from a Claude Code coding session')
+        }
+    }
+    catch { }
+    finally { if ($reader) { $reader.Dispose() } }
+    return $null
+}
+
 function Get-NotifierLastAnswer {
     <#
     .SYNOPSIS
@@ -499,4 +525,4 @@ function Format-NotifierApiError {
     return $Text
 }
 
-Export-ModuleMember -Function Get-NotifierLastAnswer, Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError
+Export-ModuleMember -Function Test-NotifierHelperTranscript, Get-NotifierLastAnswer,Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError

@@ -11,20 +11,10 @@ DIR="$HOME/.claude-notifier"
 KIND="$1"
 case "$KIND" in stop|notification|stopfailure|sessionstart|prompt|sessionend|permreq|replywait) ;; *) exit 0 ;; esac
 
-# Служебный Claude, запущенный изнутри другого сеанса (хук плагина делает сводку через «claude -p» и т. п.):
-# среди предков два процесса claude — не отдельный сеанс, ПК о нём не сообщаем. ps не тот (не macOS) — не вложен.
-nested() {
-  pid=$PPID; n=0; codes=0
-  while [ "$n" -lt 15 ] && [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
-    comm="$(ps -o comm= -p "$pid" 2>/dev/null)"
-    case "${comm##*/}" in claude) codes=$((codes + 1)) ;; esac
-    [ "$codes" -ge 2 ] && return 0
-    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-    n=$((n + 1))
-  done
-  return 1
-}
-nested && exit 0
+# Служебный Claude, запущенный изнутри другого сеанса (плагин ECC делает сводку через «claude -p» с этими
+# переменными окружения; хуки вложенного Claude их наследуют) — не отдельный сеанс, ПК о нём не сообщаем.
+# По дереву процессов не определяем: на Mac в цепочке обычного сеанса тоже бывает два процесса claude.
+[ -n "${ECC_LLM_SUMMARY_SUBPROCESS:-}${ECC_SKIP_LLM_SUMMARY:-}" ] && exit 0
 
 ENTRY="$(printf '%s' "${CLAUDE_CODE_ENTRYPOINT:-cli}" | tr -cd 'A-Za-z0-9_.-')"
 # Токен — из файла заголовка (не виден в ps); старые установки хранили его в env.

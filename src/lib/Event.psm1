@@ -117,7 +117,14 @@ function ConvertTo-NotifierEvent {
     $origin = 'cli'
     if ($EntryPoint -eq 'claude-desktop') { $origin = 'desktop' }
 
-    return [pscustomobject][ordered]@{
+    # Служебный запуск Claude — сводка сеанса, которую плагин (ECC) делает через «claude -p»: по тексту запроса
+    # и ответа. Работает и для Mac, где ни журнала, ни дерева процессов ПК не видит.
+    $helper = $false
+    $askText = Get-InputString $hook 'prompt'
+    if ($askText -and $askText.TrimStart().StartsWith('Below is a conversation log from a Claude Code coding session', [StringComparison]::Ordinal)) { $helper = $true }
+    if ($HookKind -eq 'stop' -and $raw -and $raw.TrimStart().StartsWith('## Session Summary', [StringComparison]::Ordinal)) { $helper = $true }
+
+    $event = [pscustomobject][ordered]@{
         v               = 1
         id              = [guid]::NewGuid().ToString()
         ts              = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
@@ -130,6 +137,8 @@ function ConvertTo-NotifierEvent {
         preview         = Format-NotifierPreview -Text $raw -MaxLength $Config.previewLength
         window          = $null
     }
+    if ($helper) { $event | Add-Member -NotePropertyName helper -NotePropertyValue $true }
+    return $event
 }
 
 function Add-NotifierEventDetails {

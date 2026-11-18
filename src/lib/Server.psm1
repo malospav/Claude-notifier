@@ -382,6 +382,17 @@ function Invoke-NotifierHttpRequest {
     $auth = Resolve-NotifierToken -Network $Ctx.Network -Token (Get-RequestToken $Request)
     if ($null -eq $auth) {
         if ($method -eq 'GET' -and $path -eq '/') { return (Get-LoginPage $Ctx '') }
+        # Хуки Mac с недействующим токеном (устройство отключено, хуки от прежнего подключения) — в журнал,
+        # не чаще раза в 10 минут с одного адреса: иначе «сеансов Mac нет» без единого следа.
+        if ($path -eq '/api/event' -or $path -like '/api/mac/*') {
+            if ($null -eq $Ctx['Unauthorized']) { $Ctx['Unauthorized'] = @{} }
+            $key = [string]$Request.Remote
+            $last = $Ctx['Unauthorized'][$key]
+            if ($null -eq $last -or ($Now - [datetime]$last).TotalMinutes -ge 10) {
+                $Ctx['Unauthorized'][$key] = $Now
+                Write-NotifierLog -Level WARN -Message "network: хук с $key отклонён — токен не действует (устройство отключено?). Переустановите хуки на этом устройстве." -DataRoot $Ctx.DataRoot
+            }
+        }
         return (New-JsonResponse 401 @{ error = 'unauthorized' })
     }
     $device = $auth.Device
@@ -517,6 +528,9 @@ function Invoke-NotifierHttpRequest {
         $entry = [string]$Request.Query['entry']
         $event = ConvertTo-NotifierEvent -HookKind $kind -Json $Request.Body -EntryPoint $entry -HostSessionId '' -DataRoot $Ctx.DataRoot
         if ($null -eq $event) { return (New-JsonResponse 400 @{ error = 'bad event' }) }
+        # Начало запроса (если включено «Показывать запрос») — как у сеансов ПК: иначе два сеанса Mac
+        # в одном проекте не отличить. Журнал Mac на ПК не читается (путь не локальный).
+        if ($kind -eq 'prompt') { Add-NotifierEventDetails -Event $event -Kind $kind -InputJson $Request.Body -DataRoot $Ctx.DataRoot -Config (Get-NotifierConfig -DataRoot $Ctx.DataRoot) }
         # Устройство меняет только свои сеансы: id сеансов ПК виден в /api/sessions, и без проверки
         # токен Mac мог бы перезаписать или «завершить» чужой сеанс.
         $owner = @(Get-NotifierSessions -DataRoot $Ctx.DataRoot) | Where-Object { [string]$_.session_id -eq [string]$event.session_id } | Select-Object -First 1
