@@ -136,6 +136,14 @@ namespace ClaudeNotifier.Ui {
                 if (Paused || away) { wasAway = true; return; }
                 if (wasAway) { wasAway = false; Invalidate(); return; }
                 // Двигаются только персонажи: перерисовываем их места, а не всю шторку (текст, кнопки, списки).
+                // Загрузка ПК: замер нужен, пока показатели видны (раньше всех выходов ниже — иначе при свечении
+                // замер не запрашивался и вместо цифр висели «—»); новый замер — перерисовать только их.
+                bool statsNew = false;
+                if (ShowStats && !Expanded) {
+                    SysStats.Want();
+                    int v = System.Threading.Thread.VolatileRead(ref SysStats.Version);
+                    if (v != statsShown) { statsShown = v; statsNew = true; }
+                }
                 if (!painted) { Invalidate(); return; }
                 // Внимание: свечение и бегущая строка меняются каждый кадр — свёрнутую (она маленькая) целиком;
                 // главный маскот вырос — свёрнутой нужна другая высота.
@@ -144,12 +152,7 @@ namespace ClaudeNotifier.Ui {
                     if (grown != grownShown) { grownShown = grown; RaiseCollapsedResize(); }
                     if (GlowItem() != null || PeekActive) { Invalidate(); return; }
                 }
-                // Загрузка ПК: замер нужен, пока показатели видны; новый замер — перерисовать только их.
-                if (ShowStats && !Expanded) {
-                    SysStats.Want();
-                    int v = System.Threading.Thread.VolatileRead(ref SysStats.Version);
-                    if (v != statsShown && statsRect.Width > 0) { statsShown = v; Invalidate(Rectangle.Inflate(statsRect, 2, 2)); }
-                }
+                if (statsNew) Invalidate(statsRect.Width > 0 ? Rectangle.Inflate(statsRect, 2, 2) : ClientRectangle);
                 foreach (RectangleF fr in faceRects) {
                     RectangleF big = RectangleF.Inflate(fr, fr.Width * 0.35f + 2, fr.Height * 0.25f + 2);
                     Invalidate(Rectangle.Intersect(ClientRectangle, Rectangle.Round(big)));
@@ -335,10 +338,11 @@ namespace ClaudeNotifier.Ui {
         }
 
         // Анимация персонажей: 30 кадров/с, пока кто-то работает или ждёт решения; иначе — только моргание.
-        void UpdateTimer() {
+        internal void UpdateTimer() {
             bool busy = false;
             foreach (NotchItem it in items) if (it.State == "working" || it.State == "permission" || it.State == "stalled") busy = true;
-            bool need = Visible && Motion.Enabled && items.Count > 0;
+            // Загрузка ПК обновляется и без сеансов, и при выключенных эффектах анимации — таймер нужен и тогда.
+            bool need = Visible && ((Motion.Enabled && items.Count > 0) || (ShowStats && !Expanded));
             busyInterval = busy ? (Expanded ? 33 : 50) : 100;   // свёрнутая — 20 кадров/с хватает
             int interval = Expanded && (DateTime.UtcNow - lastMove).TotalSeconds < 3 ? 25 : busyInterval;
             if (anim.Interval != interval) anim.Interval = interval;
@@ -1733,6 +1737,7 @@ namespace ClaudeNotifier.Ui {
             Post(delegate (NotchForm f) {
                 if (f.View.ShowStats == show) return;
                 f.View.ShowStats = show;
+                f.View.UpdateTimer();   // замер идёт из таймера шторки — запустить, даже если сеансов нет
                 f.SetExpanded(f.View.Expanded, null);
             });
         }

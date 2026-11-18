@@ -656,6 +656,31 @@ Describe 's_015_01 · шторка вверху экрана' {
         finally { $list.Dispose(); $notch.Dispose() }
     }
 
+    It 'загрузка ПК обновляется и когда горит свечение (сеанс ждёт вас), и когда сеансов нет' {
+        $away = [ClaudeNotifier.Ui.NotchView]::AwaySeconds
+        [ClaudeNotifier.Ui.NotchView]::AwaySeconds = 0   # простой ПК во время теста — не «вас нет»
+        $f = New-Object ClaudeNotifier.Ui.NotchForm
+        try {
+            $f.View.ShowStats = $true
+            $f.SetTargetSize($f.SizeFor(), $false)
+            $f.Show()
+            $pump = { param($sec) $end = [DateTime]::UtcNow.AddSeconds($sec); while ([DateTime]::UtcNow -lt $end) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 20 } }
+            # Без сеансов — таймер всё равно идёт (запускается при показе окна) и просит замер
+            $v0 = [ClaudeNotifier.Ui.SysStats]::Version
+            & $pump 3
+            ([ClaudeNotifier.Ui.SysStats]::Version -gt $v0) | Should Be $true
+            # Сеанс ждёт вас (горит свечение) — замеры не прекращаются
+            $it = New-Object ClaudeNotifier.Ui.NotchItem; $it.Id = 'p'; $it.State = 'permission'; $it.WaitSince = [DateTime]::UtcNow.Ticks
+            $f.View.SetItems([ClaudeNotifier.Ui.NotchItem[]]@($it))
+            & $pump 0.5
+            $v1 = [ClaudeNotifier.Ui.SysStats]::Version
+            & $pump 3
+            ([ClaudeNotifier.Ui.SysStats]::Version -gt $v1) | Should Be $true
+            ([ClaudeNotifier.Ui.SysStats]::MemUsedGb -gt 0) | Should Be $true
+        }
+        finally { $f.Dispose(); [ClaudeNotifier.Ui.NotchView]::AwaySeconds = $away }
+    }
+
     It 'внимание: «выдох» на новый запрос, сводка после отсутствия, рост и бегущая строка; выключается настройкой' {
         $now = [DateTime]::UtcNow
         $mk = { param($id, $state, $ago, $ask, $dev)
