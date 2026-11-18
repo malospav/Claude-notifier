@@ -186,7 +186,6 @@ namespace ClaudeNotifier.Ui {
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         static readonly uint ownPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
 
-        [DllImport("user32.dll", EntryPoint = "GetWindowLong")] static extern int GetWindowLongInt(IntPtr h, int index);
         [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, int flags, System.Text.StringBuilder name, ref int size);
@@ -216,20 +215,16 @@ namespace ClaudeNotifier.Ui {
             return name;
         }
 
-        // Окно, над которым шторка не поднимается: программа для скриншотов или записи экрана, либо окно «поверх
-        // всех» на весь монитор (оверлей выделения, полноэкранная игра или видео).
+        // Окно, над которым шторка не поднимается: только программа для скриншотов или записи экрана.
+        // Полноэкранные окна (игры, видео, презентации) шторка по-прежнему перекрывает.
         public static bool YieldsTo(IntPtr w, uint pid, Rectangle wr) {
-            if (Array.IndexOf(captureApps, ProcessName(pid)) >= 0) return true;
-            bool topmost = (GetWindowLongInt(w, -20 /* GWL_EXSTYLE */) & 0x8 /* WS_EX_TOPMOST */) != 0;
-            if (!topmost) return false;
-            Rectangle mon = Screen.FromRectangle(wr).Bounds;
-            return wr.Left <= mon.Left && wr.Top <= mon.Top && wr.Right >= mon.Right && wr.Bottom >= mon.Bottom;
+            return Array.IndexOf(captureApps, ProcessName(pid)) >= 0;
         }
 
         // Поднять окно на самый верх среди «поверх всех» (без фокуса). Возвращает true, если пришлось поднимать:
         // над окном было видимое окно, перекрывающее area (координаты экрана). Свои окна приложения (выпадающие
         // списки, меню, подсказки, диалоги) перекрытием не считаются: они должны оставаться над шторкой.
-        // Над скриншотом (оверлей «Ножниц», ShareX…) и над полноэкранным окном «поверх всех» шторка не поднимается.
+        // Над скриншотом (оверлей «Ножниц», ShareX…) шторка не поднимается; над полноэкранными окнами — поднимается.
         public static bool KeepOnTop(IntPtr h, Rectangle area) {
             try {
                 bool covered = false;
@@ -243,7 +238,7 @@ namespace ClaudeNotifier.Ui {
                     if (!GetWindowRect(w, out r)) continue;
                     Rectangle wr = Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
                     if (!wr.IntersectsWith(area)) continue;
-                    if (YieldsTo(w, pid, wr)) return false;   // скриншот или полноэкранное — пусть остаётся над шторкой
+                    if (YieldsTo(w, pid, wr)) return false;   // скриншот — пусть остаётся над шторкой
                     covered = true; break;
                 }
                 if (!covered) return false;
