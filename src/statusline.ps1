@@ -83,13 +83,14 @@ function Invoke-ChainedStatusLine {
     # в начало stdin дочернего процесса. На время запуска ставим UTF-8 без BOM.
     $oldInputEncoding = $null
     try { $oldInputEncoding = [Console]::InputEncoding; [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+    $p = $null
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
         if ($null -ne $oldInputEncoding) { try { [Console]::InputEncoding = $oldInputEncoding } catch { } }
+        $outTask = $p.StandardOutput.ReadToEndAsync()   # до записи: вывод не теряется, даже если stdin не прочитан
         $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes($StdinText)
-        $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-        $p.StandardInput.Close()
-        $outTask = $p.StandardOutput.ReadToEndAsync()
+        # Команда может выйти, не читая stdin (например, echo) — это не ошибка, её вывод всё равно нужен.
+        try { $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $p.StandardInput.Close() } catch [IO.IOException] { }
         [void]$p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit($script:ChainTimeoutMs)) {
             try { $p.Kill() } catch { }
@@ -102,6 +103,7 @@ function Invoke-ChainedStatusLine {
         Write-NotifierLog -Level WARN -Message "statusline: прежняя строка статуса не запустилась: $($_.Exception.Message)" -DataRoot $DataRoot
         return ''
     }
+    finally { if ($p) { $p.Dispose() } }
 }
 
 function Send-NotifierLimitEvents {

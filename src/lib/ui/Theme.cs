@@ -83,6 +83,15 @@ namespace ClaudeNotifier.Ui {
         public static Font Text(float size) { return Make("Segoe UI Variable Text", "Segoe UI", size, FontStyle.Regular); }
         public static Font Semibold(float size) { return Make("Segoe UI Variable Text Semibold", "Segoe UI Semibold", size, FontStyle.Regular); }
         public static Font Display(float size) { return Make("Segoe UI Variable Display Semib", "Segoe UI Semibold", size, FontStyle.Regular); }
+        // Заменить шрифт в поле, освободив прежний. Только для шрифтов, которые элемент создал сам (Fonts.*,
+        // IconButton.IconFont — каждый вызов даёт новый объект): иначе ApplyTheme копит GDI-шрифты.
+        public static Font Replace(Font old, Font next) {
+            if (old != null && !ReferenceEquals(old, next)) { try { old.Dispose(); } catch { } }
+            return next;
+        }
+        public static void Free(params Font[] fonts) {
+            foreach (Font f in fonts) if (f != null) { try { f.Dispose(); } catch { } }
+        }
     }
 
     // --- Движение ---

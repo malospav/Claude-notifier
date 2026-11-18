@@ -9,6 +9,8 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Net.Http
 $sh = Get-Command sh -ErrorAction SilentlyContinue
 if (-not $sh) { $git = Get-Command git -ErrorAction SilentlyContinue; if ($git) { $cand = Join-Path (Split-Path (Split-Path $git.Source)) 'usr\bin\sh.exe'; if (Test-Path $cand) { $sh = Get-Item $cand } } }
 $shPath = if ($sh) { if ($sh.Source) { $sh.Source } else { $sh.FullName } } else { $null }
+# sh.exe из Git for Windows ищет tr/cat только через PATH: без его папки в PATH hook.sh падает
+if ($shPath) { $shDir = Split-Path $shPath; if (($env:PATH -split ';') -notcontains $shDir) { $env:PATH = "$shDir;$env:PATH" } }
 $node = Get-Command node -ErrorAction SilentlyContinue
 
 function New-Ctx([string]$Root) {
@@ -21,6 +23,9 @@ function New-Ctx([string]$Root) {
 }
 
 function New-Req([string]$Method, [string]$Path, [string]$Body = '', [hashtable]$Headers = @{}, [hashtable]$Query = @{}) {
+    # API принимает POST только с JSON (как шлют страница и hook.sh); /login — форма.
+    $Headers = $Headers.Clone()
+    if ($Method -eq 'POST' -and $Path -ne '/login' -and -not $Headers.ContainsKey('content-type')) { $Headers['content-type'] = 'application/json; charset=utf-8' }
     return @{ Method = $Method; Path = $Path; Body = $Body; Headers = $Headers; Query = $Query; TooLarge = $false; Remote = '192.168.1.60' }
 }
 
@@ -93,6 +98,16 @@ Describe 's_007_01 · Devices.psm1' {
         Test-NotifierPairingPin -Pairing $q -Pin $q.Pin -Now $now | Should Be 'locked'
         $e = New-NotifierPairing -Now $now
         Test-NotifierPairingPin -Pairing $e -Pin $e.Pin -Now $now.AddMinutes(11) | Should Be 'expired'
+        # Попытки — по адресу: чужой хост, исчерпав свои, не блокирует ввод PIN с телефона
+        $r = New-NotifierPairing -Now $now
+        1..5 | ForEach-Object { [void](Test-NotifierPairingPin -Pairing $r -Pin 'x' -Now $now -Remote '10.0.0.66') }
+        Test-NotifierPairingPin -Pairing $r -Pin $r.Pin -Now $now -Remote '10.0.0.66' | Should Be 'locked'
+        Get-NotifierPairingAttemptsLeft -Pairing $r -Remote '10.0.0.7' | Should Be 5
+        Test-NotifierPairingPin -Pairing $r -Pin $r.Pin -Now $now -Remote '10.0.0.7' | Should Be 'ok'
+        # Общий предел на все адреса — 20 неверных попыток
+        $t = New-NotifierPairing -Now $now
+        1..20 | ForEach-Object { [void](Test-NotifierPairingPin -Pairing $t -Pin 'x' -Now $now -Remote "10.0.1.$_") }
+        Test-NotifierPairingPin -Pairing $t -Pin $t.Pin -Now $now -Remote '10.0.0.7' | Should Be 'locked'
         Test-NotifierPairingPin -Pairing $null -Pin '1' | Should Be 'none'
     }
 
@@ -184,10 +199,24 @@ Describe 's_007_01 · маршруты HTTP' {
         $script | Should Match "BASE='http://192\.168\.1\.50:47600'"
         $script | Should Match "CN_URL2='http://testpc\.local:47600'"
         $script.Contains("`r") | Should Be $false
-        $hookToken = [regex]::Match($script, "CN_TOKEN='([^']+)'").Groups[1].Value
+        $hookToken = [regex]::Match($script, "Authorization: Bearer ([A-Za-z0-9_-]+)'").Groups[1].Value
         $hookToken | Should Match '^[A-Za-z0-9_-]{43}$'
+        # В скрипте — SHA-256 файлов ровно в том виде, в каком их отдаёт сервер
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $hookBody = (Invoke-NotifierHttpRequest -Request (New-Req GET '/mac/hook.sh') -Ctx $ctx).Body
+        $expected = -join ($sha.ComputeHash((New-Object Text.UTF8Encoding $false).GetBytes($hookBody)) | ForEach-Object { $_.ToString('x2') })
+        $script | Should Match "fetch hook\.sh '$expected'"
+        $script | Should Not Match '__SHA_'
         (Invoke-NotifierHttpRequest -Request (New-Req GET $path) -Ctx $ctx).Body | Should Match 'устарела'
         $bearer = @{ authorization = "Bearer $hookToken" }
+        # Токен хуков не открывает остальное API: ни решения по разрешениям, ни ответы, ни список сеансов
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/decision' '{"id":"x","behavior":"allow"}' $bearer) -Ctx $ctx).Status | Should Be 403
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/reply' '{"session":"x","text":"y"}' $bearer) -Ctx $ctx).Status | Should Be 403
+        (Invoke-NotifierHttpRequest -Request (New-Req GET '/api/sessions' '' $bearer) -Ctx $ctx).Status | Should Be 403
+        # Cookie браузера: POST не-JSON и чужой Origin отклоняются
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; 'content-type' = 'text/plain' }) -Ctx $ctx).Status | Should Be 415
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; origin = 'http://evil.example'; host = '192.168.1.50:47600' }) -Ctx $ctx).Status | Should Be 403
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/install-link' '' @{ cookie = "cn_token=$cookie"; origin = 'http://192.168.1.50:47600'; host = '192.168.1.50:47600' }) -Ctx $ctx).Status | Should Be 200
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/hello' '{"name":"MacBook Pro Саши"}' $bearer) -Ctx $ctx).Status | Should Be 200
         $d = $ctx.Network.devices[0]
         $d.name | Should Be 'MacBook Pro Саши'
@@ -202,6 +231,12 @@ Describe 's_007_01 · маршруты HTTP' {
         $ctx.Events[0].origin | Should Be 'cli'
         $ctx.Events[0].title | Should Be "Готово $([char]0x00B7) site $([char]0x00B7) MacBook Pro Саши"
         (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{}' $bearer @{ kind = 'bogus' }) -Ctx $ctx).Status | Should Be 400
+        # Сеанс этого ПК (device '') токен Mac перехватить не может; свой сеанс Mac — обновляет
+        Save-NotifierSessions -Sessions @(
+            [pscustomobject]@{ session_id = 'pc1'; device = ''; state = 'working'; project = 'p' },
+            [pscustomobject]@{ session_id = 'm1'; device = $d.id; state = 'working'; project = 'site' }) -DataRoot $ctx.DataRoot
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{"session_id":"pc1"}' $bearer @{ kind = 'stop'; entry = 'cli' }) -Ctx $ctx).Status | Should Be 403
+        (Invoke-NotifierHttpRequest -Request (New-Req POST '/api/event' '{"session_id":"m1"}' $bearer @{ kind = 'stop'; entry = 'cli' }) -Ctx $ctx).Status | Should Be 200
     }
 
     It 'просроченная ссылка установки не выдаёт токен' {
@@ -267,11 +302,14 @@ Describe 's_007_01 · настоящий HTTP на localhost' {
         $root = Join-Path $TestDrive 'hooksh'
         $ctx = New-Ctx $root
         $a = Add-NotifierDevice -Network $ctx.Network -Name 'MacBook'
+        $hookToken = Add-NotifierDeviceToken -Device $a.Device -Hook
         $port = (Get-FreePort)
         $macHome = Join-Path $TestDrive 'machome'
         New-Item -ItemType Directory -Path (Join-Path $macHome '.claude-notifier') -Force | Out-Null
-        $envText = "CN_URL='http://localhost:$port'`nCN_URL2=''`nCN_TOKEN='$($a.Token)'`n"
-        [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\env'), $envText, (New-Object Text.UTF8Encoding $false))
+        # Как пишет install.sh: адреса в env, токен — в файле заголовка auth
+        $utf8 = New-Object Text.UTF8Encoding $false
+        [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\env'), "CN_URL='http://localhost:$port'`nCN_URL2=''`n", $utf8)
+        [IO.File]::WriteAllText((Join-Path $macHome '.claude-notifier\auth'), "Authorization: Bearer $hookToken`n", $utf8)
         $stdin = Join-Path $TestDrive 'stdin.json'
         [IO.File]::WriteAllText($stdin, '{"session_id":"mac-1","cwd":"/Users/a/dev/shop","message":"Разрешить?"}', (New-Object Text.UTF8Encoding $false))
         $q = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'

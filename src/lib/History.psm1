@@ -20,9 +20,16 @@ function Get-NotifierHistory {
     param([string]$DataRoot = (Get-NotifierDataRoot))
     $path = Get-HistoryPath $DataRoot
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+    # Файл пишут трей и focus-handler (замена через Move-Item): временная блокировка — не повреждение.
+    # Если файл так и не прочитался — исключение, иначе Add/Set перезаписали бы историю пустым списком.
+    $text = $null
+    for ($i = 0; $null -eq $text; $i++) {
+        try { $text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) }
+        catch [IO.IOException], [UnauthorizedAccessException] { if ($i -ge 2) { throw }; Start-Sleep -Milliseconds 50 }
+    }
     $parsed = $null
     $ok = $true
-    try { $parsed = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop }
+    try { $parsed = ConvertFrom-Json -InputObject $text -ErrorAction Stop }
     catch { $ok = $false }
     if ($ok -and $null -ne $parsed -and $parsed -isnot [array]) { $ok = $false }
     if (-not $ok) {
@@ -53,6 +60,24 @@ function Save-NotifierHistory {
     Move-Item -LiteralPath $tmp -Destination $path -Force
 }
 
+function Invoke-HistoryLocked([string]$DataRoot, [scriptblock]$Action) {
+    # history.json меняют трей (новое событие) и focus-handler (status=closed): чтение-изменение-запись под
+    # общим именованным мьютексом, иначе одна из двух записей теряется. Не дождались за 2 с — пишем как есть.
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    try { $key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes((Get-HistoryPath $DataRoot).ToLowerInvariant()))[0..7] | ForEach-Object { $_.ToString('x2') }) }
+    finally { $sha.Dispose() }
+    $mutex = New-Object System.Threading.Mutex($false, "Local\ClaudeNotifierHistory-$key")
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(2000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+        return (& $Action)
+    }
+    finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
 function Add-NotifierHistory {
     <#
     .SYNOPSIS
@@ -67,10 +92,12 @@ function Add-NotifierHistory {
         [string]$DataRoot = (Get-NotifierDataRoot),
         [int]$Max = $script:MaxItems
     )
-    $items = @(Get-NotifierHistory -DataRoot $DataRoot) + @($Event)
-    if ($items.Count -gt $Max) { $items = $items[($items.Count - $Max)..($items.Count - 1)] }
-    Save-NotifierHistory -Items $items -DataRoot $DataRoot
-    return $items.Count
+    return (Invoke-HistoryLocked $DataRoot {
+        $items = @(Get-NotifierHistory -DataRoot $DataRoot) + @($Event)
+        if ($items.Count -gt $Max) { $items = $items[($items.Count - $Max)..($items.Count - 1)] }
+        Save-NotifierHistory -Items $items -DataRoot $DataRoot
+        $items.Count
+    })
 }
 
 function Find-NotifierHistoryEvent {
@@ -94,16 +121,18 @@ function Set-NotifierHistoryStatus {
         [Parameter(Mandatory = $true)][string]$Status,
         [string]$DataRoot = (Get-NotifierDataRoot)
     )
-    $items = @(Get-NotifierHistory -DataRoot $DataRoot)
-    $found = $false
-    foreach ($x in $items) {
-        if ($x.PSObject.Properties['id'] -and [string]$x.id -eq $Id) {
-            $x | Add-Member -NotePropertyName status -NotePropertyValue $Status -Force
-            $found = $true
+    return (Invoke-HistoryLocked $DataRoot {
+        $items = @(Get-NotifierHistory -DataRoot $DataRoot)
+        $found = $false
+        foreach ($x in $items) {
+            if ($x.PSObject.Properties['id'] -and [string]$x.id -eq $Id) {
+                $x | Add-Member -NotePropertyName status -NotePropertyValue $Status -Force
+                $found = $true
+            }
         }
-    }
-    if ($found) { Save-NotifierHistory -Items $items -DataRoot $DataRoot }
-    return $found
+        if ($found) { Save-NotifierHistory -Items $items -DataRoot $DataRoot }
+        $found
+    })
 }
 
 function Format-NotifierHistoryItem {

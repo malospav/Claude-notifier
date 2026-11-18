@@ -49,6 +49,8 @@ namespace ClaudeNotifier.Ui {
 
         [ThreadStatic] static Scene scene;
         [ThreadStatic] static bool failed;
+        [ThreadStatic] static int failures;   // подряд неудачных рендеров: разовый сбой (нехватка памяти) не отключает 3D навсегда
+        const int MaxFailures = 3;
         public static bool Available { get { return !failed; } }
 
         public const double CamDist = 4.4, CamY = 0.22, Fov = 30;
@@ -243,12 +245,19 @@ namespace ClaudeNotifier.Ui {
                 s.Rtb.Clear();
                 s.Rtb.Render(s.View);
                 var bmp = new Bitmap(W, H, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-                var data = bmp.LockBits(new Rectangle(0, 0, W, H), System.Drawing.Imaging.ImageLockMode.WriteOnly, bmp.PixelFormat);
-                try { s.Rtb.CopyPixels(new System.Windows.Int32Rect(0, 0, W, H), data.Scan0, data.Stride * H, data.Stride); }
-                finally { bmp.UnlockBits(data); }
+                try {
+                    var data = bmp.LockBits(new Rectangle(0, 0, W, H), System.Drawing.Imaging.ImageLockMode.WriteOnly, bmp.PixelFormat);
+                    try { s.Rtb.CopyPixels(new System.Windows.Int32Rect(0, 0, W, H), data.Scan0, data.Stride * H, data.Stride); }
+                    finally { bmp.UnlockBits(data); }
+                } catch { bmp.Dispose(); throw; }
+                failures = 0;
                 return bmp;
             }
-            catch { failed = true; return null; }
+            catch {
+                // Несколько сбоев подряд — 3D на этом потоке выключается (рисуется плоская мордочка); разовый — нет.
+                if (++failures >= MaxFailures) failed = true;
+                return null;
+            }
         }
     }
 
@@ -306,9 +315,12 @@ namespace ClaudeNotifier.Ui {
             try {
                 if (diskFiles < 0) { System.IO.Directory.CreateDirectory(DiskDir); diskFiles = System.IO.Directory.GetFiles(DiskDir, "*.png").Length; }
                 if (diskFiles >= MaxDiskFiles) return;
-                string path = DiskPath(key), tmp = path + "." + System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
-                b.Save(tmp, ImageFormat.Png);
-                if (System.IO.File.Exists(path)) System.IO.File.Delete(tmp); else System.IO.File.Move(tmp, path);
+                // Уникальное имя: трей и шторка (разные потоки одного процесса) могут писать один кадр одновременно.
+                string path = DiskPath(key), tmp = path + "." + System.Diagnostics.Process.GetCurrentProcess().Id + "-" + System.Threading.Thread.CurrentThread.ManagedThreadId + "-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp";
+                try {
+                    b.Save(tmp, ImageFormat.Png);
+                    if (System.IO.File.Exists(path)) System.IO.File.Delete(tmp); else System.IO.File.Move(tmp, path);
+                } catch { try { System.IO.File.Delete(tmp); } catch { } throw; }
                 System.Threading.Interlocked.Increment(ref diskFiles);
                 if (notOnDisk != null) notOnDisk.Remove(key);
             } catch { }
@@ -338,7 +350,9 @@ namespace ClaudeNotifier.Ui {
         // Забыть кадры в памяти этого потока (диск не трогается) — для проверок.
         public static void ClearMemory() {
             if (lru != null) foreach (Entry e in lru) e.Bmp.Dispose();
+            if (temps != null) foreach (Bitmap b in temps.Values) b.Dispose();
             map = null; lru = null; last = null; bytes = 0; notOnDisk = null; diskFiles = -1;
+            temps = null; tempSig = null; acc = null; buf = null;
         }
 
         // Потолок новых 3D-кадров в секунду (каждый ~20 мс процессора): пока кадра нет — показывается ближайший

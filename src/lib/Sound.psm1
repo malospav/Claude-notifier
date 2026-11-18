@@ -59,8 +59,10 @@ function New-SoundPlayer([string]$Path) {
 function Invoke-SoundPlay([string]$Path) {
     # Точка подмены в тестах: реальное асинхронное воспроизведение.
     $player = New-SoundPlayer $Path
-    $player.Play()
+    $player.Play()   # новый звук всё равно прерывает прежний (PlaySound), так что прежний плеер можно освободить
+    $old = $script:CurrentPlayer
     $script:CurrentPlayer = $player
+    if ($old) { try { $old.Dispose() } catch { } }
 }
 
 function Invoke-NotifierSound {

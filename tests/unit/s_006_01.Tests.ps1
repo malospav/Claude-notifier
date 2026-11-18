@@ -182,6 +182,11 @@ Describe 's_006_01 · новые хуки' {
         (@(@($s.hooks.SessionEnd)[0].hooks)[0].args)[-1] | Should Match '/hook/sessionend$'
         (@(@($s.hooks.Stop)[0].hooks)[0].args)[-1] | Should Match '/hook/stop$'
         Test-NotifierHook $prompt | Should Be $true
+        # Секрет установки — в заголовке; недопустимые символы не попадают в аргументы curl
+        $s3 = [pscustomobject]@{}
+        Add-NotifierHooks -Settings $s3 -AppRoot 'C:\x\claude-notifier\app' -Secret 'Abc_123-xyz'
+        ((@(@($s3.hooks.Stop)[0].hooks)[0].args) -join ' ') | Should Match 'X-Claude-Notifier: Abc_123-xyz'
+        { Add-NotifierHooks -Settings ([pscustomobject]@{}) -AppRoot 'C:\x' -Secret "a`r`nX-Evil: 1" } | Should Throw
         # Нет curl.exe — всё через мост.
         $s2 = [pscustomobject]@{}
         Add-NotifierHooks -Settings $s2 -AppRoot 'C:\x\claude-notifier\app' -Curl 'C:\nope\curl.exe'

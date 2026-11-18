@@ -227,7 +227,7 @@
   });
 
   document.getElementById('mac-get').onclick = function () {
-    fetch('/api/install-link', { method: 'POST', credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) {
+    fetch('/api/install-link', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(function (r) { return r.json(); }).then(function (d) {
       document.getElementById('mac-cmd').value = d.command;
       document.getElementById('mac-step1').hidden = true;
       document.getElementById('mac-step2').hidden = false;

@@ -22,6 +22,13 @@ Describe 's_010_02 · подробности сеанса в хуке' {
         $cfg = Get-NotifierConfig -DataRoot $root; $cfg.showPrompt = $true
         Add-NotifierEventDetails -Event $ev2 -Kind prompt -InputJson $json -Config $cfg -DataRoot $root
         $ev2.prompt | Should Be 'Мой запрос'
+        # Сетевой путь к журналу (\\хост\… или //хост/… с Mac) не принимается: трей не должен к нему обращаться
+        foreach ($bad in '\\attacker\share\t.jsonl', '//attacker/share/t.jsonl', 'C:\\attacker\t.jsonl', (Join-Path $root 't.txt')) {
+            $evBad = [pscustomobject]@{ type = 'done' }
+            Add-NotifierEventDetails -Event $evBad -Kind stop -InputJson (ConvertTo-Json @{ session_id = 's'; transcript_path = $bad } -Compress) -Config $cfg -DataRoot $root
+            $null -eq $evBad.PSObject.Properties['transcript'] | Should Be $true
+            $null -eq $evBad.PSObject.Properties['stats'] | Should Be $true
+        }
         Add-NotifierEventDetails -Event $ev2 -Kind stop -InputJson '{bad' -Config $cfg -DataRoot $root
         (Get-Content (Join-Path $root 'log.txt') -Raw -Encoding UTF8) | Should Match 'подробности сеанса не собраны'
     }

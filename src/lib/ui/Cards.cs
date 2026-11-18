@@ -89,9 +89,11 @@ namespace ClaudeNotifier.Ui {
 
         public void ApplyTheme(Theme t) {
             theme = t;
-            fTitle = Fonts.Semibold(10.5f); fBody = Fonts.Text(9.5f); fSmall = Fonts.Text(9f); fHeader = Fonts.Semibold(9f);
-            fEmpty = Fonts.Semibold(12f); fButton = Fonts.Semibold(9f); fIcon = IconButton.IconFont(8f);
-            fMono = new Font("Cascadia Mono", 8.5f); if (fMono.Name != "Cascadia Mono") { fMono.Dispose(); fMono = new Font("Consolas", 9f); }
+            // Прежние шрифты освобождаются (каждый Fonts.* — новый объект), иначе смена темы их копит.
+            fTitle = Fonts.Replace(fTitle, Fonts.Semibold(10.5f)); fBody = Fonts.Replace(fBody, Fonts.Text(9.5f)); fSmall = Fonts.Replace(fSmall, Fonts.Text(9f)); fHeader = Fonts.Replace(fHeader, Fonts.Semibold(9f));
+            fEmpty = Fonts.Replace(fEmpty, Fonts.Semibold(12f)); fButton = Fonts.Replace(fButton, Fonts.Semibold(9f)); fIcon = Fonts.Replace(fIcon, IconButton.IconFont(8f));
+            Font mono = new Font("Cascadia Mono", 8.5f); if (mono.Name != "Cascadia Mono") { mono.Dispose(); mono = new Font("Consolas", 9f); }
+            fMono = Fonts.Replace(fMono, mono);
             BackColor = t.Window;
             Relayout();
             Invalidate();
@@ -379,7 +381,7 @@ namespace ClaudeNotifier.Ui {
 
         protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdatePulse(); }
         protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); Relayout(false); }   // окно тянут — без пружины
-        protected override void Dispose(bool disposing) { if (disposing) { pulseTimer.Dispose(); springTimer.Dispose(); } base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) { if (disposing) { pulseTimer.Dispose(); springTimer.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fHeader, fEmpty, fButton, fIcon, fMono); } base.Dispose(disposing); }
 
         int HitTest(Point p) {
             for (int i = 0; i < rows.Count; i++) { Rectangle r = rows[i]; r.Offset(0, -scroll); if (r.Contains(p)) return i; }

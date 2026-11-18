@@ -154,6 +154,24 @@ Describe 's_005_01 · иконка и выход' {
         $again | Should Not Be $null
         $again.ReleaseMutex(); $again.Dispose()
     }
+
+    It 'Clear-NotifierStaleFiles: старое состояние журналов и брошенные временные файлы удаляются, свежие — нет' {
+        $root = Join-Path $TestDrive 'stale'
+        $now = [DateTime]::Now
+        $files = @{
+            'stats\old.json' = 40; 'stats\new.json' = 2; 'activity\old.json' = 40; 'history.json.tmp-1-x' = 3
+            'cache\build.1.x.dll' = 3; 'cache\ClaudeNotifier.Ui.abc.dll' = 90; 'history.json' = 90
+        }
+        foreach ($k in $files.Keys) {
+            $p = Join-Path $root $k
+            New-Item -ItemType Directory -Path (Split-Path $p) -Force | Out-Null
+            Set-Content -LiteralPath $p -Value 'x'
+            (Get-Item -LiteralPath $p).LastWriteTime = $now.AddDays(-$files[$k])
+        }
+        Clear-NotifierStaleFiles -DataRoot $root -Now $now | Should Be 4
+        foreach ($gone in 'stats\old.json', 'activity\old.json', 'history.json.tmp-1-x', 'cache\build.1.x.dll') { Test-Path (Join-Path $root $gone) | Should Be $false }
+        foreach ($kept in 'stats\new.json', 'cache\ClaudeNotifier.Ui.abc.dll', 'history.json') { Test-Path (Join-Path $root $kept) | Should Be $true }
+    }
 }
 
 Describe 's_005_01 · Start-NotifierTray в текущем процессе' {

@@ -46,7 +46,13 @@ function Get-NotifierSessions {
     param([string]$DataRoot = (Get-NotifierDataRoot))
     $path = Get-SessionsPath $DataRoot
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
-    try { $parsed = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop }
+    $text = $null
+    for ($i = 0; $i -lt 3 -and $null -eq $text; $i++) {
+        try { $text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) }
+        catch [IO.IOException], [UnauthorizedAccessException] { Start-Sleep -Milliseconds 50 }
+    }
+    if ($null -eq $text) { return }   # временно занят — не путать с повреждением
+    try { $parsed = ConvertFrom-Json -InputObject $text -ErrorAction Stop }
     catch {
         try { Remove-Item -LiteralPath $path -Force } catch { }
         Write-NotifierLog -Level WARN -Message 'sessions: sessions.json повреждён и удалён' -DataRoot $DataRoot
@@ -254,11 +260,27 @@ $script:PrefsKeepDays = 30
 function Get-NotifierSessionPrefs {
     <# .SYNOPSIS Настройки сеансов: hashtable session_id → @{ title; pinned; muted; updated }. #>
     [CmdletBinding()]
-    param([string]$DataRoot = (Get-NotifierDataRoot))
+    param([string]$DataRoot = (Get-NotifierDataRoot), [switch]$ForWrite)
     $prefs = @{}
     $path = Join-Path $DataRoot 'session-prefs.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $prefs }
-    try { $obj = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop } catch { return $prefs }
+    # Занят другим процессом: чтение повторяется; не вышло — читателям пусто, а запись (-ForWrite) прерывается,
+    # иначе Set-NotifierSessionPref перезаписал бы файл и стёр все настройки.
+    $text = $null
+    for ($i = 0; $null -eq $text; $i++) {
+        try { $text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) }
+        catch [IO.IOException], [UnauthorizedAccessException] {
+            if ($i -ge 2) { if ($ForWrite) { throw }; return $prefs }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    try { $obj = ConvertFrom-Json -InputObject $text -ErrorAction Stop }
+    catch {
+        # Повреждён: сохранить копию для разбора, а не молча перезаписать при следующем изменении.
+        try { Move-Item -LiteralPath $path -Destination "$path.corrupt" -Force } catch { }
+        Write-NotifierLog -Level WARN -Message 'sessions: session-prefs.json повреждён, переименован в session-prefs.json.corrupt' -DataRoot $DataRoot
+        return $prefs
+    }
     if ($obj -isnot [System.Management.Automation.PSCustomObject]) { return $prefs }
     foreach ($p in $obj.PSObject.Properties) {
         $v = $p.Value
@@ -281,7 +303,7 @@ function Set-NotifierSessionPref {
         [string]$DataRoot = (Get-NotifierDataRoot),
         [datetime]$Now = [DateTime]::UtcNow
     )
-    $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot
+    $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot -ForWrite
     if (-not $prefs.ContainsKey($SessionId)) { $prefs[$SessionId] = @{ title = ''; pinned = $false; muted = $false; updated = '' } }
     if ($Name -eq 'title') { $prefs[$SessionId].title = ([string]$Value).Trim() } else { $prefs[$SessionId][$Name] = [bool]$Value }
     $prefs[$SessionId].updated = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
@@ -289,8 +311,9 @@ function Set-NotifierSessionPref {
     foreach ($k in @($prefs.Keys | Sort-Object)) {
         $e = $prefs[$k]
         if ($e.title -eq '' -and -not $e.pinned -and -not $e.muted) { continue }
+        # Старше 30 дней удаляются только переименования: закрепление и «без уведомлений» — явный выбор, он не истекает.
         $u = ConvertTo-UtcTime $e.updated
-        if ($null -ne $u -and ($Now - $u).TotalDays -gt $script:PrefsKeepDays) { continue }
+        if (-not $e.pinned -and -not $e.muted -and $null -ne $u -and ($Now - $u).TotalDays -gt $script:PrefsKeepDays) { continue }
         $out[$k] = [ordered]@{ title = $e.title; pinned = $e.pinned; muted = $e.muted; updated = $e.updated }
     }
     if (-not (Test-Path -LiteralPath $DataRoot)) { New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null }

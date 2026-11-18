@@ -80,8 +80,15 @@ function Test-NotifierLimits {
 
     $thresholds = @((Get-NotifierConfig -DataRoot $DataRoot).limitThresholds)
     $path = Join-Path $DataRoot 'limits.json'
+    # limits.json меняют строка статуса (каждый вызов) и трей: чтение-решение-запись под мьютексом,
+    # иначе оба увидят порог несработавшим и покажут одно уведомление дважды.
+    $mutex = New-Object System.Threading.Mutex($false, 'Local\ClaudeNotifierLimits')
+    $owned = $false
+    try { $owned = $mutex.WaitOne(2000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+    try {
     $state = Read-LimitsState $path $DataRoot
     $changed = $false
+    $results = @()
 
     foreach ($name in $script:Windows.Keys) {
         $w = Get-Prop $limits $name
@@ -101,7 +108,7 @@ function Test-NotifierLimits {
         $state[$name].fired = @(@($state[$name].fired) + $crossed | Sort-Object -Unique)
         $changed = $true
         $top = ($crossed | Measure-Object -Maximum).Maximum
-        [pscustomobject]@{
+        $results += [pscustomobject]@{
             Window    = $name
             Threshold = [int]$top
             Percent   = [double]$pct
@@ -112,7 +119,17 @@ function Test-NotifierLimits {
 
     if ($changed) {
         try { Save-LimitsState $state $path }
-        catch { Write-NotifierLog -Level ERROR -Message "limits: limits.json не записан: $($_.Exception.Message)" -DataRoot $DataRoot }
+        catch {
+            # Не записали «сработало» — не сообщаем: иначе каждое обновление строки статуса повторяло бы уведомление.
+            Write-NotifierLog -Level ERROR -Message "limits: limits.json не записан: $($_.Exception.Message)" -DataRoot $DataRoot
+            return
+        }
+    }
+    return $results
+    }
+    finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
     }
 }
 

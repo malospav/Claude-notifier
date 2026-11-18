@@ -142,6 +142,9 @@ function Add-NotifierEventDetails {
     try {
         $hook = ConvertFrom-Json -InputObject $InputJson -ErrorAction Stop
         $tp = $hook.PSObject.Properties['transcript_path']
+        # Только локальный журнал: путь вида \\хост\… (или //хост/… с Mac) заставил бы трей обратиться к чужому
+        # серверу и отдать ему NTLM-хэш. Журнал Claude Code — всегда .jsonl на локальном диске.
+        if ($tp -and -not ($tp.Value -is [string] -and $tp.Value -match '^[A-Za-z]:[\\/](?![\\/])' -and $tp.Value -match '\.jsonl$')) { $tp = $null }
         # Путь к журналу — трею: он сам обновляет заполненность контекста, пока сеанс работает.
         if ($tp -and $tp.Value -is [string] -and $tp.Value -ne '') { $Event | Add-Member -NotePropertyName transcript -NotePropertyValue $tp.Value -Force }
         if ($Kind -eq 'stop' -or $Kind -eq 'stopfailure') {

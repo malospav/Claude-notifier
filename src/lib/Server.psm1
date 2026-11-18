@@ -22,13 +22,41 @@ $script:StaticFiles = @{
     '/mac/uninstall.sh' = @('mac\uninstall.sh', 'text/plain; charset=utf-8')
 }
 
+# Тело запроса читается здесь, в фоновом runspace, с жёстким сроком: медленный или зависший клиент
+# (Content-Length есть, байтов нет) не должен блокировать UI-поток трея. Не уложился — соединение обрывается.
 $script:AcceptLoop = {
-    param($Listener, $Queue)
+    param($Listener, $Queue, [int]$MaxBody, [int]$BodyMs)
     while ($Listener.IsListening) {
         try { $ctx = $Listener.GetContext() } catch { break }
-        $Queue.Enqueue($ctx)
+        $item = @{ Context = $ctx; Body = ''; TooLarge = $false }
+        try {
+            $r = $ctx.Request
+            if ($r.HasEntityBody) {
+                if ($r.ContentLength64 -gt $MaxBody) { $item.TooLarge = $true }
+                else {
+                    $buffer = New-Object byte[] ($MaxBody + 1)
+                    $total = 0
+                    $deadline = [DateTime]::UtcNow.AddMilliseconds($BodyMs)
+                    $timedOut = $false
+                    while ($total -le $MaxBody) {
+                        $left = [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds
+                        if ($left -le 0) { $timedOut = $true; break }
+                        $task = $r.InputStream.ReadAsync($buffer, $total, $buffer.Length - $total)
+                        if (-not $task.Wait($left)) { $timedOut = $true; break }
+                        if ($task.Result -le 0) { break }
+                        $total += $task.Result
+                    }
+                    if ($timedOut) { try { $ctx.Response.Abort() } catch { }; continue }
+                    if ($total -gt $MaxBody) { $item.TooLarge = $true }
+                    else { $item.Body = [Text.Encoding]::UTF8.GetString($buffer, 0, $total) }
+                }
+            }
+        }
+        catch { try { $ctx.Response.Abort() } catch { }; continue }
+        $Queue.Enqueue([pscustomobject]$item)
     }
 }
+$script:BodyTimeoutMs = 3000
 
 function Get-NotifierHttpPrefix {
     <# .SYNOPSIS Префикс HttpListener для всех адресов ПК: http://+:<port>/ (нужна резервация URL, setup-network.ps1). #>
@@ -60,7 +88,7 @@ function Start-NotifierHttpServer {
     $runspace.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $runspace
-    [void]$ps.AddScript($script:AcceptLoop.ToString()).AddArgument($listener).AddArgument($Queue)
+    [void]$ps.AddScript($script:AcceptLoop.ToString()).AddArgument($listener).AddArgument($Queue).AddArgument($script:MaxBodyBytes).AddArgument($script:BodyTimeoutMs)
     $handle = $ps.BeginInvoke()
     return [pscustomobject]@{ Prefix = $Prefix; Listener = $listener; PowerShell = $ps; Runspace = $runspace; Handle = $handle }
 }
@@ -86,6 +114,9 @@ function ConvertFrom-NotifierHttpContext {
     Заголовки — с ключами в нижнем регистре. Тело — UTF-8, не больше MaxBodyBytes.
     #>
     param([Parameter(Mandatory = $true)]$Context)
+    # Из очереди сервера приходит обёртка { Context; Body; TooLarge }: тело уже прочитано фоновым runspace.
+    $pre = $null
+    if ($Context -isnot [System.Net.HttpListenerContext] -and $Context.PSObject.Properties['Context']) { $pre = $Context; $Context = $pre.Context }
     $r = $Context.Request
     $headers = @{}
     foreach ($k in $r.Headers.AllKeys) { $headers[$k.ToLowerInvariant()] = $r.Headers[$k] }
@@ -93,7 +124,8 @@ function ConvertFrom-NotifierHttpContext {
     foreach ($k in $r.QueryString.AllKeys) { if ($k) { $query[$k] = $r.QueryString[$k] } }
     $body = ''
     $tooLarge = $false
-    if ($r.HasEntityBody) {
+    if ($pre) { $body = [string]$pre.Body; $tooLarge = [bool]$pre.TooLarge }
+    elseif ($r.HasEntityBody) {
         if ($r.ContentLength64 -gt $script:MaxBodyBytes) { $tooLarge = $true }
         else {
             $buffer = New-Object byte[] ($script:MaxBodyBytes + 1)
@@ -121,6 +153,7 @@ function ConvertFrom-NotifierHttpContext {
 function Write-NotifierHttpResponse {
     <# .SYNOPSIS Отправляет ответ Invoke-NotifierHttpRequest в HttpListenerContext и закрывает его. #>
     param([Parameter(Mandatory = $true)]$Context, [Parameter(Mandatory = $true)][hashtable]$Response)
+    if ($Context -isnot [System.Net.HttpListenerContext] -and $Context.PSObject.Properties['Context']) { $Context = $Context.Context }
     $resp = $Context.Response
     try {
         $resp.StatusCode = $Response.Status
@@ -177,6 +210,17 @@ function Get-WebTemplate([string]$Name, [hashtable]$Values) {
     $text = [IO.File]::ReadAllText((Join-Path $script:AppRoot "web\$Name"), [Text.Encoding]::UTF8).Replace("`r`n", "`n")
     foreach ($k in $Values.Keys) { $text = $text.Replace("__$($k)__", [string]$Values[$k]) }
     return $text
+}
+
+function Get-StaticText([string]$Path) {
+    # Файлы для Mac — с LF, как их получит Mac (по нему же считается SHA-256 для install.sh).
+    return [IO.File]::ReadAllText((Join-Path $script:AppRoot $script:StaticFiles[$Path][0]), [Text.Encoding]::UTF8).Replace("`r`n", "`n")
+}
+
+function Get-StaticSha256([string]$Path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $bytes = $sha.ComputeHash((New-Object System.Text.UTF8Encoding $false).GetBytes((Get-StaticText $Path))) } finally { $sha.Dispose() }
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
 }
 
 function Get-NotifierServerBaseUrl([hashtable]$Ctx) {
@@ -272,8 +316,18 @@ function Invoke-NotifierHttpRequest {
     $method = [string]$Request.Method
 
     if ($method -eq 'GET' -and $script:StaticFiles.ContainsKey($path)) {
-        $f = $script:StaticFiles[$path]
-        return (New-HttpResponse 200 ([IO.File]::ReadAllText((Join-Path $script:AppRoot $f[0]), [Text.Encoding]::UTF8).Replace("`r`n", "`n")) $f[1])
+        return (New-HttpResponse 200 (Get-StaticText $path) $script:StaticFiles[$path][1])
+    }
+
+    # Защита от подделки запросов со сторонних страниц: Origin, если браузер его прислал, должен совпадать с Host.
+    if ($method -eq 'POST') {
+        $origin = [string]$Request.Headers['origin']
+        $hostHeader = [string]$Request.Headers['host']
+        if ($origin -ne '' -and $hostHeader -ne '') {
+            $originHost = ''
+            try { $originHost = ([Uri]$origin).Authority } catch { }
+            if ($originHost -ne $hostHeader) { return (New-JsonResponse 403 @{ error = 'bad origin' }) }
+        }
     }
 
     if ($method -eq 'GET' -and $path -match '^/install/([A-Za-z0-9_-]{8,64})$') {
@@ -285,17 +339,21 @@ function Invoke-NotifierHttpRequest {
         if ($null -eq $device) {
             return (New-HttpResponse 200 "echo 'claude-notifier: ссылка установки устарела. Откройте страницу на этом Mac и нажмите «Установить» ещё раз.' >&2`nexit 1`n")
         }
-        $token = Add-NotifierDeviceToken -Device $device
+        $token = Add-NotifierDeviceToken -Device $device -Hook
         $Ctx.NetworkDirty = $true
         $base = Get-NotifierServerBaseUrl $Ctx
         $alt = "http://$($Ctx.PcName.ToLowerInvariant()).local:$($Ctx.Network.port)"
-        $script = Get-WebTemplate 'install.sh' @{ URL = $base; URL2 = $alt; TOKEN = $token; PCNAME = $Ctx.PcName }
+        # SHA-256 файлов: install.sh сверяет скачанное и не ставит подменённые по дороге скрипты.
+        $script = Get-WebTemplate 'install.sh' @{
+            URL = $base; URL2 = $alt; TOKEN = $token; PCNAME = $Ctx.PcName
+            SHA_HOOK = (Get-StaticSha256 '/mac/hook.sh'); SHA_SETTINGS = (Get-StaticSha256 '/mac/settings.js'); SHA_UNINSTALL = (Get-StaticSha256 '/mac/uninstall.sh')
+        }
         Write-NotifierLog -Level INFO -Message "network: скрипт установки выдан устройству $($device.id)" -DataRoot $Ctx.DataRoot
         return (New-HttpResponse 200 $script)
     }
 
     if ($method -eq 'POST' -and $path -eq '/login') {
-        $result = Test-NotifierPairingPin -Pairing $Ctx.Pairing -Pin (Get-FormValue $Request.Body 'pin') -Now $Now
+        $result = Test-NotifierPairingPin -Pairing $Ctx.Pairing -Pin (Get-FormValue $Request.Body 'pin') -Now $Now -Remote ([string]$Request.Remote)
         switch ($result) {
             'ok' {
                 $name = Get-NotifierDeviceNameFromAgent ([string]$Request.Headers['user-agent'])
@@ -308,15 +366,24 @@ function Invoke-NotifierHttpRequest {
                 [void]$resp.Headers.Add(@('Location', '/'))
                 return $resp
             }
-            'bad' { return (Get-LoginPage $Ctx "Неверный код. Осталось попыток: $(5 - $Ctx.Pairing.Attempts)." 401) }
+            'bad' { return (Get-LoginPage $Ctx "Неверный код. Осталось попыток: $(Get-NotifierPairingAttemptsLeft -Pairing $Ctx.Pairing -Remote ([string]$Request.Remote))." 401) }
             default { return (Get-LoginPage $Ctx 'Код недействителен. На ПК нажмите «Подключить устройство» и введите новый код.' 401) }
         }
     }
 
-    $device = Find-NotifierDeviceByToken -Network $Ctx.Network -Token (Get-RequestToken $Request)
-    if ($null -eq $device) {
+    $auth = Resolve-NotifierToken -Network $Ctx.Network -Token (Get-RequestToken $Request)
+    if ($null -eq $auth) {
         if ($method -eq 'GET' -and $path -eq '/') { return (Get-LoginPage $Ctx '') }
         return (New-JsonResponse 401 @{ error = 'unauthorized' })
+    }
+    $device = $auth.Device
+    # Токен хуков Mac ходит по сети открытым текстом: ему — только отправка событий и знакомство.
+    if ($auth.Scope -eq 'hook' -and -not ($method -eq 'POST' -and ($path -eq '/api/event' -or $path -eq '/api/hello'))) {
+        return (New-JsonResponse 403 @{ error = 'hook token' })
+    }
+    # POST от браузера — только JSON: такой запрос со сторонней страницы требует CORS-проверки и не пройдёт.
+    if ($method -eq 'POST' -and ([string]$Request.Headers['content-type']) -notmatch '^application/json') {
+        return (New-JsonResponse 415 @{ error = 'json only' })
     }
     $device.last_seen = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
     $Ctx.NetworkDirty = $true
@@ -375,6 +442,12 @@ function Invoke-NotifierHttpRequest {
         $entry = [string]$Request.Query['entry']
         $event = ConvertTo-NotifierEvent -HookKind $kind -Json $Request.Body -EntryPoint $entry -HostSessionId '' -DataRoot $Ctx.DataRoot
         if ($null -eq $event) { return (New-JsonResponse 400 @{ error = 'bad event' }) }
+        # Устройство меняет только свои сеансы: id сеансов ПК виден в /api/sessions, и без проверки
+        # токен Mac мог бы перезаписать или «завершить» чужой сеанс.
+        $owner = @(Get-NotifierSessions -DataRoot $Ctx.DataRoot) | Where-Object { [string]$_.session_id -eq [string]$event.session_id } | Select-Object -First 1
+        $ownerDevice = ''
+        if ($owner -and $owner.PSObject.Properties['device']) { $ownerDevice = [string]$owner.device }
+        if ($owner -and $ownerDevice -ne [string]$device.id) { return (New-JsonResponse 403 @{ error = 'foreign session' }) }
         $event | Add-Member -NotePropertyName device -NotePropertyValue ([string]$device.id) -Force
         $event.title = "$($event.title) $([char]0x00B7) $($device.name)"
         [void]$Ctx.Events.Add($event)

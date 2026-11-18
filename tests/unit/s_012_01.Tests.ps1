@@ -247,18 +247,25 @@ Describe 's_012_01 · контекст, подробности, напомина
         @(Get-NotifierSessions -DataRoot $script:TrayDataRoot | Where-Object { $_.session_id -eq 'muted' }).Count | Should Be 1   # статус всё равно обновлён
     }
 
-    It 'настройки сеанса: имя, закрепление, без уведомлений; пустые записи и записи старше 30 дней удаляются' {
+    It 'настройки сеанса: имя, закрепление, без уведомлений; пустые записи и старые переименования удаляются' {
         $root = Join-Path $TestDrive 'prefs'
         Set-NotifierSessionPref -SessionId 'a' -Name title -Value '  Магазин  ' -DataRoot $root
         Set-NotifierSessionPref -SessionId 'a' -Name pinned -Value $true -DataRoot $root
-        Set-NotifierSessionPref -SessionId 'b' -Name muted -Value $true -DataRoot $root -Now ([DateTime]::UtcNow.AddDays(-40))
+        Set-NotifierSessionPref -SessionId 'b' -Name title -Value 'Старый' -DataRoot $root -Now ([DateTime]::UtcNow.AddDays(-40))
+        Set-NotifierSessionPref -SessionId 'm' -Name muted -Value $true -DataRoot $root -Now ([DateTime]::UtcNow.AddDays(-40))
         $p = Get-NotifierSessionPrefs -DataRoot $root
         $p['a'].title | Should Be 'Магазин'
         $p['a'].pinned | Should Be $true
-        $p['b'].muted | Should Be $true
+        $p['b'].title | Should Be 'Старый'
         Set-NotifierSessionPref -SessionId 'c' -Name muted -Value $true -DataRoot $root
         $p = Get-NotifierSessionPrefs -DataRoot $root
-        $p.ContainsKey('b') | Should Be $false
+        $p.ContainsKey('b') | Should Be $false   # переименование старше 30 дней — удалено
+        $p['m'].muted | Should Be $true          # «без уведомлений» не истекает
+        # Повреждённый файл не стирается молча: копия .corrupt и запись в журнал
+        [IO.File]::WriteAllText((Join-Path $root 'session-prefs.json'), '{bad', [Text.Encoding]::UTF8)
+        (Get-NotifierSessionPrefs -DataRoot $root).Count | Should Be 0
+        Test-Path (Join-Path $root 'session-prefs.json.corrupt') | Should Be $true
+        Set-NotifierSessionPref -SessionId 'c' -Name muted -Value $true -DataRoot $root
         Set-NotifierSessionPref -SessionId 'c' -Name muted -Value $false -DataRoot $root
         (Get-NotifierSessionPrefs -DataRoot $root).ContainsKey('c') | Should Be $false
         Get-NotifierSessionPrefs -DataRoot (Join-Path $TestDrive 'нет') | Should BeOfType [hashtable]

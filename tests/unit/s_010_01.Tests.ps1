@@ -256,7 +256,7 @@ Describe 's_010_01 · веб-API ответов' {
         New-Item -ItemType Directory $root -Force | Out-Null
         $ctx = @{ Network = (Get-NotifierNetwork -DataRoot $root); Pairing = $null; InstallCodes = @{}; Events = (New-Object System.Collections.ArrayList); NetworkDirty = $false; Paired = $null; DataRoot = $root; Address = '192.168.1.5'; PcName = 'PC' }
         $tok = (Add-NotifierDevice -Network $ctx.Network -Name 'iPhone').Token
-        $h = @{ cookie = "cn_token=$tok" }
+        $h = @{ cookie = "cn_token=$tok"; 'content-type' = 'application/json' }
         $now = [DateTime]::UtcNow.ToString('o')
         Save-NotifierSessions -DataRoot $root -Sessions @(
             [pscustomobject]@{ session_id = 'p'; project = 'proj'; origin = 'desktop'; device = ''; state = 'permission'; since = $now; updated = $now; preview = ''; window = $null },

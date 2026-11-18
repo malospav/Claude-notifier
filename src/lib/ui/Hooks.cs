@@ -39,6 +39,19 @@ namespace ClaudeNotifier.Ui {
         public static string Error { get; private set; }
         public static long Accepted, Rejected;
         public static bool Running { get { return listener != null; } }
+        // Значение X-Claude-Notifier, которое ставит установщик (hook-secret). Пусто — старая установка: «hook».
+        public static volatile string Secret = "";
+        // Сколько соединений обрабатывается одновременно: поток медленных соединений не займёт весь пул потоков.
+        const int MaxActive = 16;
+        static int active;
+
+        static bool SecretMatches(string got) {
+            string want = string.IsNullOrEmpty(Secret) ? "hook" : Secret;
+            if (got == null || got.Length != want.Length) return false;
+            int diff = 0;
+            for (int i = 0; i < want.Length; i++) diff |= got[i] ^ want[i];   // сравнение за постоянное время
+            return diff == 0;
+        }
 
         public static bool Start(int port) {
             if (listener != null) return true;
@@ -65,8 +78,15 @@ namespace ClaudeNotifier.Ui {
                 TcpListener l = listener;
                 if (l == null) return;
                 TcpClient c;
-                try { c = l.AcceptTcpClient(); } catch { return; }
-                ThreadPool.QueueUserWorkItem(delegate { Handle(c); });
+                // Остановка — listener уже null или заменён; иначе сбой временный: приём продолжается,
+                // а не умирает молча до перезапуска трея.
+                try { c = l.AcceptTcpClient(); } catch { if (listener != l) return; Thread.Sleep(200); continue; }
+                if (Interlocked.Increment(ref active) > MaxActive) {
+                    Interlocked.Decrement(ref active); Interlocked.Increment(ref Rejected);
+                    try { c.Close(); } catch { }
+                    continue;
+                }
+                ThreadPool.QueueUserWorkItem(delegate { try { Handle(c); } finally { Interlocked.Decrement(ref active); } });
             }
         }
 
@@ -87,7 +107,7 @@ namespace ClaudeNotifier.Ui {
         static void Handle(TcpClient c) {
             using (c) {
                 try {
-                    c.ReceiveTimeout = 5000; c.SendTimeout = 5000;
+                    c.ReceiveTimeout = 3000; c.SendTimeout = 3000;
                     NetworkStream s = c.GetStream();
                     byte[] buf = new byte[16 * 1024];
                     int n = 0, headEnd = -1;
@@ -107,8 +127,8 @@ namespace ClaudeNotifier.Ui {
                         if (p > 0) h[lines[i].Substring(0, p).Trim()] = lines[i].Substring(p + 1).Trim();
                     }
                     string v;
-                    // Только наш curl: свой заголовок есть, Origin (браузер) — нет.
-                    if (rl.Length < 2 || rl[0] != "POST" || !h.TryGetValue("X-Claude-Notifier", out v) || v != "hook" || h.ContainsKey("Origin")) {
+                    // Только наш curl: заголовок с секретом установки есть, Origin (браузер) — нет.
+                    if (rl.Length < 2 || rl[0] != "POST" || !h.TryGetValue("X-Claude-Notifier", out v) || !SecretMatches(v) || h.ContainsKey("Origin")) {
                         Interlocked.Increment(ref Rejected); Reply(s, "403 Forbidden"); return;
                     }
                     string path = rl[1];

@@ -111,7 +111,9 @@ function Set-NotifierNotchPlacement {
     $key = "$($screen.Bounds)|$($Config.notch.position)"
     if (-not $Force -and $key -eq $script:NotchPlacement) { return }
     $script:NotchPlacement = $key
-    [ClaudeNotifier.Ui.NotchHost]::Place($screen.Bounds, [string]$Config.notch.position, [ClaudeNotifier.Ui.Theme]::Create($true).S(24))
+    # Отступ от края — в том же масштабе DPI, что и сама шторка (NotchForm.ApplyDpi); при 100 % — 24 пикселя.
+    $scale = [ClaudeNotifier.Ui.NotchForm]::ScreenScale()
+    [ClaudeNotifier.Ui.NotchHost]::Place($screen.Bounds, [string]$Config.notch.position, [int][Math]::Round(24 * $scale))
 }
 
 function Open-NotifierNotch {

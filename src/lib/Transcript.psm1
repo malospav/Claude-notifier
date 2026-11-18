@@ -31,6 +31,7 @@ $script:EditTools = @('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 $script:ShellTools = @('Bash', 'PowerShell')
 $script:MaxFiles = 500
 $script:KeepCommands = 5
+$script:ChunkBytes = 4MB   # сколько журнала читается в память за раз
 
 function New-TranscriptState {
     return [ordered]@{ v = 4; offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
@@ -237,22 +238,34 @@ function Get-NotifierTranscriptStats {
     try {
         if ($fs.Length -lt $state.offset) { $state = New-TranscriptState; $state.sub = $isSub; $state.dirKey = $dirKey }
         [void]$fs.Seek($state.offset, [IO.SeekOrigin]::Begin)
-        $remaining = $fs.Length - $state.offset
-        if ($remaining -gt 0) {
-            $buffer = New-Object byte[] $remaining
+        # Кусками по 4 МБ: первый проход по большому журналу не выделяет память под весь хвост сразу.
+        while ($fs.Length - $state.offset -gt 0) {
+            $want = [int][Math]::Min($fs.Length - $state.offset, $script:ChunkBytes)
+            [void]$fs.Seek($state.offset, [IO.SeekOrigin]::Begin)
+            $buffer = New-Object byte[] $want
             $read = 0
-            while ($read -lt $remaining) { $n = $fs.Read($buffer, $read, $remaining - $read); if ($n -le 0) { break }; $read += $n }
+            while ($read -lt $want) { $n = $fs.Read($buffer, $read, $want - $read); if ($n -le 0) { break }; $read += $n }
+            if ($read -le 0) { break }
             # Только целые строки: последняя может дописываться прямо сейчас.
             $end = [Array]::LastIndexOf($buffer, [byte]10, $read - 1)
-            if ($end -ge 0) {
-                $text = [Text.Encoding]::UTF8.GetString($buffer, 0, $end + 1)
-                foreach ($line in $text.Split("`n")) { if ($line.Length -gt 0) { Update-TranscriptState -State $state -Line $line } }
-                $state.offset += $end + 1
+            if ($end -lt 0) {
+                if ($read -eq $script:ChunkBytes) { $state.offset += $read; continue }   # строка длиннее куска — пропустить
+                break
             }
+            $text = [Text.Encoding]::UTF8.GetString($buffer, 0, $end + 1)
+            # Сбой на одной строке не останавливает разбор: иначе смещение не сдвинется и она будет читаться вечно.
+            foreach ($line in $text.Split("`n")) { if ($line.Length -gt 0) { try { Update-TranscriptState -State $state -Line $line } catch { } } }
+            $state.offset += $end + 1
         }
     }
     finally { $fs.Dispose() }
-    try { [IO.File]::WriteAllText($statePath, (ConvertTo-Json -InputObject $state -Compress), (New-Object System.Text.UTF8Encoding $false)) } catch { }
+    # Атомарно (временный файл + замена): оборванная запись не заставит перечитывать журнал с начала.
+    try {
+        $tmp = "$statePath.tmp-$PID"
+        [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $state -Compress), (New-Object System.Text.UTF8Encoding $false))
+        Move-Item -LiteralPath $tmp -Destination $statePath -Force
+    }
+    catch { }
     $window = Get-NotifierContextWindow -Model $state.model -MaxSeen $state.maxCtx
     $top = @($state.toolCounts.GetEnumerator() | Sort-Object -Property @{ Expression = { $_.Value }; Descending = $true }, @{ Expression = { $_.Key } } |
         Select-Object -First 3 | ForEach-Object { "$($_.Key -replace '^mcp__.*__', '') $($_.Value)" })

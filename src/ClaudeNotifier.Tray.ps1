@@ -349,17 +349,23 @@ function Stop-NotifierTray {
     Пункт «Выход»: останавливает таймер и сервер pipe, убирает иконку, освобождает мьютекс.
     #>
     param([Parameter(Mandatory = $true)][hashtable]$State)
-    if ($State.Timer) { $State.Timer.Stop(); $State.Timer.Dispose() }
-    if ($State.Server) { [void](Stop-NotifierPipeServer -Server $State.Server) }
-    try { if ('ClaudeNotifier.Ui.HookServer' -as [type]) { [ClaudeNotifier.Ui.HookServer]::Stop() } } catch { }
-    if ($script:HotKey) { try { $script:HotKey.Dispose() } catch { }; $script:HotKey = $null }
-    try { if ('ClaudeNotifier.Ui.NotchHost' -as [type]) { [ClaudeNotifier.Ui.NotchHost]::Stop() } } catch { }
-    try { Stop-NotifierNetServer } catch { }
-    if ($script:ConnectForm -and -not $script:ConnectForm.IsDisposed) { $script:ConnectForm.Dispose() }
-    if ($script:SessionsForm -and -not $script:SessionsForm.IsDisposed) { $script:SessionsForm.Dispose() }
-    if ($State.Icon) { $State.Icon.Visible = $false; $State.Icon.Dispose() }
-    if ($State.Mutex) { $State.Mutex.ReleaseMutex(); $State.Mutex.Dispose() }
-    $State.Stopped = $true
+    # Каждый шаг — сам по себе: сбой одного не должен оставить «призрак» иконки в трее и занятый мьютекс.
+    try {
+        try { if ($State.Timer) { $State.Timer.Stop(); $State.Timer.Dispose() } } catch { }
+        try { if ($State.Server) { [void](Stop-NotifierPipeServer -Server $State.Server) } } catch { }
+        try { if ('ClaudeNotifier.Ui.HookServer' -as [type]) { [ClaudeNotifier.Ui.HookServer]::Stop() } } catch { }
+        if ($script:HotKey) { try { $script:HotKey.Dispose() } catch { }; $script:HotKey = $null }
+        if ($script:TrayClickTimer) { try { $script:TrayClickTimer.Stop(); $script:TrayClickTimer.Dispose() } catch { }; $script:TrayClickTimer = $null }
+        try { if ('ClaudeNotifier.Ui.NotchHost' -as [type]) { [ClaudeNotifier.Ui.NotchHost]::Stop() } } catch { }
+        try { Stop-NotifierNetServer } catch { }
+        try { if ($script:ConnectForm -and -not $script:ConnectForm.IsDisposed) { $script:ConnectForm.Dispose() } } catch { }
+        try { if ($script:SessionsForm -and -not $script:SessionsForm.IsDisposed) { $script:SessionsForm.Dispose() } } catch { }
+    }
+    finally {
+        try { if ($State.Icon) { $State.Icon.Visible = $false; $State.Icon.Dispose() } } catch { }
+        try { if ($State.Mutex) { $State.Mutex.ReleaseMutex(); $State.Mutex.Dispose() } } catch { }
+        $State.Stopped = $true
+    }
 }
 
 function New-NotifierTrayIcon {
@@ -451,11 +457,42 @@ function Start-NotifierHookServer {
     <# .SYNOPSIS Приём хуков от curl на 127.0.0.1:<порт>. Ошибка (порт занят) — в журнал; мост SessionStart работает и так. #>
     param([string]$DataRoot = $script:TrayDataRoot)
     try {
+        [ClaudeNotifier.Ui.HookServer]::Secret = Get-NotifierHookSecret -DataRoot $DataRoot   # '' — старая установка без секрета
         if ([ClaudeNotifier.Ui.HookServer]::Start((Get-NotifierHookPort))) { return $true }
         Write-NotifierLog -Level ERROR -Message "tray: приём хуков на порту $(Get-NotifierHookPort) не запущен: $([ClaudeNotifier.Ui.HookServer]::Error)" -DataRoot $DataRoot
     }
     catch { Write-NotifierLog -Level ERROR -Message "tray: приём хуков: $($_.Exception.Message)" -DataRoot $DataRoot }
     return $false
+}
+
+function Clear-NotifierStaleFiles {
+    <#
+    .SYNOPSIS
+    Уборка при запуске трея, чтобы папка данных не росла бесконечно:
+    состояние журналов (stats\, activity\), не обновлявшееся 30 дней (в activity хранится 21 день, так что
+    в таком файле уже нет нужных дней); временные *.tmp-* и сборки cache\build.*.dll, оставшиеся от сбоев.
+    Возвращает число удалённых файлов.
+    #>
+    param([string]$DataRoot = (Get-NotifierDataRoot), [datetime]$Now = [DateTime]::Now)
+    $removed = 0
+    $targets = @(
+        @{ Dir = 'stats'; Filter = '*.json'; Days = 30 },
+        @{ Dir = 'activity'; Filter = '*.json'; Days = 30 },
+        @{ Dir = ''; Filter = '*.tmp-*'; Days = 1 },
+        @{ Dir = 'stats'; Filter = '*.tmp-*'; Days = 1 },
+        @{ Dir = 'activity'; Filter = '*.tmp-*'; Days = 1 },
+        @{ Dir = 'cache'; Filter = 'build.*.dll'; Days = 1 }
+    )
+    foreach ($t in $targets) {
+        $dir = if ($t.Dir) { Join-Path $DataRoot $t.Dir } else { $DataRoot }
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        $cut = $Now.AddDays(-$t.Days)
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter $t.Filter -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cut })) {
+            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $removed++ } catch { }
+        }
+    }
+    if ($removed -gt 0) { Write-NotifierLog -Level INFO -Message "tray: удалено устаревших файлов: $removed" -DataRoot $DataRoot }
+    return $removed
 }
 
 function Start-NotifierTray {
@@ -472,7 +509,9 @@ function Start-NotifierTray {
 
     Add-Type -AssemblyName System.Windows.Forms
     try {
-        [void](Import-NotifierUi)
+        if ((Import-NotifierUi) -eq 'inline') {
+            Write-NotifierLog -Level WARN -Message "tray: кэш сборки интерфейса не сработал, загрузка без кэша: $(Get-NotifierUiImportError)" -DataRoot $DataRoot
+        }
         [ClaudeNotifier.Ui.Native]::EnableDpiAwareness()
         [void][ClaudeNotifier.Ui.Native]::SetAppId((Get-NotifierAppId))   # иконка и имя приложения на панели задач
     }
@@ -482,6 +521,7 @@ function Start-NotifierTray {
     $script:TrayQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
     $script:TrayDataRoot = $DataRoot
     $script:TrayNoOutput = [bool]$NoOutput
+    try { [void](Clear-NotifierStaleFiles -DataRoot $DataRoot) } catch { Write-NotifierLog -Level WARN -Message "tray: уборка: $($_.Exception.Message)" -DataRoot $DataRoot }
     try {
         $script:TrayState.Server = Start-NotifierPipeServer -Queue $script:TrayQueue -DataRoot $DataRoot
         [void](Start-NotifierHookServer -DataRoot $DataRoot)

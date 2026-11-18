@@ -27,6 +27,7 @@ function Import-NotifierUi {
     $files = @(Get-NotifierUiSources)
     $source = (@($files | ForEach-Object { [IO.File]::ReadAllText($_, [Text.Encoding]::UTF8) }) -join "`n//--file--`n")
     $refs = @('System.Windows.Forms', 'System.Drawing', 'PresentationCore', 'PresentationFramework', 'WindowsBase', 'System.Xaml')
+    $tmp = $null
     try {
         $sha = [System.Security.Cryptography.SHA256]::Create()
         $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($source))
@@ -57,6 +58,9 @@ function Import-NotifierUi {
         return $result
     }
     catch {
+        # Кэш сборки не сработал: причину — вызывающему (трей пишет её в журнал), недописанную сборку — удалить.
+        $script:UiImportError = $_.Exception.Message
+        if ($tmp -and (Test-Path -LiteralPath $tmp)) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
         if (-not ('ClaudeNotifier.Ui.Theme' -as [type])) {
             Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase, System.Xaml
             Add-Type -Path $files -ReferencedAssemblies $refs
@@ -99,4 +103,11 @@ function Format-NotifierTrayTooltip {
     return $text
 }
 
-Export-ModuleMember -Function Import-NotifierUi, Get-NotifierTrayState, Format-NotifierTrayTooltip
+$script:UiImportError = $null
+
+function Get-NotifierUiImportError {
+    <# .SYNOPSIS Почему последняя загрузка интерфейса пошла медленным путём (без кэша сборки), или $null. #>
+    return $script:UiImportError
+}
+
+Export-ModuleMember -Function Import-NotifierUi, Get-NotifierUiImportError, Get-NotifierTrayState, Format-NotifierTrayTooltip

@@ -38,6 +38,23 @@ Describe 's_016_01 · хуки через curl.exe: приём треем на 1
         @(Get-Calls).Count | Should Be 0
     }
 
+    It 'с секретом установки: прежний «hook» и чужой секрет отклоняются, верный принимается' {
+        [void](Get-Calls)
+        $secret = Get-NotifierHookSecret -DataRoot (Join-Path $TestDrive 'sec') -Create
+        $secret | Should Match '^[A-Za-z0-9_-]{43}$'
+        Get-NotifierHookSecret -DataRoot (Join-Path $TestDrive 'sec') | Should Be $secret   # повторно — тот же
+        Get-NotifierHookSecret -DataRoot (Join-Path $TestDrive 'nosec') | Should Be ''
+        [ClaudeNotifier.Ui.HookServer]::Secret = $secret
+        try {
+            Send-Hook 'stop' '{}' | Should Be '403'
+            Send-Hook 'stop' '{}' -Extra @('-H', "X-Claude-Notifier: $($secret.Substring(1))x") | Should Be '403'
+            Send-Hook 'stop' '{"session_id":"sec"}' -Extra @('-H', "X-Claude-Notifier: $secret") | Should Be '204'
+        }
+        finally { [ClaudeNotifier.Ui.HookServer]::Secret = '' }
+        Start-Sleep -Milliseconds 100
+        @(Get-Calls).Count | Should Be 1
+    }
+
     It 'переменные окружения сеанса — через заголовки curl (--variable, без оболочки)' {
         [void](Get-Calls)
         $env:CLAUDE_CODE_ENTRYPOINT = 'claude-desktop'; $env:CLAUDE_CODE_HOST_SESSION_ID = 'local_abc'

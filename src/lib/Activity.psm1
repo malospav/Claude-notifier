@@ -24,6 +24,7 @@ $script:RxCache1h = [regex]'"ephemeral_1h_input_tokens":(\d+)'
 $script:RxModel = [regex]'"model":"(claude-[^"]+)"'
 $script:GapSeconds = 300
 $script:KeepDays = 21
+$script:ChunkBytes = 4MB   # сколько журнала дочитывается за один проход
 $script:StateVersion = 5
 
 # Цены API за 1 млн токенов: вход, ответ, чтение кэша. Запись в кэш — 1,25 × вход (на 5 минут) и 2 × вход (на час).
@@ -203,14 +204,24 @@ function Update-NotifierActivityFile {
         $remaining = $fs.Length - $state.offset
         if ($remaining -le 0) { return $false }
         [void]$fs.Seek($state.offset, [IO.SeekOrigin]::Begin)
-        $buffer = New-Object byte[] $remaining
+        # Не больше 4 МБ за раз: первый проход по журналу в сотни МБ не выделяет память под весь хвост.
+        $want = [int][Math]::Min($remaining, $script:ChunkBytes)
+        $buffer = New-Object byte[] $want
         $read = 0
-        while ($read -lt $remaining) { $n = $fs.Read($buffer, $read, $remaining - $read); if ($n -le 0) { break }; $read += $n }
+        while ($read -lt $want) { $n = $fs.Read($buffer, $read, $want - $read); if ($n -le 0) { break }; $read += $n }
+        if ($read -le 0) { return $false }
         $end = [Array]::LastIndexOf($buffer, [byte]10, $read - 1)
-        if ($end -lt 0) { return $false }
-        $text = [Text.Encoding]::UTF8.GetString($buffer, 0, $end + 1)
-        foreach ($line in $text.Split("`n")) { if ($line.Length -gt 0) { Update-ActivityState -State $state -Line $line } }
-        $state.offset += $end + 1
+        if ($end -lt 0) {
+            # Строка длиннее целого куска — пропустить её, иначе чтение навсегда застрянет на этом месте.
+            if ($read -eq $script:ChunkBytes) { $state.offset += $read }
+            else { return $false }
+        }
+        else {
+            $text = [Text.Encoding]::UTF8.GetString($buffer, 0, $end + 1)
+            # Сбой на одной строке не должен останавливать журнал: иначе смещение не сдвинется и её будут читать вечно.
+            foreach ($line in $text.Split("`n")) { if ($line.Length -gt 0) { try { Update-ActivityState -State $state -Line $line } catch { } } }
+            $state.offset += $end + 1
+        }
     }
     finally { $fs.Dispose() }
     # Старые дни не нужны: храним три недели.

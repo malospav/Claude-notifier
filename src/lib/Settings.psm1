@@ -151,8 +151,10 @@ function Add-NotifierHooks {
         [Parameter(Mandatory = $true)]$Settings,
         [Parameter(Mandatory = $true)][string]$AppRoot,
         [int]$Port = 47611,
-        [string]$Curl = (Join-Path $env:SystemRoot 'System32\curl.exe')
+        [string]$Curl = (Join-Path $env:SystemRoot 'System32\curl.exe'),
+        [string]$Secret = 'hook'   # значение X-Claude-Notifier (Get-NotifierHookSecret); трей сверяет его
     )
+    if ($Secret -notmatch '^[A-Za-z0-9_-]+$') { throw 'Add-NotifierHooks: недопустимый секрет хуков' }
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $bridge = Join-Path $AppRoot 'hook-bridge.ps1'
     $hasCurl = Test-Path -LiteralPath $Curl -PathType Leaf
@@ -168,7 +170,7 @@ function Add-NotifierHooks {
         if ($hasCurl -and $spec.ContainsKey('Via') -and $spec.Via -eq 'curl') {
             # JSON хука из stdin → трею; переменные окружения сеанса — в заголовках (без оболочки).
             $hook.command = $Curl
-            $hook.args = @('-s', '-m', '5', '-o', 'NUL', '-H', 'X-Claude-Notifier: hook',
+            $hook.args = @('-s', '-m', '5', '-o', 'NUL', '-H', "X-Claude-Notifier: $Secret",
                 '--variable', '%CLAUDE_CODE_ENTRYPOINT=', '--variable', '%CLAUDE_CODE_HOST_SESSION_ID=',
                 '--expand-header', 'X-Claude-Entry: {{CLAUDE_CODE_ENTRYPOINT}}', '--expand-header', 'X-Claude-Host: {{CLAUDE_CODE_HOST_SESSION_ID}}',
                 '--data-binary', '@-', "http://127.0.0.1:$Port$($script:CurlMarker)$($spec.Kind)")
@@ -250,7 +252,13 @@ function Save-ClaudeSettings {
     $backup = $null
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $backup = "$Path.bak-" + (Get-Date).ToString('yyyyMMddHHmmss')
-        Copy-Item -LiteralPath $Path -Destination $backup -Force
+        # Две записи за одну секунду: копия с более ранним содержимым ценнее — её не перезаписываем.
+        if (-not (Test-Path -LiteralPath $backup)) { Copy-Item -LiteralPath $Path -Destination $backup -Force }
+        # Копии копятся при каждой установке: хранятся 10 последних.
+        $leaf = Split-Path -Leaf $Path
+        @(Get-ChildItem -LiteralPath $dir -Filter "$leaf.bak-*" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '\.bak-\d{14}$' } | Sort-Object Name -Descending | Select-Object -Skip 10) |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
     }
     $tmp = "$Path.tmp-$PID"
     [IO.File]::WriteAllText($tmp, (ConvertTo-PrettyJson $Settings) + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding $false))

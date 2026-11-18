@@ -39,8 +39,10 @@ function Get-NotifierNetwork {
             foreach ($f in @(@('name', ''), @('kind', 'browser'), @('hooks', $false), @('notify', $false), @('created', ''), @('last_seen', ''))) {
                 if ($null -eq $d.PSObject.Properties[$f[0]]) { $d | Add-Member -NotePropertyName $f[0] -NotePropertyValue $f[1] }
             }
-            if ($null -eq $d.PSObject.Properties['tokens']) { $d | Add-Member -NotePropertyName tokens -NotePropertyValue @() }
-            $d.tokens = @($d.tokens | Where-Object { $_ -is [string] })
+            foreach ($f in 'tokens', 'hook_tokens') {
+                if ($null -eq $d.PSObject.Properties[$f]) { $d | Add-Member -NotePropertyName $f -NotePropertyValue @() }
+                $d.$f = @($d.$f | Where-Object { $_ -is [string] })
+            }
             [void]$net.devices.Add($d)
         }
     }
@@ -75,15 +77,29 @@ function Get-NotifierTokenHash {
     return -join ($bytes | ForEach-Object { $_.ToString('x2') })
 }
 
-function Find-NotifierDeviceByToken {
-    <# .SYNOPSIS Устройство, которому выдан этот токен, или $null. #>
+function Resolve-NotifierToken {
+    <#
+    .SYNOPSIS
+    Кому выдан токен и что ему можно: @{ Device; Scope = 'full' | 'hook' } или $null.
+    full — браузер (cookie): всё API. hook — токен хуков Mac: только /api/event и /api/hello, чтобы
+    перехваченный в сети токен хуков не мог одобрять запросы разрешений и писать в сеансы ПК.
+    #>
     param([Parameter(Mandatory = $true)][hashtable]$Network, [AllowEmptyString()][string]$Token)
     if ([string]::IsNullOrEmpty($Token) -or $Token.Length -gt 200) { return $null }
     $hash = Get-NotifierTokenHash $Token
     foreach ($d in $Network.devices) {
-        if (@($d.tokens) -contains $hash) { return $d }
+        if (@($d.tokens) -contains $hash) { return @{ Device = $d; Scope = 'full' } }
+        if ($d.PSObject.Properties['hook_tokens'] -and @($d.hook_tokens) -contains $hash) { return @{ Device = $d; Scope = 'hook' } }
     }
     return $null
+}
+
+function Find-NotifierDeviceByToken {
+    <# .SYNOPSIS Устройство, которому выдан этот токен (любой области), или $null. #>
+    param([Parameter(Mandatory = $true)][hashtable]$Network, [AllowEmptyString()][string]$Token)
+    $r = Resolve-NotifierToken -Network $Network -Token $Token
+    if ($null -eq $r) { return $null }
+    return $r.Device
 }
 
 function Find-NotifierDevice {
@@ -112,6 +128,7 @@ function Add-NotifierDevice {
         hooks     = $false
         notify    = $false
         tokens    = @(Get-NotifierTokenHash $token)
+        hook_tokens = @()
         created   = $now
         last_seen = $now
     }
@@ -120,10 +137,18 @@ function Add-NotifierDevice {
 }
 
 function Add-NotifierDeviceToken {
-    <# .SYNOPSIS Выдаёт устройству ещё один токен (для хуков Mac) и возвращает его. #>
-    param([Parameter(Mandatory = $true)]$Device)
+    <#
+    .SYNOPSIS
+    Выдаёт устройству ещё один токен и возвращает его. -Hook — токен хуков Mac с урезанными правами
+    (см. Resolve-NotifierToken); прежние токены хуков этого устройства заменяются.
+    #>
+    param([Parameter(Mandatory = $true)]$Device, [switch]$Hook)
     $token = New-NotifierToken
-    $Device.tokens = @(@($Device.tokens) + (Get-NotifierTokenHash $token))
+    if ($Hook) {
+        if ($null -eq $Device.PSObject.Properties['hook_tokens']) { $Device | Add-Member -NotePropertyName hook_tokens -NotePropertyValue @() }
+        $Device.hook_tokens = @(Get-NotifierTokenHash $token)
+    }
+    else { $Device.tokens = @(@($Device.tokens) + (Get-NotifierTokenHash $token)) }
     return $token
 }
 
@@ -146,7 +171,20 @@ function New-NotifierPairing {
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     $pin = ([BitConverter]::ToUInt32($bytes, 0) % 1000000).ToString('000000')
-    return @{ Pin = $pin; Expires = $Now.AddMinutes($script:PairingMinutes); Attempts = 0; Used = $false; DeviceName = $null }
+    return @{ Pin = $pin; Expires = $Now.AddMinutes($script:PairingMinutes); Attempts = 0; ByRemote = @{}; Used = $false; DeviceName = $null }
+}
+
+# Попытки PIN считаются по адресу: чужой хост в сети не может пятью неверными вводами заблокировать
+# подключение вашего телефона. Общий предел на все адреса ограничивает перебор (20 из миллиона).
+$script:PairingMaxTotal = 20
+
+function Get-NotifierPairingAttemptsLeft {
+    <# .SYNOPSIS Сколько попыток ввода PIN осталось у этого адреса. #>
+    param($Pairing, [string]$Remote = '')
+    if ($null -eq $Pairing) { return 0 }
+    $used = 0
+    if ($Pairing.ContainsKey('ByRemote') -and $Pairing.ByRemote.ContainsKey($Remote)) { $used = [int]$Pairing.ByRemote[$Remote] }
+    return [Math]::Max(0, $script:PairingMaxAttempts - $used)
 }
 
 function Test-NotifierPairingPin {
@@ -155,14 +193,18 @@ function Test-NotifierPairingPin {
     Проверяет PIN. Возвращает 'ok' | 'bad' | 'expired' | 'locked' | 'none'. После 'ok' PIN израсходован;
     после 5 неверных попыток заблокирован.
     #>
-    param($Pairing, [AllowEmptyString()][string]$Pin, [datetime]$Now = [DateTime]::UtcNow)
+    param($Pairing, [AllowEmptyString()][string]$Pin, [datetime]$Now = [DateTime]::UtcNow, [string]$Remote = '')
     if ($null -eq $Pairing -or $Pairing.Used) { return 'none' }
     if ($Now -gt $Pairing.Expires) { return 'expired' }
-    if ($Pairing.Attempts -ge $script:PairingMaxAttempts) { return 'locked' }
+    if (-not $Pairing.ContainsKey('ByRemote')) { $Pairing.ByRemote = @{} }
+    $mine = 0
+    if ($Pairing.ByRemote.ContainsKey($Remote)) { $mine = [int]$Pairing.ByRemote[$Remote] }
+    if ($mine -ge $script:PairingMaxAttempts -or $Pairing.Attempts -ge $script:PairingMaxTotal) { return 'locked' }
     $clean = ([string]$Pin) -replace '\s', ''
     if ($clean -ne $Pairing.Pin) {
         $Pairing.Attempts++
-        if ($Pairing.Attempts -ge $script:PairingMaxAttempts) { return 'locked' }
+        $Pairing.ByRemote[$Remote] = $mine + 1
+        if ($mine + 1 -ge $script:PairingMaxAttempts -or $Pairing.Attempts -ge $script:PairingMaxTotal) { return 'locked' }
         return 'bad'
     }
     $Pairing.Used = $true
@@ -219,4 +261,4 @@ function Format-NotifierLastSeen {
     return $parsed.ToLocalTime().ToString('dd.MM', [Globalization.CultureInfo]::InvariantCulture)
 }
 
-Export-ModuleMember -Function Get-NotifierNetwork, Save-NotifierNetwork, New-NotifierToken, Get-NotifierTokenHash, Find-NotifierDeviceByToken, Find-NotifierDevice, Add-NotifierDevice, Add-NotifierDeviceToken, Remove-NotifierDevice, New-NotifierPairing, Test-NotifierPairingPin, Get-NotifierDeviceNameFromAgent, Get-NotifierLanAddress, Format-NotifierLastSeen
+Export-ModuleMember -Function Get-NotifierNetwork, Save-NotifierNetwork, New-NotifierToken, Get-NotifierTokenHash, Resolve-NotifierToken, Find-NotifierDeviceByToken, Find-NotifierDevice, Add-NotifierDevice, Add-NotifierDeviceToken, Remove-NotifierDevice, New-NotifierPairing, Test-NotifierPairingPin, Get-NotifierPairingAttemptsLeft, Get-NotifierDeviceNameFromAgent, Get-NotifierLanAddress, Format-NotifierLastSeen

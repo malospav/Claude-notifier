@@ -229,7 +229,7 @@ namespace ClaudeNotifier.Ui {
             SelectedIndex = Math.Max(0, Math.Min(titles.Count - 1, i));
         }
 
-        protected override void Dispose(bool disposing) { if (disposing) thumb.Dispose(); base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) { if (disposing) { thumb.Dispose(); Fonts.Free(fNormal, fSelected); } base.Dispose(disposing); }
     }
 
     // Тумблер Apple: зелёная капсула, белая ручка с тенью; переключается сразу, ручка доезжает за 200 мс.
@@ -423,7 +423,7 @@ namespace ClaudeNotifier.Ui {
         public CaptionButtons() {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
-        public void ApplyTheme(Theme t, int height) { theme = t; font = IconButton.IconFont(7.5f); Size = new Size(t.S(46) * 3, height); Invalidate(); }
+        public void ApplyTheme(Theme t, int height) { theme = t; font = Fonts.Replace(font, IconButton.IconFont(7.5f)); Size = new Size(t.S(46) * 3, height); Invalidate(); }
         int W { get { return Width / 3; } }
         int Hit(Point p) { if (p.X < 0 || p.Y < 0 || p.Y >= Height) return -1; int i = p.X / Math.Max(1, W); return i >= 0 && i < 3 ? i : -1; }
 
@@ -477,7 +477,7 @@ namespace ClaudeNotifier.Ui {
             if (f.Name == "Segoe Fluent Icons") return f;
             f.Dispose(); return new Font("Segoe MDL2 Assets", size);
         }
-        public void ApplyTheme(Theme t) { theme = t; font = IconFont(11f); Size = new Size(t.S(32), t.S(32)); Invalidate(); }
+        public void ApplyTheme(Theme t) { theme = t; font = Fonts.Replace(font, IconFont(11f)); Size = new Size(t.S(32), t.S(32)); Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e) {
             Graphics g = e.Graphics; g.Clear(BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -496,7 +496,7 @@ namespace ClaudeNotifier.Ui {
         protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hot = false; press.Animate(1f, 160); }
         protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (e.Button == MouseButtons.Left) press.Animate(0.92f, 100); }
         protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); press.Animate(1f, 160); }
-        protected override void Dispose(bool disposing) { if (disposing) press.Dispose(); base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) { if (disposing) { press.Dispose(); Fonts.Free(font); font = null; } base.Dispose(disposing); }
     }
 
     // Полоса расхода лимита: подпись, процент и время сброса, дорожка с заливкой (синяя → оранжевая → красная).
@@ -509,7 +509,7 @@ namespace ClaudeNotifier.Ui {
         public UsageBar() {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
-        public void ApplyTheme(Theme t) { theme = t; fLabel = Fonts.Semibold(9f); fValue = Fonts.Text(9f); Height = t.S(34); Invalidate(); }
+        public void ApplyTheme(Theme t) { theme = t; fLabel = Fonts.Replace(fLabel, Fonts.Semibold(9f)); fValue = Fonts.Replace(fValue, Fonts.Text(9f)); Height = t.S(34); Invalidate(); }
         public void SetValue(double percent, string detail) { Percent = percent; Detail = detail ?? ""; Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e) {
@@ -571,7 +571,7 @@ namespace ClaudeNotifier.Ui {
         public BarChart() {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
-        public void ApplyTheme(Theme t) { theme = t; fLabel = Fonts.Text(8.5f); fLabelBold = Fonts.Semibold(8.5f); fValue = Fonts.Text(8f); Invalidate(); }
+        public void ApplyTheme(Theme t) { theme = t; fLabel = Fonts.Replace(fLabel, Fonts.Text(8.5f)); fLabelBold = Fonts.Replace(fLabelBold, Fonts.Semibold(8.5f)); fValue = Fonts.Replace(fValue, Fonts.Text(8f)); Invalidate(); }
         public void SetData(double[] values, string[] labels, string[] valueLabels, int highlight) {
             Values = values ?? new double[0]; Labels = labels ?? new string[0]; ValueLabels = valueLabels ?? new string[0]; Highlight = highlight;
             Invalidate();

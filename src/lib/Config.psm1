@@ -282,4 +282,28 @@ function Get-NotifierHookPort {
     return 47611
 }
 
-Export-ModuleMember -Function Get-NotifierHookPort, Get-NotifierDefaultConfig, Get-NotifierConfig, Get-NotifierEventTitle, Set-NotifierConfigValue -Variable NotifierStrings
+function Get-NotifierHookSecret {
+    <#
+    .SYNOPSIS
+    Секрет хуков: curl.exe шлёт его в заголовке X-Claude-Notifier, и трей принимает только такие запросы —
+    чужой процесс или другой пользователь Windows не подделает событие. Хранится в <DataRoot>\hook-secret
+    (папка профиля, доступна только владельцу). -Create — создать, если файла нет (установщик).
+    Нет файла и без -Create → '' (старая установка: трей принимает прежний заголовок «hook»).
+    #>
+    param([string]$DataRoot = (Get-NotifierDataRoot), [switch]$Create)
+    $path = Join-Path $DataRoot 'hook-secret'
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $s = ([IO.File]::ReadAllText($path)).Trim()
+        if ($s -match '^[A-Za-z0-9_-]{32,64}$') { return $s }
+    }
+    if (-not $Create) { return '' }
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $s = ([Convert]::ToBase64String($bytes)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    if (-not (Test-Path -LiteralPath $DataRoot)) { New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null }
+    [IO.File]::WriteAllText($path, $s, (New-Object System.Text.UTF8Encoding $false))
+    return $s
+}
+
+Export-ModuleMember -Function Get-NotifierHookPort, Get-NotifierHookSecret, Get-NotifierDefaultConfig, Get-NotifierConfig, Get-NotifierEventTitle, Set-NotifierConfigValue -Variable NotifierStrings

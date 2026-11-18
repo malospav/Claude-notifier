@@ -48,13 +48,19 @@ namespace ClaudeNotifier.Ui {
             cdc = CreateCompatibleDC(IntPtr.Zero);
             cdib = CreateDIBSection(cdc, ref bi, 0, out cbits, IntPtr.Zero, 0);
             cold = SelectObject(cdc, cdib);
+            // При нехватке GDI-объектов любой из DIB может не создаться: без проверки Marshal.Copy читал бы
+            // по нулевому адресу (AccessViolation, не перехватывается). Ensure повторится на следующем кадре.
+            if (dc == IntPtr.Zero || dib == IntPtr.Zero || bits == IntPtr.Zero || cdc == IntPtr.Zero || cdib == IntPtr.Zero || cbits == IntPtr.Zero) {
+                Free();
+                throw new OutOfMemoryException("CreateDIBSection failed for layered surface " + w + "x" + h);
+            }
             crow = new int[w]; mrow = new int[w]; orow = new int[w];
         }
 
         // Итог в DIB для прямоугольника d: цвет содержимого, умноженный на покрытие маски (предумноженная альфа).
         public void Compose(Rectangle d) {
             d.Intersect(new Rectangle(0, 0, Width, Height));
-            if (d.Width <= 0 || d.Height <= 0 || bits == IntPtr.Zero) return;
+            if (d.Width <= 0 || d.Height <= 0 || bits == IntPtr.Zero || cbits == IntPtr.Zero || Mask == null) return;
             GdiFlush();   // дорисовать всё, что GDI держит в очереди
             BitmapData md = Mask.LockBits(d, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
             try {

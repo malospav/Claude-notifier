@@ -96,13 +96,28 @@ namespace ClaudeNotifier.Ui {
         public void SetAnswer(string id, string text) { answers[id ?? ""] = text ?? ""; Invalidate(); }
         public string Answer(string id) { string a; return answers.TryGetValue(id ?? "", out a) ? a : null; }
 
+        // Cursor.Position бросает Win32Exception, когда ввод на чужом рабочем столе (окно UAC, экран блокировки):
+        // в таймере это убило бы поток шторки. Последняя известная позиция — безопасная замена.
+        static Point lastSafeCursor;
+        internal static Point SafeCursor() {
+            try { lastSafeCursor = Cursor.Position; } catch { }
+            return lastSafeCursor;
+        }
+
         public NotchView() {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             BackColor = Color.Black;
             anim.Interval = 33;
-            warm.Tick += delegate { WarmTick(); };
-            anim.Tick += delegate {
-                Point c = Cursor.Position;
+            warm.Tick += delegate { try { WarmTick(); } catch (Exception e) { warm.Stop(); NotchHost.Report(e); } };
+            anim.Tick += delegate { try { AnimTick(); } catch (Exception e) { NotchHost.Report(e); } };
+            ApplyTheme(Theme.Create(true));
+        }
+
+        // Шаг таймера анимации. Исключение здесь ловит обработчик Tick: один сбойный кадр не должен
+        // останавливать поток шторки.
+        void AnimTick() {
+            {
+                Point c = SafeCursor();
                 if (c != lastCursor) { lastCursor = c; lastMove = DateTime.UtcNow; }
                 // Частота кадров по тому, что сейчас видно: сфинкс следит за курсором — 40 кадров/с; кто-то работает —
                 // 30 (раскрыта) или 20 (свёрнута); все ждут — 10. Экран заблокирован, компьютер засыпает или вас нет
@@ -119,16 +134,17 @@ namespace ClaudeNotifier.Ui {
                     RectangleF big = RectangleF.Inflate(fr, fr.Width * 0.35f + 2, fr.Height * 0.25f + 2);
                     Invalidate(Rectangle.Intersect(ClientRectangle, Rectangle.Round(big)));
                 }
-            };
-            ApplyTheme(Theme.Create(true));
+            }
         }
 
         public Theme Theme { get { return theme; } }
 
         public void ApplyTheme(Theme t) {
             theme = t;
-            fTitle = Fonts.Semibold(12f); fBody = Fonts.Text(10f); fSmall = Fonts.Text(9f); fBold = Fonts.Semibold(10f); fHeader = Fonts.Semibold(9f);
-            fIcon = IconButton.IconFont(11f); fIconSmall = IconButton.IconFont(9f);
+            // Шрифты свои (каждый Fonts.* — новый объект): прежние освобождаем, иначе каждая смена темы их копит.
+            fTitle = Fonts.Replace(fTitle, Fonts.Semibold(12f)); fBody = Fonts.Replace(fBody, Fonts.Text(10f)); fSmall = Fonts.Replace(fSmall, Fonts.Text(9f));
+            fBold = Fonts.Replace(fBold, Fonts.Semibold(10f)); fHeader = Fonts.Replace(fHeader, Fonts.Semibold(9f));
+            fIcon = Fonts.Replace(fIcon, IconButton.IconFont(11f)); fIconSmall = Fonts.Replace(fIconSmall, IconButton.IconFont(9f));
             Invalidate();
         }
 
@@ -236,7 +252,7 @@ namespace ClaudeNotifier.Ui {
                 bool has = false; float tx = 0, ty = 0;
                 if (Expanded && (now - lastMove).TotalSeconds < 2.0 && IsHandleCreated) {
                     Point c = PointToScreen(new Point((int)(face.X + face.Width / 2) + origin.X, (int)(face.Y + face.Height / 2) + origin.Y));
-                    Point cur = Cursor.Position;
+                    Point cur = SafeCursor();
                     float dx = cur.X - c.X, dy = cur.Y - c.Y;
                     if (Math.Abs(dx) < theme.S(700) && Math.Abs(dy) < theme.S(500)) {
                         has = true;
@@ -293,7 +309,10 @@ namespace ClaudeNotifier.Ui {
         }
 
         protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdateTimer(); }
-        protected override void Dispose(bool disposing) { if (disposing) { anim.Dispose(); warm.Dispose(); } base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) {
+            if (disposing) { anim.Dispose(); warm.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall); }
+            base.Dispose(disposing);
+        }
 
         float T { get { return (float)(DateTime.UtcNow - born).TotalSeconds; } }
         bool Animate { get { return Motion.Enabled; } }
@@ -578,7 +597,7 @@ namespace ClaudeNotifier.Ui {
                 if (b != null) PaintRow(g, b, new Rectangle(grid.X + colW + theme.S(8), y, colW, rh), grid);
                 y += rh + theme.S(8); idx += b != null ? 2 : 1;
             }
-            g.Clip = old;
+            g.Clip = old; old.Dispose();   // g.Clip отдаёт копию — без Dispose регион GDI+ копится на каждом кадре
             if (contentHeight > grid.Height) {
                 int th = Math.Max(theme.S(24), grid.Height * grid.Height / contentHeight);
                 int ty = grid.Y + (int)((grid.Height - th) * (scroll / (float)Math.Max(1, contentHeight - grid.Height)));
@@ -651,7 +670,7 @@ namespace ClaudeNotifier.Ui {
             Region old = g.Clip;
             g.SetClip(textArea, CombineMode.Intersect);   // сужаем, а не заменяем: при сворачивании текст режется формой шторки
             TextRenderer.DrawText(g, body, fBody, new Rectangle(textArea.X, textArea.Y - scroll, textArea.Width, th + theme.S(4)), Theme.Hex(0xE5E5EA), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
-            g.Clip = old;
+            g.Clip = old; old.Dispose();   // g.Clip отдаёт копию — без Dispose регион GDI+ копится на каждом кадре
             if (th > textArea.Height) {
                 int sh = Math.Max(theme.S(24), textArea.Height * textArea.Height / th);
                 int sy = textArea.Y + (int)((textArea.Height - sh) * (scroll / (float)Math.Max(1, th - textArea.Height)));
@@ -787,7 +806,7 @@ namespace ClaudeNotifier.Ui {
                 if (r.Bottom >= area.Y && r.Top <= area.Bottom) PaintRow(g, row, r, area);
                 y += h + (row.Kind == "header" ? 0 : theme.S(6));
             }
-            g.Clip = old;
+            g.Clip = old; old.Dispose();   // g.Clip отдаёт копию — без Dispose регион GDI+ копится на каждом кадре
             // Полоса прокрутки.
             if (contentHeight > area.Height) {
                 int th = Math.Max(theme.S(24), area.Height * area.Height / contentHeight);
@@ -989,6 +1008,8 @@ namespace ClaudeNotifier.Ui {
         public bool Animating { get { return running; } }
         volatile bool running;
         System.Threading.Thread vsync;
+        int vsyncGen;
+        int VsyncGen { get { return System.Threading.Thread.VolatileRead(ref vsyncGen); } }
 
         public NotchForm() {
             FormBorderStyle = FormBorderStyle.None;
@@ -1009,23 +1030,46 @@ namespace ClaudeNotifier.Ui {
             VisibleChanged += delegate { if (Visible) { dirty = ClientRectangle; Present(); } };
             Controls.Add(View);
             spring.Interval = 8;
-            spring.Tick += delegate { Step(); };   // запасной путь, если синхронизация с экраном недоступна
+            spring.Tick += delegate {   // запасной путь, если синхронизация с экраном недоступна
+                try { Step(); } catch (Exception e) { NotchHost.Report(e); try { StopSpring(); } catch { running = false; } }
+            };
             View.PageChanged += delegate { if (View.Expanded) SetTargetSize(SizeFor(), true); };
             View.Local += delegate (object s, NotchEventArgs e) { SetExpanded(e.Kind == "expand", e.Kind == "expand" ? "home" : null); };
             // Щелчок мимо раскрытой шторки сворачивает её (окно шторки фокус не берёт — проверяем кнопки мыши).
             outside.Interval = 80;
-            outside.Tick += delegate {
+            outside.Tick += delegate { try { OutsideTick(); } catch (Exception e) { NotchHost.Report(e); } };
+            outside.Start();
+        }
+
+        void OutsideTick() {
+            {
                 // Щелчок мимо нужно ловить только у раскрытой (каждые 80 мс); свёрнутой хватает раза в 0,8 с —
                 // проверить, не перекрыло ли шторку другое окно «поверх всех».
                 int wantOut = View.Expanded ? 80 : 800;
                 if (outside.Interval != wantOut) { outside.Interval = wantOut; topTicks = 0; }
                 if (!View.Expanded || ++topTicks >= 10) { topTicks = 0; RaiseToTop(); }
                 if (!View.Expanded || Hold || (DateTime.UtcNow - expandedAt).TotalMilliseconds < 400) return;
-                if (Control.MouseButtons == MouseButtons.None || ShapeOnScreen().Contains(Cursor.Position)) return;
+                if (Control.MouseButtons == MouseButtons.None || ShapeOnScreen().Contains(NotchView.SafeCursor())) return;
                 SetExpanded(false, null);
                 RaiseCollapse();
-            };
-            outside.Start();
+            }
+        }
+
+        // Масштаб экрана (DPI / 96). Процесс system-DPI-aware (SetProcessDPIAware в трее): шрифты в пунктах
+        // растут с DPI сами, а размеры в пикселях (Theme.S) — только через Scale. Без этого при 150 %
+        // текст вылезал из строк и кнопок. При 100 % — ровно 1, всё как раньше.
+        public static float ScreenScale() {
+            float s = 1f;
+            try { using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) s = g.DpiX / 96f; } catch { }
+            return s > 0.5f && s < 8f ? s : 1f;
+        }
+
+        public void ApplyDpi() {
+            float s = ScreenScale();
+            if (Math.Abs(View.Theme.Scale - s) < 0.001f) return;
+            Theme t = Theme.Create(true);
+            t.Scale = s;
+            View.ApplyTheme(t);
         }
 
         int topTicks;
@@ -1054,6 +1098,13 @@ namespace ClaudeNotifier.Ui {
         public void Present() {
             presentPending = false;
             if (IsDisposed || !IsHandleCreated || Width <= 0 || Height <= 0) return;
+            // Present вызывается из BeginInvoke и шага анимации: сбой GDI+ (LockBits, нехватка памяти) здесь
+            // не должен уходить в цикл сообщений. Следующая перерисовка — заново на всё окно.
+            try { PresentCore(); }
+            catch (Exception e) { NotchHost.Report(e); dirty = new Rectangle(0, 0, Width, Height); }
+        }
+
+        void PresentCore() {
             System.Diagnostics.Stopwatch pw = System.Diagnostics.Stopwatch.StartNew();
             if (surface == null) surface = new LayeredSurface();
             Rectangle d = dirty; dirty = Rectangle.Empty;
@@ -1203,16 +1254,23 @@ namespace ClaudeNotifier.Ui {
         // поток шторки сделать шаг и нарисовать. Таймер WinForms для этого плох: его сообщения самые
         // низкоприоритетные и копятся за отрисовкой — отсюда паузы по 20–30 мс.
         void StartVsync() {
-            if (vsync != null && vsync.IsAlive) return;
+            // Поколение вместо проверки IsAlive: старый поток мог как раз выходить (running был false) и уже не
+            // увидеть новый running = true — тогда кадров не было бы вовсе. Новый поток стартует всегда,
+            // старый замечает смену поколения и завершается сам.
+            int gen = System.Threading.Interlocked.Increment(ref vsyncGen);
             vsync = new System.Threading.Thread(delegate () {
                 int fails = 0;
-                while (running) {
+                while (running && gen == VsyncGen) {
                     if (Native.WaitVBlank() != 0) { fails++; System.Threading.Thread.Sleep(7); }
-                    if (!running) break;
+                    if (!running || gen != VsyncGen) break;
                     try {
                         if (IsDisposed || !IsHandleCreated) break;
-                        Invoke((MethodInvoker)delegate { if (running) Step(); });
-                    } catch { break; }
+                        Invoke((MethodInvoker)delegate { if (running && gen == VsyncGen) Step(); });
+                    } catch {
+                        // Сбой шага: снять running/Morphing, иначе SetTargetSize больше не запустит пружину и шторка застынет.
+                        try { if (!IsDisposed && IsHandleCreated) BeginInvoke((MethodInvoker)delegate { try { StopSpring(); } catch { running = false; } }); else running = false; } catch { running = false; }
+                        break;
+                    }
                     if (fails > 30) {   // композиция выключена — вернуться к таймеру
                         try { BeginInvoke((MethodInvoker)delegate { if (running) { Native.TimerPrecise(true); spring.Start(); } }); } catch { }
                         break;
@@ -1242,15 +1300,30 @@ namespace ClaudeNotifier.Ui {
     public static class NotchHost {
         static System.Threading.Thread thread;
         static NotchForm form;
+        static Microsoft.Win32.SessionSwitchEventHandler onSession;
+        static Microsoft.Win32.PowerModeChangedEventHandler onPower;
         public static readonly System.Collections.Concurrent.ConcurrentQueue<NotchEventArgs> Commands = new System.Collections.Concurrent.ConcurrentQueue<NotchEventArgs>();
+        // Последняя ошибка в потоке шторки (поток при этом продолжает работать) — для лога трея и проверок.
+        public static string LastError;
+        public static int ErrorCount;
 
         public static bool Running { get { NotchForm f = form; return f != null && !f.IsDisposed && f.IsHandleCreated; } }
         public static NotchForm Form { get { return form; } }
+
+        internal static void Report(Exception e) {
+            if (e == null) return;
+            LastError = DateTime.UtcNow.ToString("o") + " " + e.GetType().Name + ": " + e.Message;
+            System.Threading.Interlocked.Increment(ref ErrorCount);
+        }
 
         public static void Start() {
             if (Running) return;
             System.Threading.ManualResetEvent ready = new System.Threading.ManualResetEvent(false);
             thread = new System.Threading.Thread(delegate () {
+                // Исключение в обработчике окна (таймер, отрисовка) не должно убивать поток шторки:
+                // цикл сообщений ловит его, запоминает и продолжает работу.
+                try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException, false); } catch { }
+                Application.ThreadException += delegate (object s, System.Threading.ThreadExceptionEventArgs e) { Report(e.Exception); };
                 NotchForm f = new NotchForm();
                 f.View.Command += delegate (object s, NotchEventArgs e) { Commands.Enqueue(e); };
                 f.Collapsed += delegate { Commands.Enqueue(new NotchEventArgs("collapse", "", null, Point.Empty)); };
@@ -1258,15 +1331,17 @@ namespace ClaudeNotifier.Ui {
                 form = f;
                 // Заблокирован экран или компьютер засыпает — анимация на паузе (не тратим процессор впустую).
                 try {
-                    Microsoft.Win32.SystemEvents.SessionSwitch += delegate (object s, Microsoft.Win32.SessionSwitchEventArgs e) {
+                    onSession = delegate (object s, Microsoft.Win32.SessionSwitchEventArgs e) {
                         Microsoft.Win32.SessionSwitchReason k = e.Reason;
                         if (k == Microsoft.Win32.SessionSwitchReason.SessionLock || k == Microsoft.Win32.SessionSwitchReason.ConsoleDisconnect || k == Microsoft.Win32.SessionSwitchReason.RemoteDisconnect) NotchView.Paused = true;
                         else if (k == Microsoft.Win32.SessionSwitchReason.SessionUnlock || k == Microsoft.Win32.SessionSwitchReason.ConsoleConnect || k == Microsoft.Win32.SessionSwitchReason.RemoteConnect) NotchView.Paused = false;
                     };
-                    Microsoft.Win32.SystemEvents.PowerModeChanged += delegate (object s, Microsoft.Win32.PowerModeChangedEventArgs e) {
+                    onPower = delegate (object s, Microsoft.Win32.PowerModeChangedEventArgs e) {
                         if (e.Mode == Microsoft.Win32.PowerModes.Suspend) NotchView.Paused = true;
                         else if (e.Mode == Microsoft.Win32.PowerModes.Resume) NotchView.Paused = false;
                     };
+                    Microsoft.Win32.SystemEvents.SessionSwitch += onSession;
+                    Microsoft.Win32.SystemEvents.PowerModeChanged += onPower;
                 } catch { }
                 ready.Set();
                 Application.Run(new ApplicationContext());
@@ -1279,50 +1354,53 @@ namespace ClaudeNotifier.Ui {
             ready.WaitOne(10000);
         }
 
-        public static void Post(Action a) {
+        // В поток шторки. Делегат получает ту форму, что была при вызове, а не статическое поле:
+        // Stop мог обнулить поле, пока вызов ждал в очереди.
+        public static void Post(Action<NotchForm> a) {
             NotchForm f = form;
             if (f == null || f.IsDisposed || !f.IsHandleCreated) return;
-            try { f.BeginInvoke(a); } catch { }
+            try { f.BeginInvoke((MethodInvoker)delegate { if (f.IsDisposed) return; try { a(f); } catch (Exception e) { Report(e); } }); } catch { }
         }
 
         // Синхронный вызов в потоке шторки (для тестов и чтения состояния).
-        public static T Call<T>(Func<T> fn) {
+        public static T Call<T>(Func<NotchForm, T> fn) {
             NotchForm f = form;
             if (f == null || f.IsDisposed || !f.IsHandleCreated) return default(T);
-            return (T)f.Invoke(fn);
+            try { return (T)f.Invoke((Func<T>)delegate { return fn(f); }); } catch (Exception e) { Report(e); return default(T); }
         }
 
         public static void Place(Rectangle screen, string position, int margin) {
-            Post(delegate {
-                form.ScreenBounds = screen; form.Position = position; form.Margin2 = margin;
-                form.SetTargetSize(form.SizeFor(), false);
-                if (!form.Visible) form.Show();
+            Post(delegate (NotchForm f) {
+                f.ScreenBounds = screen; f.Position = position; f.Margin2 = margin;
+                f.ApplyDpi();
+                f.SetTargetSize(f.SizeFor(), false);
+                if (!f.Visible) f.Show();
             });
         }
 
-        public static void SetItems(NotchItem[] items) { Post(delegate { form.View.SetItems(items); }); }
-        public static void SetRows(string page, NotchRow[] rows) { Post(delegate { form.View.SetRows(page, rows); form.Refit(); }); }
-        public static void SetAnswer(string id, string text) { Post(delegate { form.View.SetAnswer(id, text); form.Refit(); }); }
+        public static void SetItems(NotchItem[] items) { Post(delegate (NotchForm f) { f.View.SetItems(items); }); }
+        public static void SetRows(string page, NotchRow[] rows) { Post(delegate (NotchForm f) { f.View.SetRows(page, rows); f.Refit(); }); }
+        public static void SetAnswer(string id, string text) { Post(delegate (NotchForm f) { f.View.SetAnswer(id, text); f.Refit(); }); }
         public static void SetLimits(float left5, string detail5, float leftWeek, string detailWeek, bool stale, bool soundOff) {
-            Post(delegate {
-                NotchView v = form.View;
+            Post(delegate (NotchForm f) {
+                NotchView v = f.View;
                 v.Left5 = left5; v.Detail5 = detail5 ?? ""; v.LeftWeek = leftWeek; v.DetailWeek = detailWeek ?? "";
                 v.LimitsStale = stale; v.SoundOff = soundOff; v.Invalidate();
             });
         }
-        public static void SetExpanded(bool expanded, string page) { Post(delegate { form.SetExpanded(expanded, page); }); }
-        public static void Toggle(string page) { Post(delegate { form.SetExpanded(!form.View.Expanded, page); }); }
-        public static void SetHold(bool hold) { Post(delegate { form.Hold = hold; }); }
-        public static bool Expanded { get { return Running && Call<bool>(delegate { return form.View.Expanded; }); } }
-        public static string Page { get { return Running ? Call<string>(delegate { return form.View.Page; }) : ""; } }
-        public static string AnswerOf(string id) { return Running ? Call<string>(delegate { return form.View.Answer(id); }) : null; }
-        public static bool IsExpanded() { return Running && Call<bool>(delegate { return form.View.Expanded; }); }
+        public static void SetExpanded(bool expanded, string page) { Post(delegate (NotchForm f) { f.SetExpanded(expanded, page); }); }
+        public static void Toggle(string page) { Post(delegate (NotchForm f) { f.SetExpanded(!f.View.Expanded, page); }); }
+        public static void SetHold(bool hold) { Post(delegate (NotchForm f) { f.Hold = hold; }); }
+        public static bool Expanded { get { return Running && Call<bool>(delegate (NotchForm f) { return f.View.Expanded; }); } }
+        public static string Page { get { return Running ? Call<string>(delegate (NotchForm f) { return f.View.Page; }) : ""; } }
+        public static string AnswerOf(string id) { return Running ? Call<string>(delegate (NotchForm f) { return f.View.Answer(id); }) : null; }
+        public static bool IsExpanded() { return Running && Call<bool>(delegate (NotchForm f) { return f.View.Expanded; }); }
         // Без ожидания потока шторки (для частого опроса из таймера трея): раскрыта ли сейчас.
         public static bool ExpandedNow { get { NotchForm f = form; return f != null && !f.IsDisposed && f.View.Expanded; } }
-        public static int ItemCount { get { return Running ? Call<int>(delegate { return form.View.Count; }) : 0; } }
-        public static int RowCount(string page) { return Running ? Call<int>(delegate { return form.View.Rows(page).Length; }) : 0; }
+        public static int ItemCount { get { return Running ? Call<int>(delegate (NotchForm f) { return f.View.Count; }) : 0; } }
+        public static int RowCount(string page) { return Running ? Call<int>(delegate (NotchForm f) { return f.View.Rows(page).Length; }) : 0; }
         // Щелчок по области шторки в её потоке (для тестов).
-        public static void ClickArea(string hit) { if (Running) Call<bool>(delegate { form.View.ClickArea(hit, Point.Empty); return true; }); }
+        public static void ClickArea(string hit) { if (Running) Call<bool>(delegate (NotchForm f) { f.View.ClickArea(hit, Point.Empty); return true; }); }
 
         public static void Stop() {
             NotchForm f = form;
@@ -1330,6 +1408,10 @@ namespace ClaudeNotifier.Ui {
                 try { f.BeginInvoke(new Action(delegate { f.Close(); Application.ExitThread(); })); } catch { }
             }
             if (thread != null) thread.Join(3000);
+            // Обработчики SystemEvents статические: без отписки каждый Start/Stop добавлял бы ещё пару.
+            try { if (onSession != null) Microsoft.Win32.SystemEvents.SessionSwitch -= onSession; } catch { }
+            try { if (onPower != null) Microsoft.Win32.SystemEvents.PowerModeChanged -= onPower; } catch { }
+            onSession = null; onPower = null;
             form = null; thread = null;
         }
     }
