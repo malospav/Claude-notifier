@@ -19,7 +19,10 @@ param(
     [string]$ClassesRoot = 'HKCU:\Software\Classes',
     [string]$StartMenuDir = ([Environment]::GetFolderPath('Programs')),
     [string]$DesktopDir = ([Environment]::GetFolderPath('DesktopDirectory')),
-    [switch]$NoDesktopShortcut
+    [switch]$NoDesktopShortcut,
+    # Обновление из трея (архив с GitHub, без .git): какой коммит ставится и из какого репозитория.
+    [string]$Commit = '',
+    [string]$Repo = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +31,7 @@ Import-Module (Join-Path $SourceRoot 'lib\Settings.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'lib\Registration.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'lib\Config.psm1') -Force
 Import-Module (Join-Path $SourceRoot 'lib\Shortcut.psm1') -Force
+Import-Module (Join-Path $SourceRoot 'lib\Update.psm1') -Force
 
 try {
     # 1. Сначала проверяем settings.json: при ошибке ничего не меняем.
@@ -68,6 +72,18 @@ try {
     New-Item -ItemType Directory -Path $app -Force | Out-Null
     Copy-Item -Path (Join-Path $SourceRoot '*') -Destination $app -Recurse -Force
     Get-ChildItem -LiteralPath $app -Recurse -File | Unblock-File
+    # Версия для автообновления: коммит и репозиторий GitHub (из параметров или из git рядом со скриптом).
+    try {
+        if ($Commit -eq '' -and (Get-Command git -ErrorAction SilentlyContinue)) {
+            $Commit = [string](& git -C $PSScriptRoot rev-parse HEAD 2>$null)
+            if ($Repo -eq '') { $Repo = ConvertTo-NotifierRepo ([string](& git -C $PSScriptRoot remote get-url origin 2>$null)) }
+        }
+        if ($Commit -match '^[0-9a-f]{40}$' -and $Repo -ne '') {
+            $ver = [ordered]@{ commit = $Commit; repo = $Repo; installed = [DateTime]::UtcNow.ToString('o') }
+            [IO.File]::WriteAllText((Join-Path $app 'version.json'), (ConvertTo-Json $ver), (New-Object Text.UTF8Encoding $false))
+        }
+    }
+    catch { }
 
     # 3. Хуки и строка статуса. Прежний statusLine пользователя сохраняется в config.json
     #    (chainStatusLine) до записи settings.json: если config.json записать нельзя, settings не меняется.

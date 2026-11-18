@@ -8,6 +8,8 @@
 DIR="$HOME/.claude-notifier"
 [ -f "$DIR/env" ] || exit 0
 . "$DIR/env"
+# Шифрование (https): отпечаток открытого ключа ПК из установки — curl проверяет его в каждом запросе.
+if [ -n "${CN_PIN:-}" ]; then curl() { command curl -k --pinnedpubkey "sha256//$CN_PIN" "$@"; }; fi
 KIND="$1"
 case "$KIND" in stop|notification|stopfailure|sessionstart|prompt|sessionend|permreq|replywait) ;; *) exit 0 ;; esac
 
@@ -62,6 +64,35 @@ flush() {
   done
 }
 get() { CODE="$(curl -s -m 5 -o "$OUT" -w '%{http_code}' -H "$AUTH" "$BASE$1" 2>/dev/null)"; }
+sha256() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"; else sha256sum "$1"; fi | cut -d' ' -f1; }
+# Хуки в settings.json: macOS — osascript, Linux и WSL — node или python3.
+settings_edit() {
+  S="$HOME/.claude/settings.json"
+  case "${CN_OS:-mac}" in
+    mac) osascript -l JavaScript "$DIR/settings.js" "$1" "$S" "$DIR/hook.sh" ;;
+    *) if command -v node >/dev/null 2>&1; then node "$DIR/settings.js" "$1" "$S" "$DIR/hook.sh"
+       else python3 "$DIR/settings.py" "$1" "$S" "$DIR/hook.sh"; fi ;;
+  esac
+}
+# Самообновление (в фоне, при старте сеанса): ПК обновился — скачать новые файлы, сверить SHA-256 из ответа ПК,
+# заменить и переписать хуки. Любая ошибка — тихо остаёмся на старой версии.
+self_update() {
+  U="$(mktemp -d 2>/dev/null)" || return 0
+  C="$(curl -s -m 5 -o "$U/m" -w '%{http_code}' -H "$AUTH" "$BASE/api/mac/update?have=$(cat "$DIR/version" 2>/dev/null)" 2>/dev/null)"
+  NEWVER="$(sed -n 's/^version \([0-9a-f][0-9a-f]*\)$/\1/p' "$U/m" 2>/dev/null)"
+  if [ "$C" != 200 ] || [ -z "$NEWVER" ]; then rm -rf "$U"; return 0; fi
+  for F in hook.sh settings.js settings.py uninstall.sh; do
+    WANT="$(awk -v f="$F" '$1 == f && length($2) == 64 { print $2 }' "$U/m")"
+    if [ -z "$WANT" ] || ! curl -fsS -m 10 "$BASE/mac/$F" -o "$U/$F" 2>/dev/null || [ "$(sha256 "$U/$F")" != "$WANT" ]; then rm -rf "$U"; return 0; fi
+  done
+  for F in hook.sh settings.js settings.py uninstall.sh; do mv -f "$U/$F" "$DIR/$F"; done
+  chmod 755 "$DIR/hook.sh" "$DIR/uninstall.sh"
+  settings_edit install >/dev/null 2>&1
+  printf '%s' "$NEWVER" > "$DIR/version"
+  printf '{"replies":true,"version":"%s","os":"%s"}' "$NEWVER" "${CN_OS:-mac}" | curl -s -m 5 -o /dev/null -X POST \
+    -H "$AUTH" -H 'Content-Type: application/json; charset=utf-8' --data-binary @- "$BASE/api/hello" 2>/dev/null
+  rm -rf "$U"
+}
 
 case "$KIND" in
   permreq)
@@ -112,7 +143,11 @@ case "$KIND" in
     ;;
   *)
     # Сначала — отложенные события (порядок важен: «запрос» после «готово» снова сделал бы сеанс «работающим»).
-    if flush && post 2 "/api/event?kind=$KIND&entry=$ENTRY"; then exit 0; fi
+    if flush && post 2 "/api/event?kind=$KIND&entry=$ENTRY"; then
+      # Новый сеанс — заодно проверить, не обновились ли хуки на ПК (в фоне: Claude не ждёт).
+      if [ "$KIND" = sessionstart ] && [ -f "$DIR/version" ]; then ( self_update ) </dev/null >/dev/null 2>&1 & fi
+      exit 0
+    fi
     enqueue
     exit 0
     ;;

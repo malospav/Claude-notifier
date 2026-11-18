@@ -52,7 +52,7 @@ function Set-NotifierEventOption {
 function Set-NotifierOptionValue {
     <# .SYNOPSIS Меняет поле раздела approvals / quickReplies или showPrompt и сохраняет config.json. #>
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups', 'inactive', 'notch', 'quiet', 'budget')][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups', 'inactive', 'notch', 'quiet', 'budget', 'push', 'update')][string]$Name,
         [string]$Field = 'enabled',
         [Parameter(Mandatory = $true)]$Value,
         [string]$DataRoot = $script:TrayDataRoot
@@ -126,11 +126,51 @@ function New-NotifierSettingsGroup {
     return $group
 }
 
+function Edit-NotifierPushSettings {
+    <#
+    .SYNOPSIS
+    Диалог «На телефон вне сети»: адрес темы ntfy или бота Telegram; после сохранения — проверочное сообщение.
+    Пустой адрес — выключить. -Away — сколько минут без вас за ПК (из селекта «Отправлять»).
+    #>
+    param([int]$Away = -1)
+    $config = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+    $msg = "ntfy: поставьте приложение ntfy на телефон, подпишитесь на тему с длинным случайным именем и вставьте https://ntfy.sh/<тема>.`n" +
+        "Telegram: создайте бота у @BotFather, напишите ему и вставьте https://api.telegram.org/bot<токен>/sendMessage?chat_id=<ваш id>.`n" +
+        'Пусто — выключить.'
+    $script:DialogOpen = $true
+    try {
+        $r = Show-NotifierDialog -Owner $null -Title 'Уведомления на телефон' -Message $msg -Primary 'Сохранить и проверить' -InputValue ([string]$config.push.url)
+        if (-not $r.Ok) { return }
+        $url = ([string]$r.Value).Trim()
+        $section = $config.push
+        if ($url -eq '') {
+            $section.url = ''; $section.enabled = $false
+            Set-NotifierConfigValue -Name push -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot
+            return
+        }
+        if ($null -eq (Get-NotifierPushTarget $url)) {
+            [void](Show-NotifierDialog -Owner $null -Title 'Адрес не подходит' -Message 'Нужен адрес темы ntfy (https://ntfy.sh/тема) или бота Telegram (…/sendMessage?chat_id=…).' -Primary 'OK' -Secondary '')
+            return
+        }
+        $section.url = $url; $section.enabled = $true
+        if ($Away -ge 0) { $section.away = $Away }
+        Set-NotifierConfigValue -Name push -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot
+        $test = Send-NotifierPush -Url $url -Wait -Message @{ Title = 'Claude Notifier'; Text = 'Уведомления на телефон работают.'; Priority = 3 }
+        if ($test.Ok) { [void](Show-NotifierDialog -Owner $null -Title 'Готово' -Message 'Проверочное сообщение отправлено — оно должно прийти на телефон.' -Primary 'OK' -Secondary '') }
+        else { [void](Show-NotifierDialog -Owner $null -Title 'Не отправлено' -Message "$($test.Error). Адрес сохранён $([char]0x2014) проверьте его и сеть." -Primary 'OK' -Secondary '') }
+    }
+    finally { $script:DialogOpen = $false }
+}
+
 function Format-NotifierHotKeySubtitle {
     # Подпись строки «Горячая клавиша»: действующее сочетание или почему его нет.
     $config = Get-NotifierConfig -DataRoot $script:TrayDataRoot
     if (-not $config.hotkey.enabled) { return 'Выключена' }
-    if ($script:HotKeyText) { return "$($script:HotKeyText) $([char]0x2014) раскрыть шторку" }
+    if ($script:HotKeyText) {
+        $t = "$($script:HotKeyText) $([char]0x2014) раскрыть шторку"
+        if ($script:ReplyHotKeyText) { $t += ", $($script:ReplyHotKeyText) $([char]0x2014) шаблоны ответа" }
+        return $t
+    }
     if ([string]$config.hotkey.keys -ne 'auto') { return "$($config.hotkey.keys) занято другой программой" }
     return 'Win+Shift+C и Ctrl+Alt+C заняты другой программой'
 }

@@ -23,6 +23,17 @@ $script:ExpandedGroups = @{}         # группы сеансов одного 
 $script:AgentBudgetMs = 400          # за один проход трея журналы агентов читаются не дольше (первый раз их бывает десятки МБ)
 $script:AgentActiveMinutes = 30      # незавершённый агент, журнал которого молчит дольше, считается брошенным
 
+function Get-NotifierFeedSignature($Stats) {
+    # Лента изменилась (новое событие или инструмент закончился) — подробности нужно обновить.
+    if ($null -eq $Stats) { return '' }
+    $feed = $null
+    if ($Stats -is [System.Collections.IDictionary]) { if ($Stats.Contains('feed')) { $feed = $Stats['feed'] } }
+    elseif ($Stats.PSObject.Properties['feed']) { $feed = $Stats.feed }
+    $last = @(@($feed) | Where-Object { $_ })
+    if ($last.Count -eq 0) { return '' }
+    return "$($last.Count)|$($last[-1].ts)|$($last[-1].ms)"
+}
+
 function Get-NotifierSessionName {
     <# .SYNOPSIS Имя сеанса для уведомлений и карточек: своё (из настроек сеанса) или имя проекта. #>
     param([Parameter(Mandatory = $true)]$Session, [hashtable]$Prefs = @{})
@@ -414,7 +425,8 @@ function Update-NotifierLiveContext {
         if ($s.PSObject.Properties['agents'] -and $s.agents) { $oldSig = (@($s.agents) | ForEach-Object { "$($_.name)|$($_.doing)" }) -join "`n" }
         if ($sig -ne $oldSig) { $s | Add-Member -NotePropertyName agents -NotePropertyValue @($ag.Active) -Force; $changed = $true }
         if ($old -and $old.PSObject.Properties['window'] -and [int64]$old.context -eq $st.context -and [int64]$old.output -eq $st.output -and [int]$old.tools -eq $st.tools -and
-            $old.PSObject.Properties['agentsCost'] -and [double]$old.agentsCost -eq $agentsCost) { continue }
+            $old.PSObject.Properties['agentsCost'] -and [double]$old.agentsCost -eq $agentsCost -and
+            (Get-NotifierFeedSignature $old) -eq (Get-NotifierFeedSignature $st)) { continue }
         $s | Add-Member -NotePropertyName stats -NotePropertyValue ([pscustomobject]$st) -Force
         $changed = $true
     }
@@ -534,7 +546,9 @@ function Register-NotifierHotKey {
     #>
     param([string]$DataRoot = $script:TrayDataRoot)
     if ($script:HotKey) { $script:HotKey.Dispose(); $script:HotKey = $null }
+    if ($script:ReplyHotKey) { $script:ReplyHotKey.Dispose(); $script:ReplyHotKey = $null }
     $script:HotKeyText = ''
+    $script:ReplyHotKeyText = ''
     $config = Get-NotifierConfig -DataRoot $DataRoot
     if (-not $config.hotkey.enabled) { return '' }
     $hk = New-Object ClaudeNotifier.Ui.HotKey
@@ -552,7 +566,127 @@ function Register-NotifierHotKey {
         return ''
     }
     $script:HotKey = $hk
+    # Вторая клавиша — те же модификаторы и R: шаблоны ответа для сеанса, который ждёт.
+    $rtext = Get-NotifierReplyHotKeyText $script:HotKeyText
+    $rparsed = ConvertTo-NotifierHotKey $rtext
+    if ($rparsed) {
+        $rk = New-Object ClaudeNotifier.Ui.HotKey
+        $rk.add_Pressed({ Invoke-NotifierReplyHotKey })
+        if ($rk.Register($rparsed.Mods, $rparsed.Key)) { $script:ReplyHotKey = $rk; $script:ReplyHotKeyText = $rtext }
+        else {
+            $rk.Dispose()
+            Write-NotifierLog -Level WARN -Message "tray: клавиша ответов $rtext занята другой программой" -DataRoot $DataRoot
+        }
+    }
     return $script:HotKeyText
+}
+
+function Get-NotifierReplyHotKeyText([string]$Main) {
+    # «Win+Shift+C» → «Win+Shift+R»; если основная клавиша уже R — «…+T».
+    $parts = @($Main -split '\+')
+    if ($parts.Count -lt 2) { return '' }
+    $key = 'R'
+    if ($parts[-1] -eq 'R') { $key = 'T' }
+    return ((@($parts[0..($parts.Count - 2)]) + $key) -join '+')
+}
+
+function Get-NotifierReplyTargets {
+    <#
+    .SYNOPSIS
+    Сеансы, которые ждут ответа (есть ожидание reply): сначала тот, чьё окно сейчас впереди, затем — недавние.
+    #>
+    param([AllowEmptyCollection()][object[]]$Sessions = @(), [hashtable]$Replies = @{}, [int64]$ForegroundHwnd = 0)
+    $list = @($Sessions | Where-Object { $_ -and $Replies.ContainsKey([string]$_.session_id) })
+    $front = @($list | Where-Object { $ForegroundHwnd -ne 0 -and $_.window -and [int64]$_.window.hwnd -eq $ForegroundHwnd })
+    $rest = @($list | Where-Object { $front -notcontains $_ } | Sort-Object -Property @{ Expression = { [string]$_.updated }; Descending = $true })
+    return , @($front + $rest)
+}
+
+function Send-NotifierHotKeyReply {
+    param([Parameter(Mandatory = $true)]$Session, [AllowEmptyString()][string]$Text)
+    $sid = [string]$Session.session_id
+    if ($Text -eq '') {
+        $script:DialogOpen = $true
+        try {
+            $r = Show-NotifierDialog -Owner $null -Title "Ответ для «$($Session.project)»" -Message 'Claude получит его как ваше сообщение и продолжит работу.' -Primary 'Отправить' -InputValue ''
+        }
+        finally { $script:DialogOpen = $false }
+        if (-not $r.Ok -or ([string]$r.Value).Trim() -eq '') { return }
+        $Text = [string]$r.Value
+    }
+    if (Write-NotifierReply -SessionId $sid -Text $Text -DataRoot $script:TrayDataRoot) {
+        [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $script:TrayDataRoot)
+        Show-NotifierNotice "Отправлено: $($Text.Trim())"
+    }
+    else { Show-NotifierNotice 'Сеанс больше не ждёт ответа' }
+    [void](Update-NotifierPending -DataRoot $script:TrayDataRoot)
+}
+
+function Add-NotifierReplyItems {
+    # Пункты «1 Продолжай» … «0 Свой ответ…» для сеанса в коллекцию меню.
+    param($Items, $Session, $Theme, [string[]]$Texts)
+    $pad = New-Object System.Windows.Forms.Padding($Theme.S(8), $Theme.S(5), $Theme.S(8), $Theme.S(5))
+    for ($i = 0; $i -lt $Texts.Count; $i++) {
+        $mi = New-Object System.Windows.Forms.ToolStripMenuItem ("&$($i + 1)  " + ($Texts[$i] -replace '&', '&&'))
+        $mi.Padding = $pad
+        $mi.Tag = @{ Session = $Session; Text = $Texts[$i] }
+        $mi.add_Click({ Send-NotifierHotKeyReply -Session $this.Tag.Session -Text $this.Tag.Text })
+        [void]$Items.Add($mi)
+    }
+    $own = New-Object System.Windows.Forms.ToolStripMenuItem '&0  Свой ответ…'
+    $own.Padding = $pad
+    $own.Tag = @{ Session = $Session; Text = '' }
+    $own.add_Click({ Send-NotifierHotKeyReply -Session $this.Tag.Session -Text '' })
+    [void]$Items.Add($own)
+}
+
+function New-NotifierReplyMenu {
+    <#
+    .SYNOPSIS
+    Меню клавиши ответов: шаблоны для первого ждущего сеанса, остальные ждущие — подменю.
+    #>
+    param([Parameter(Mandatory = $true)]$Theme, [AllowEmptyCollection()][object[]]$Targets = @(), [string[]]$Texts = @(), [hashtable]$Prefs = @{})
+    $menu = New-NotifierMenu -Theme $Theme
+    $head = New-Object System.Windows.Forms.ToolStripMenuItem
+    $head.Enabled = $false
+    $head.Padding = New-Object System.Windows.Forms.Padding($Theme.S(8), $Theme.S(5), $Theme.S(8), $Theme.S(5))
+    [void]$menu.Items.Add($head)
+    if ($Targets.Count -eq 0) { $head.Text = 'Ни один сеанс не ждёт ответа'; return $menu }
+    $first = $Targets[0]
+    $head.Text = "Ответ для «$(Get-NotifierSessionName -Session $first -Prefs $Prefs)»" -replace '&', '&&'
+    Add-NotifierReplyItems -Items $menu.Items -Session $first -Theme $Theme -Texts $Texts
+    if ($Targets.Count -gt 1) {
+        [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+        foreach ($s in @($Targets | Select-Object -Skip 1)) {
+            $sub = New-Object System.Windows.Forms.ToolStripMenuItem ("Для «$(Get-NotifierSessionName -Session $s -Prefs $Prefs)»" -replace '&', '&&')
+            $sub.Padding = $head.Padding
+            $sub.DropDown.Renderer = $menu.Renderer
+            $sub.DropDown.Font = $menu.Font
+            Add-NotifierReplyItems -Items $sub.DropDownItems -Session $s -Theme $Theme -Texts $Texts
+            [void]$menu.Items.Add($sub)
+        }
+    }
+    return $menu
+}
+
+function Invoke-NotifierReplyHotKey {
+    <# .SYNOPSIS Клавиша ответов: меню шаблонов у курсора для сеанса, который ждёт ответа. #>
+    try {
+        [void](Update-NotifierPending -DataRoot $script:TrayDataRoot)
+        Import-TrayNative
+        $fg = [int64][ClaudeNotifier.TrayNative]::GetForegroundWindow()
+        $sessions = @(Get-NotifierSessions -DataRoot $script:TrayDataRoot)
+        $targets = Get-NotifierReplyTargets -Sessions $sessions -Replies $script:Pending.Replies -ForegroundHwnd $fg
+        $prefs = Get-NotifierSessionPrefs -DataRoot $script:TrayDataRoot
+        if ($script:ReplyMenu) { try { $script:ReplyMenu.Close(); $script:ReplyMenu.Dispose() } catch { } }
+        $menu = New-NotifierReplyMenu -Theme (Get-NotifierTheme) -Targets $targets -Texts (Get-NotifierQuickReplyTexts) -Prefs $prefs
+        $script:ReplyMenu = $menu
+        $menu.Show([System.Windows.Forms.Cursor]::Position)
+        # Процесс, получивший WM_HOTKEY, может забрать фокус — тогда цифры и стрелки работают сразу.
+        [void][ClaudeNotifier.TrayNative]::SetForegroundWindow($menu.Handle)
+        if ($menu.Items.Count -gt 1) { [void]$menu.Items[1].Select() }
+    }
+    catch { Write-NotifierLog -Level ERROR -Message "tray: клавиша ответов: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
 }
 
 function ConvertTo-NotifierHotKey([string]$Text) {

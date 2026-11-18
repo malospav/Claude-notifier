@@ -18,7 +18,8 @@ namespace ClaudeNotifier.Ui {
     public static class Mascot {
         static volatile string kind = "sphynx";
         public static string Kind { get { return kind; } set { kind = Normalize(value); } }
-        public static readonly string[] Kinds = { "sphynx", "flatsphynx", "flame", "boxcat", "penguin", "kitty", "ghost", "mochi" };
+        public static readonly string[] Kinds = { "sphynx", "flatsphynx", "flame", "boxcat", "penguin", "kitty", "ghost", "mochi",
+            "dino", "frog", "reaper", "onigiri", "cupcat", "fox", "leaf", "bee" };
         public static string Normalize(string v) { return Array.IndexOf(Kinds, v) >= 0 ? v : "sphynx"; }
         public static void Paint(Graphics g, RectangleF r, string state, float t, int seed, bool animate, CatMood mood) {
             Paint(g, r, state, t, seed, animate, mood, null);
@@ -59,6 +60,14 @@ namespace ClaudeNotifier.Ui {
                 case "kitty": FlatPals.Kitty(g, r, state, t, seed, animate, mood); break;
                 case "ghost": FlatPals.Ghost(g, r, state, t, seed, animate, mood); break;
                 case "mochi": FlatPals.Mochi(g, r, state, t, seed, animate, mood); break;
+                case "dino": FlatPals.Dino(g, r, state, t, seed, animate, mood); break;
+                case "frog": FlatPals.Frog(g, r, state, t, seed, animate, mood); break;
+                case "reaper": FlatPals.Reaper(g, r, state, t, seed, animate, mood); break;
+                case "onigiri": FlatPals.Onigiri(g, r, state, t, seed, animate, mood); break;
+                case "cupcat": FlatPals.CupCat(g, r, state, t, seed, animate, mood); break;
+                case "fox": FlatPals.Fox(g, r, state, t, seed, animate, mood); break;
+                case "leaf": FlatPals.Leaf(g, r, state, t, seed, animate, mood); break;
+                case "bee": FlatPals.Bee(g, r, state, t, seed, animate, mood); break;
                 default: Cat.Paint(g, r, state, t, seed, animate, mood); break;
             }
         }
@@ -548,7 +557,7 @@ namespace ClaudeNotifier.Ui {
     // Поведение у всех общее (FlatState): работает — покачивается и смотрит по сторонам, облачко «…»;
     // «Ага!» — глаза «> <» и восклицание; задумался — прищур; ждёт решения — янтарный оттенок, глаза круглые;
     // ждёт ответа — дышит и моргает; ошибка — красноватый, глаза-крестики; остановился и спит — тусклый, «z».
-    public static class FlatPals {
+    public static partial class FlatPals {
         static void Fill(Graphics g, GraphicsPath p, Color top, Color bot) {
             RectangleF b = p.GetBounds();
             if (b.Width <= 0 || b.Height <= 0) return;

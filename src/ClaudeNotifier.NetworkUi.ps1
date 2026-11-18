@@ -9,9 +9,16 @@
 
 $script:ConnectActionId = '__connect'
 
+function Get-NotifierDeviceOsLabel($Device) {
+    # Система устройства с хуками: Mac (и прежние установки без поля os), Linux или WSL.
+    $os = ''
+    if ($Device -and $Device.PSObject.Properties['os']) { $os = [string]$Device.os }
+    switch ($os) { 'linux' { return 'Linux' } 'wsl' { return 'WSL' } default { return 'Mac' } }
+}
+
 function Get-NotifierDeviceKindText {
     param([Parameter(Mandatory = $true)]$Device)
-    if ($Device.hooks) { return 'Mac · сеансы видны здесь' }
+    if ($Device.hooks) { return "$(Get-NotifierDeviceOsLabel $Device) $([char]0x00B7) сеансы видны здесь" }
     if ($Device.name -eq 'Mac') { return 'Браузер · хуки не установлены' }
     return 'Браузер · только просмотр'
 }
@@ -130,6 +137,28 @@ function Enable-NotifierNetworkAccess {
     $ok = Start-NotifierNetServer
     if (-not $ok) { [void](Show-NotifierDialog -Owner $Owner -Title 'Сервер не запустился' -Secondary '' -Message $net.Error) }
     return $ok
+}
+
+function Enable-NotifierNetworkTls {
+    <#
+    .SYNOPSIS
+    «Шифрование» → «Включить»: та же разовая настройка Windows (UAC) — сертификат и https на порту <port + 1>;
+    затем сервер перезапускается. Хуки устройств перейдут на https после «Получить команду установки».
+    #>
+    param([System.Windows.Forms.IWin32Window]$Owner)
+    $net = $script:Net
+    if ($net.Tls) { return $true }
+    $answer = Show-NotifierDialog -Owner $Owner -Title 'Включить шифрование?' -Primary 'Продолжить' -Message (
+        "Windows один раз попросит права администратора: этот ПК создаст свой сертификат, и хуки Mac, Linux и WSL " +
+        "будут ходить по https $([char]0x2014) токены не пойдут по Wi-Fi открытым текстом. Потом переустановите хуки на устройствах.")
+    if (-not $answer.Ok) { return $false }
+    $result = Invoke-NotifierNetworkSetup -Port $net.Network.port -DataRoot $net.DataRoot
+    if ($result -eq 'failed') { [void](Show-NotifierDialog -Owner $Owner -Title 'Не получилось' -Secondary '' -Message "Подробности: $(Join-Path $net.DataRoot 'setup-network.log')") }
+    if ($result -ne 'ok') { return $false }
+    if ($net.Server) { Stop-NotifierNetServer }
+    [void](Start-NotifierNetServer)
+    if (-not $net.Tls) { [void](Show-NotifierDialog -Owner $Owner -Title 'Шифрование не включилось' -Secondary '' -Message "Сервер работает без https. Подробности: $(Join-Path $net.DataRoot 'setup-network.log')") }
+    return [bool]$net.Tls
 }
 
 function Disable-NotifierNetworkAccess {

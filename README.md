@@ -263,7 +263,8 @@ Desktop-приложение Claude показывает собственные 
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\Test-Syntax.ps1   # синтаксис + UTF-8 BOM
-powershell -NoProfile -Command "Invoke-Pester -Path tests"                  # тесты (Pester 3.4, есть в Windows)
+Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -SkipPublisherCheck -Force   # один раз (в Windows встроен только 3.4)
+powershell -NoProfile -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester -Path tests"   # тесты — как в GitHub Actions
 ```
 
 Все `.ps1` и `.psm1` хранятся в **UTF-8 с BOM**. Windows PowerShell 5.1 читает UTF-8 без BOM как ANSI, и кириллица в таком файле ломает разбор скрипта. Документы проекта (PRD, архитектура, ADR, истории) лежат в `coacoa/docs/`.

@@ -81,3 +81,28 @@ function run(argv) {
 }
 
 if (typeof module !== 'undefined') module.exports = { mergeHooks: mergeHooks };
+
+// Linux и WSL: тот же файл под Node.js — node settings.js install|uninstall <settings.json> <hook.sh>.
+if (typeof require === 'function' && typeof module !== 'undefined' && require.main === module) {
+  var fs = require('fs');
+  var argv = process.argv.slice(2);
+  var mode = argv[0], path = argv[1], hookPath = argv[2];
+  if ((mode !== 'install' && mode !== 'uninstall') || !path || !hookPath) {
+    console.error('usage: node settings.js install|uninstall <settings.json> <hook.sh>');
+    process.exit(2);
+  }
+  var settings = {};
+  if (fs.existsSync(path)) {
+    var text = fs.readFileSync(path, 'utf8');
+    if (text.trim()) {
+      try { settings = JSON.parse(text); }
+      catch (e) { console.error('settings.json не является корректным JSON (' + path + '): исправьте файл и запустите установку снова'); process.exit(1); }
+    }
+    var stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    fs.copyFileSync(path, path + '.bak-' + stamp);
+  }
+  var tmp = path + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(mergeHooks(settings, mode, hookPath), null, 2) + '\n', 'utf8');
+  fs.renameSync(tmp, path);
+  console.log(mode === 'install' ? 'хуки добавлены в ' + path : 'хуки удалены из ' + path);
+}

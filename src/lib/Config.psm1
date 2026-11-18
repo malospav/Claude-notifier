@@ -20,7 +20,7 @@ $NotifierStrings = @{
 }
 
 # Маскоты шторки (ClaudeNotifier.Ui.Mascot.Kinds): 3D-сфинкс и плоские векторные.
-$script:Mascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi')
+$script:Mascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi', 'dino', 'frog', 'reaper', 'onigiri', 'cupcat', 'fox', 'leaf', 'bee')
 
 function Get-NotifierDefaultConfig {
     <#
@@ -50,9 +50,11 @@ function Get-NotifierDefaultConfig {
         stalled         = @{ enabled = $true; minutes = 10 }       # «Работает», но журнал молчит столько минут — «сеанс, похоже, остановился»
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
+        push            = @{ enabled = $false; url = ''; away = 5; preview = $false }   # на телефон вне сети: url — тема ntfy или бот Telegram (lib\Push.psm1); away — только если вас нет за ПК столько минут (0 — всегда); preview — с текстом вопроса
+        update          = @{ enabled = $true }                      # раз в 6 ч проверять обновление на GitHub (app\version.json)
         budget          = @{ enabled = $false; daily = 20 }        # расход за сегодня (примерно, по ценам API) дошёл до суммы, $ — одно уведомление в день
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
-        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{}; stats = $true; attention = $true }   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — sphynx | flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{}; stats = $true; attention = $true }   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — sphynx | flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
     }
 }
@@ -249,6 +251,18 @@ function Get-NotifierConfig {
     Merge-OptionSection $config $user 'groups' @{ minSessions = @(2, 20) } $DataRoot
     Merge-OptionSection $config $user 'inactive' @{ hours = @(1, 72) } $DataRoot
     Merge-OptionSection $config $user 'budget' @{ daily = @(1, 10000) } $DataRoot
+    Merge-OptionSection $config $user 'push' @{ away = @(0, 240) } $DataRoot
+    Merge-OptionSection $config $user 'update' @{} $DataRoot
+    $push = Get-JsonProperty $user 'push'
+    if ($push.found -and $push.value -is [System.Management.Automation.PSCustomObject]) {
+        $u = Get-JsonProperty $push.value 'url'
+        if ($u.found) {
+            if ($u.value -is [string] -and $u.value.Length -le 300 -and $u.value -notmatch '[\x00-\x20]') { $config.push.url = $u.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'push.url' должно быть адресом без пробелов" -DataRoot $DataRoot }
+        }
+        $pv = Get-JsonProperty $push.value 'preview'
+        if ($pv.found -and $pv.value -is [bool]) { $config.push.preview = $pv.value }
+    }
     Merge-OptionSection $config $user 'notch' @{} $DataRoot
     Merge-OptionSection $config $user 'quiet' @{} $DataRoot
     $hk = Get-JsonProperty $user 'hotkey'

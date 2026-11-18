@@ -15,17 +15,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Pester 4 (понимает синтаксис тестов Pester 3 — «Should Be»)
+      - name: Pester 5.7.1 (как локально)
         shell: powershell
         run: |
-          Install-Module Pester -RequiredVersion 4.10.1 -Force -SkipPublisherCheck -Scope CurrentUser
+          Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
       - name: Тесты
         shell: powershell
         run: |
-          Import-Module Pester -RequiredVersion 4.10.1
-          $r = Invoke-Pester -Script tests\unit -PassThru -OutputFile pester.xml -OutputFormat NUnitXml
-          "Прошло: $($r.PassedCount), упало: $($r.FailedCount), пропущено: $($r.SkippedCount)"
-          if ($r.FailedCount -gt 0) { exit 1 }
+          Import-Module Pester -RequiredVersion 5.7.1
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'tests\unit'
+          $c.Run.PassThru = $true
+          $c.Output.Verbosity = 'Normal'
+          $c.TestResult.Enabled = $true
+          $c.TestResult.OutputPath = 'pester.xml'
+          $r = Invoke-Pester -Configuration $c
+          "Прошло: $($r.PassedCount), упало: $($r.FailedCount), пропущено: $($r.SkippedCount), не загрузилось файлов: $($r.FailedContainersCount)"
+          if ($r.FailedCount -gt 0 -or $r.FailedContainersCount -gt 0) { exit 1 }
       - name: Отчёт
         if: always()
         uses: actions/upload-artifact@v4
@@ -33,6 +39,102 @@ jobs:
           name: pester-windows
           path: pester.xml
           if-no-files-found: ignore
+
+  linux:
+    name: Скрипты Linux и WSL (sh, node, python3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Синтаксис (dash — самый строгий sh)
+        run: |
+          for f in src/mac/hook.sh src/mac/uninstall.sh src/web/install.sh; do dash -n "$f"; echo "ok $f"; done
+      - name: hook.sh под dash — ПК недоступен — событие в очереди
+        run: |
+          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME/.claude-notifier"
+          printf "CN_URL='http://127.0.0.1:9'\nCN_URL2=''\n" > "$HOME/.claude-notifier/env"
+          printf 'Authorization: Bearer x\n' > "$HOME/.claude-notifier/auth"
+          for i in 1 2; do echo '{"session_id":"s1"}' | dash src/mac/hook.sh stop; done
+          test "$(ls "$HOME/.claude-notifier/queue" | wc -l)" = 2
+      - name: settings.js (node) и settings.py (python3) — 8 хуков, повтор не дублирует, чужие не трогаются
+        run: |
+          for r in "node src/mac/settings.js" "python3 src/mac/settings.py"; do
+            S="$RUNNER_TEMP/s.json"
+            echo '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}' > "$S"
+            $r install "$S" "$HOME/.claude-notifier/hook.sh"
+            $r install "$S" "$HOME/.claude-notifier/hook.sh"
+            n=$(grep -o '.claude-notifier/hook.sh' "$S" | wc -l); echo "$r: $n"; test "$n" = 8
+            $r uninstall "$S" "$HOME/.claude-notifier/hook.sh"
+            if grep -q '.claude-notifier/hook.sh' "$S"; then echo "$r: хуки не убраны"; exit 1; fi
+            grep -q 'echo mine' "$S"; grep -q '"model"' "$S"
+          done
+      - name: hook.sh по https — верный отпечаток ключа доставляет, чужой — нет (событие в очереди)
+        run: |
+          cd "$RUNNER_TEMP"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 1 -subj '/CN=cn-test' 2>/dev/null
+          PIN="$(openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)"
+          cat > tls.py <<'EOF'
+          import http.server, ssl
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  b = self.rfile.read(int(self.headers.get('Content-Length', 0))); open('got.json', 'wb').write(b)
+                  self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+          s = http.server.HTTPServer(('127.0.0.1', 8766), H)
+          c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain('cert.pem', 'key.pem')
+          s.socket = c.wrap_socket(s.socket, server_side=True); s.serve_forever()
+          EOF
+          python3 tls.py & sleep 1
+          export HOME="$RUNNER_TEMP/home3"; mkdir -p "$HOME/.claude-notifier"
+          printf 'Authorization: Bearer x\n' > "$HOME/.claude-notifier/auth"
+          printf "CN_URL='https://127.0.0.1:8766'\nCN_URL2=''\nCN_PIN='%s'\n" "$PIN" > "$HOME/.claude-notifier/env"
+          echo '{"session_id":"tls1"}' | sh "$GITHUB_WORKSPACE/src/mac/hook.sh" stop
+          grep -q tls1 got.json; rm -f got.json
+          printf "CN_URL='https://127.0.0.1:8766'\nCN_URL2=''\nCN_PIN='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='\n" > "$HOME/.claude-notifier/env"
+          echo '{"session_id":"tls2"}' | sh "$GITHUB_WORKSPACE/src/mac/hook.sh" stop
+          test ! -f got.json
+          test "$(ls "$HOME/.claude-notifier/queue" | wc -l)" = 1
+      - name: install.sh целиком — поддельный ПК на python, без node (python3)
+        run: |
+          W="$RUNNER_TEMP/web"; mkdir -p "$W/mac" "$W/api"
+          cp src/mac/hook.sh src/mac/settings.js src/mac/settings.py src/mac/uninstall.sh "$W/mac/"
+          sha() { sha256sum "$1" | cut -d' ' -f1; }
+          sed -e "s#__URL__#http://127.0.0.1:8765#g" -e "s#__URL2__##" -e "s#__TOKEN__#t#" -e "s#__PCNAME__#PC#g" -e "s#__HOOKS_VER__#abc#" -e "s#__PIN__##" \
+              -e "s#__SHA_HOOK__#$(sha src/mac/hook.sh)#" -e "s#__SHA_SETTINGS__#$(sha src/mac/settings.js)#" \
+              -e "s#__SHA_SETTINGS_PY__#$(sha src/mac/settings.py)#" -e "s#__SHA_UNINSTALL__#$(sha src/mac/uninstall.sh)#" src/web/install.sh > "$RUNNER_TEMP/install.sh"
+          cat > "$RUNNER_TEMP/srv.py" <<'EOF'
+          import hashlib, http.server, os, sys
+          os.chdir(sys.argv[1])
+          class H(http.server.SimpleHTTPRequestHandler):
+              def do_GET(self):
+                  if not self.path.startswith('/api/mac/update'):
+                      return super().do_GET()
+                  if self.path.endswith('have=def'):
+                      self.send_response(204); self.end_headers(); return
+                  lines = ['version def'] + ['%s %s' % (f, hashlib.sha256(open('mac/' + f, 'rb').read()).hexdigest())
+                                             for f in ('hook.sh', 'settings.js', 'settings.py', 'uninstall.sh')]
+                  body = ('\n'.join(lines) + '\n').encode()
+                  self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+              def do_POST(self):
+                  n = int(self.headers.get('Content-Length', 0)); body = self.rfile.read(n)
+                  open(os.path.join(sys.argv[1], 'hello.json'), 'wb').write(body)
+                  self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+          http.server.HTTPServer(('127.0.0.1', 8765), H).serve_forever()
+          EOF
+          python3 "$RUNNER_TEMP/srv.py" "$W" & sleep 1
+          export HOME="$RUNNER_TEMP/home2"; mkdir -p "$HOME"
+          # Без /usr/local/bin и кэша инструментов: node не найден — работает ветка python3.
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin sh -c 'command -v node || echo "node не виден"; sh "$0"' "$RUNNER_TEMP/install.sh"
+          test "$(grep -o '.claude-notifier/hook.sh' "$HOME/.claude/settings.json" | wc -l)" = 8
+          grep -q '"os":"linux"' "$W/hello.json"
+          test "$(cat "$HOME/.claude-notifier/version")" = abc
+          # Самообновление: ПК раздаёт версию def — hook.sh при старте сеанса скачивает, сверяет и ставит её.
+          echo '{"session_id":"u1"}' | sh "$HOME/.claude-notifier/hook.sh" sessionstart
+          for i in $(seq 1 20); do [ "$(cat "$HOME/.claude-notifier/version")" = def ] && break; sleep 0.5; done
+          test "$(cat "$HOME/.claude-notifier/version")" = def
+          grep -q '"version":"def"' "$W/hello.json"
+          test "$(grep -o '.claude-notifier/hook.sh' "$HOME/.claude/settings.json" | wc -l)" = 8
+          sh "$HOME/.claude-notifier/uninstall.sh"
+          test ! -d "$HOME/.claude-notifier"
 
   macos:
     name: Скрипты Mac (sh, BSD-утилиты, osascript)

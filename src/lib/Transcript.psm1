@@ -23,6 +23,10 @@ $script:RxCommand = [regex]'"command":"((?:[^"\\]|\\.)*)"'
 $script:RxPreTokens = [regex]'"preTokens":(\d+)'
 $script:RxText = [regex]'"text":"((?:[^"\\]|\\.)*)"'
 $script:RxCwd = [regex]'"cwd":"((?:[^"\\]|\\.)*)"'
+$script:RxToolId = [regex]'"id":"(toolu_[^"]+)"'
+$script:RxToolResultId = [regex]'"tool_use_id":"(toolu_[^"]+)"'
+$script:RxContent = [regex]'"content":"((?:[^"\\]|\\.)*)"'
+$script:KeepFeed = 8
 $script:RxPattern = [regex]'"(?:pattern|description|url|query)":"((?:[^"\\]|\\.)*)"'
 $script:RxCache5m = [regex]'"ephemeral_5m_input_tokens":(\d+)'
 $script:RxCache1h = [regex]'"ephemeral_1h_input_tokens":(\d+)'
@@ -34,7 +38,8 @@ $script:KeepCommands = 5
 $script:ChunkBytes = 4MB   # сколько журнала читается в память за раз
 
 function New-TranscriptState {
-    return [ordered]@{ v = 4; offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
+    # feed — лента последних событий: @{ ts; k = you|claude|tool; text; id (у инструмента); ms (сколько шёл) }.
+    return [ordered]@{ v = 5; feed = @(); offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
         model = ''; maxCtx = [int64]0; compactions = 0; files = @(); toolCounts = @{}; commands = @(); lastActivity = ''; apiError = ''; apiErrorText = ''
         cost = [double]0; mIn = [int64]0; mRead = [int64]0; m5 = [int64]0; m1 = [int64]0; mModel = ''; mFast = $false; cwd = ''; cwdOk = $false; dirKey = ''; lastTool = ''; sub = $false }
 }
@@ -56,7 +61,7 @@ function Get-NotifierContextWindow {
     return [int64]200000
 }
 
-function Add-ToolUses($State, [string]$Line) {
+function Add-ToolUses($State, [string]$Line, [string]$Ts = '', [switch]$Feed) {
     # Каждый вызов инструмента: имя, изменённый файл (Edit/Write…), команда оболочки (Bash/PowerShell).
     $parts = $Line -split '"type":"tool_use"'
     for ($i = 1; $i -lt $parts.Count; $i++) {
@@ -74,6 +79,12 @@ function Add-ToolUses($State, [string]$Line) {
         if ($target.Length -gt 70) { $target = $target.Substring(0, 69) + [char]0x2026 }
         $State.lastTool = ($name -replace '^mcp__.*__', '')
         if ($target) { $State.lastTool += ": $target" }
+        if ($Feed) {
+            $idm = $script:RxToolId.Match($seg)
+            $tid = ''
+            if ($idm.Success) { $tid = $idm.Groups[1].Value }
+            Add-FeedItem $State $Ts 'tool' $State.lastTool $tid
+        }
         if ($script:EditTools -contains $name) {
             $f = $script:RxFilePath.Match($seg)
             if ($f.Success) {
@@ -87,6 +98,32 @@ function Add-ToolUses($State, [string]$Line) {
                 $cmd = ((ConvertFrom-JsonString $c.Groups[1].Value) -split "`n")[0].Trim()
                 if ($cmd.Length -gt 120) { $cmd = $cmd.Substring(0, 119) + [char]0x2026 }
                 $State.commands = @(@(@($State.commands) + $cmd) | Select-Object -Last $script:KeepCommands)
+            }
+        }
+    }
+}
+
+function Add-FeedItem($State, [string]$Ts, [string]$Kind, [string]$Text, [string]$Id = '') {
+    # Лента: последние $KeepFeed событий; текст — первая непустая строка, до 120 знаков.
+    $t = (@(($Text -replace "`r", '') -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) + '')[0]
+    if ($t -eq '') { return }
+    if ($t.Length -gt 120) { $t = $t.Substring(0, 119) + [char]0x2026 }
+    $item = [pscustomobject][ordered]@{ ts = $Ts; k = $Kind; text = $t; id = $Id; ms = -1 }
+    $list = @(@($State.feed) + $item)   # без конвейера: первый проход по журналу — тысячи строк
+    if ($list.Count -gt $script:KeepFeed) { $list = $list[($list.Count - $script:KeepFeed)..($list.Count - 1)] }
+    $State.feed = @($list)
+}
+
+function Set-FeedToolDone($State, [string]$Line, [string]$Ts) {
+    # Результат инструмента: сколько он шёл (от вызова до результата).
+    foreach ($m in $script:RxToolResultId.Matches($Line)) {
+        foreach ($it in @($State.feed)) {
+            if ($it.k -ne 'tool' -or $it.id -ne $m.Groups[1].Value -or [int64]$it.ms -ge 0) { continue }
+            $a = [DateTimeOffset]::MinValue; $b = [DateTimeOffset]::MinValue
+            $inv = [Globalization.CultureInfo]::InvariantCulture
+            if ([DateTimeOffset]::TryParse([string]$it.ts, $inv, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$a) -and
+                [DateTimeOffset]::TryParse($Ts, $inv, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$b)) {
+                $it.ms = [int64][Math]::Max(0, ($b - $a).TotalMilliseconds)
             }
         }
     }
@@ -141,7 +178,15 @@ function Update-TranscriptState {
     }
     if ($Line.Contains('"type":"assistant"')) {
         $State.tools += $script:RxToolUse.Matches($Line).Count
-        if ($Line.Contains('"tool_use"')) { Add-ToolUses $State $Line }
+        $own = $State.sub -or -not $Line.Contains('"isSidechain":true')
+        $tsm = $script:RxTimestamp.Match($Line)
+        $lineTs = ''
+        if ($tsm.Success) { $lineTs = $tsm.Groups[1].Value }
+        if ($own -and $Line.Contains('"type":"text"') -and -not $Line.Contains('"isApiErrorMessage":true')) {
+            $tx = $script:RxText.Match($Line)
+            if ($tx.Success) { Add-FeedItem $State $lineTs 'claude' (ConvertFrom-JsonString $tx.Groups[1].Value) }
+        }
+        if ($Line.Contains('"tool_use"')) { Add-ToolUses $State $Line $lineTs -Feed:$own }
         $mm = $script:RxModel.Match($Line)
         if ($mm.Success) { $State.model = $mm.Groups[1].Value }
         # Ошибка API (перегрузка, лимит, обрыв связи): Claude Code пишет её как ответ с isApiErrorMessage.
@@ -187,8 +232,24 @@ function Update-TranscriptState {
             if ($State.context -gt $State.maxCtx) { $State.maxCtx = $State.context }
         }
     }
-    elseif ($Line.Contains('"type":"user"') -and -not $Line.Contains('"tool_result"') -and -not $Line.Contains('"isMeta":true')) {
+    elseif ($Line.Contains('"type":"user"') -and $Line.Contains('"tool_result"')) {
+        if ($State.sub -or -not $Line.Contains('"isSidechain":true')) {
+            $tsm = $script:RxTimestamp.Match($Line)
+            if ($tsm.Success) { Set-FeedToolDone $State $Line $tsm.Groups[1].Value }
+        }
+    }
+    elseif ($Line.Contains('"type":"user"') -and -not $Line.Contains('"isMeta":true')) {
         $State.prompts++
+        if ($State.sub -or -not $Line.Contains('"isSidechain":true')) {
+            $tsm = $script:RxTimestamp.Match($Line)
+            $cm = $script:RxContent.Match($Line)
+            if (-not $cm.Success) { $cm = $script:RxText.Match($Line) }
+            if ($tsm.Success -and $cm.Success) {
+                $text = ConvertFrom-JsonString $cm.Groups[1].Value
+                # Служебные вставки Claude Code (<command-name>, <local-command-stdout>…) — не ваши сообщения.
+                if (-not $text.TrimStart().StartsWith('<')) { Add-FeedItem $State $tsm.Groups[1].Value 'you' $text }
+            }
+        }
     }
 }
 
@@ -214,7 +275,7 @@ function Get-NotifierTranscriptStats {
     if (Test-Path -LiteralPath $statePath) {
         try {
             $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8)) -ErrorAction Stop
-            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 4) { throw 'old state' }   # прежний формат: перечитать журнал целиком
+            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 5) { throw 'old state' }   # прежний формат: перечитать журнал целиком
             foreach ($k in @($state.Keys)) { if ($saved.PSObject.Properties[$k]) { $state[$k] = $saved.$k } }
             $state.offset = [int64]$state.offset; $state.output = [int64]$state.output; $state.lastOut = [int64]$state.lastOut; $state.context = [int64]$state.context
             $state.maxCtx = [int64]$state.maxCtx
@@ -222,6 +283,7 @@ function Get-NotifierTranscriptStats {
             $state.cost = [double]$state.cost; $state.mFast = [bool]$state.mFast; $state.cwdOk = [bool]$state.cwdOk
             $state.files = @(@($state.files) | Where-Object { $_ -is [string] })
             $state.commands = @(@($state.commands) | Where-Object { $_ -is [string] })
+            $state.feed = @(@($state.feed) | Where-Object { $_ -and $_.PSObject.Properties['k'] })
             $counts = @{}
             if ($state.toolCounts -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $state.toolCounts.PSObject.Properties) { $counts[$p.Name] = [int]$p.Value } }
             elseif ($state.toolCounts -is [hashtable]) { $counts = $state.toolCounts }
@@ -290,6 +352,7 @@ function Get-NotifierTranscriptStats {
         recentFiles = @(@($state.files) | Select-Object -Last 3 | ForEach-Object { [IO.Path]::GetFileName($_) })
         topTools    = $top
         commands    = @(@($state.commands) | Select-Object -Last 3)
+        feed        = @(@($state.feed) | ForEach-Object { [pscustomobject][ordered]@{ ts = [string]$_.ts; k = [string]$_.k; text = [string]$_.text; ms = [int64]$_.ms } })
     }
 }
 
@@ -358,7 +421,40 @@ function Format-NotifierSessionDetails {
     $prompt = ''
     if ($Session.PSObject.Properties['prompt']) { $prompt = [string]$Session.prompt }
     if ($prompt) { $lines += "Ваш запрос${tab}$prompt" }
+    # Лента: последние события сеанса — ваши сообщения, ответы Claude, инструменты и сколько они шли.
+    if ($stats -and $stats.PSObject.Properties['feed']) {
+        $feed = @(@($stats.feed) | Where-Object { $_ } | Select-Object -Last 5)
+        for ($i = 0; $i -lt $feed.Count; $i++) {
+            $it = $feed[$i]
+            $p = [DateTimeOffset]::MinValue
+            $when = ''
+            if ([DateTimeOffset]::TryParse([string]$it.ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$p)) {
+                $when = $p.ToLocalTime().ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+            }
+            $text = Format-NotifierShortText ([string]$it.text)
+            switch ([string]$it.k) {
+                'you' { $text = "Вы: $text" }
+                'claude' { $text = "Claude: $text" }
+                'tool' {
+                    $ms = [int64]$it.ms
+                    if ($ms -ge 1000) { $text += "${dot}$(Format-NotifierDuration $ms)" }
+                    elseif ($ms -lt 0 -and $i -eq $feed.Count - 1 -and [string]$Session.state -eq 'working') { $text += "${dot}идёт" }
+                }
+            }
+            $lines += "$when${tab}$text"
+        }
+    }
     return ($lines -join "`n")
+}
+
+function Format-NotifierDuration([int64]$Ms) {
+    # 3 400 → «3 с», 95 000 → «1 мин 35 с», 3 900 000 → «1 ч 5 мин».
+    $s = [int64][Math]::Floor($Ms / 1000)
+    if ($s -lt 60) { return "$s с" }
+    if ($s -lt 3600) { $r = "$([Math]::Floor($s / 60)) мин"; if ($s % 60) { $r += " $($s % 60) с" }; return $r }
+    $r = "$([Math]::Floor($s / 3600)) ч"
+    if (($s % 3600) -ge 60) { $r += " $([Math]::Floor(($s % 3600) / 60)) мин" }
+    return $r
 }
 
 function Format-NotifierAgentLines {
@@ -525,4 +621,4 @@ function Format-NotifierApiError {
     return $Text
 }
 
-Export-ModuleMember -Function Test-NotifierHelperTranscript, Get-NotifierLastAnswer,Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError
+Export-ModuleMember -Function Test-NotifierHelperTranscript, Get-NotifierLastAnswer,Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierDuration, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError

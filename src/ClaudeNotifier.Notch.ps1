@@ -47,7 +47,7 @@ function Format-NotifierScreenName {
     return $text
 }
 
-$script:NotchMascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi')   # порядок — как в списке настроек
+$script:NotchMascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi', 'dino', 'frog', 'reaper', 'onigiri', 'cupcat', 'fox', 'leaf', 'bee')   # порядок — как в списке настроек
 function Format-NotifierMascot([string]$Mascot) {
     switch ($Mascot) {
         'flatsphynx' { return 'Плоский сфинкс' }
@@ -57,6 +57,14 @@ function Format-NotifierMascot([string]$Mascot) {
         'kitty' { return 'Белый котик' }
         'ghost' { return 'Привидение' }
         'mochi' { return 'Моти' }
+        'dino' { return 'Динозаврик' }
+        'frog' { return 'Лягушка с чашкой' }
+        'reaper' { return 'Жнец' }
+        'onigiri' { return 'Онигири' }
+        'cupcat' { return 'Котик в чашке' }
+        'fox' { return 'Лисёнок' }
+        'leaf' { return 'Листик' }
+        'bee' { return 'Пчёлка' }
         default { return 'Сфинкс' }
     }
 }
@@ -300,6 +308,10 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow choice 'quiet' 'Без звука' 'Всегда или по часам' -Value (Get-NotifierSelectLabel 'quiet' -Config $c)
     $rows += New-NotifierNotchRow choice 'longTasks' 'Звук «Готово»' 'После задач дольше (или вас нет)' -Value (Get-NotifierSelectLabel 'longTasks' -Config $c)
     $rows += New-NotifierNotchRow choice 'budget' 'Расход за день' 'Предупредить, когда дойдёт до суммы' -Value (Get-NotifierSelectLabel 'budget' -Config $c)
+    $rows += New-NotifierNotchRow header -Title 'Телефон'
+    $rows += New-NotifierNotchRow button 'push' 'На телефон вне сети' (Format-NotifierPushTarget ([string]$c.push.url)) -Value 'Настроить'
+    $rows += New-NotifierNotchRow choice 'push.away' 'Отправлять' 'Через ntfy или Telegram' -Value (Get-NotifierSelectLabel 'push.away' -Config $c)
+    $rows += New-NotifierNotchRow switch 'push.preview' 'Текст вопроса' 'Уходит на сервер ntfy или Telegram' -On ([bool]$c.push.preview)
     $rows += New-NotifierNotchRow header -Title 'Ответы'
     $rows += New-NotifierNotchRow switch 'approvals' 'Запросы разрешения' 'Разрешать из шторки и с телефона' -On ([bool]$c.approvals.enabled)
     $rows += New-NotifierNotchRow switch 'quickReplies' 'Быстрые ответы' 'Отвечать после «Готово» без перехода в окно' -On ([bool]$c.quickReplies.enabled)
@@ -328,6 +340,11 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow header -Title 'Система'
     $auto = $false; try { $auto = [bool](Test-NotifierAutostart) } catch { }
     $rows += New-NotifierNotchRow switch 'autostart' 'Запускать при входе' 'Шторка сразу после включения ПК' -On $auto
+    $updValue = 'Проверить'
+    if ($script:UpdateInfo) { $updValue = 'Обновить' }
+    $rows += New-NotifierNotchRow button 'update' 'Обновления' (Format-NotifierUpdateSubtitle) -Value $updValue
+    $rows += New-NotifierNotchRow switch 'update.enabled' 'Проверять обновления' 'Раз в 6 часов на GitHub' -On ([bool]$c.update.enabled)
+    $rows += New-NotifierNotchRow button 'diag' 'Проверка работы' 'Хуки, приём событий, сеть, устройства, журнал' -Value 'Проверить'
     $rows += New-NotifierNotchRow button 'data' 'Папка данных' (Format-NotifierShortText ([string]$script:TrayDataRoot)) -Value 'Открыть'
     $rows += New-NotifierNotchRow button 'export' 'Экспорт настроек' 'Сохранить в файл для другого ПК' -Value 'Сохранить…'
     $rows += New-NotifierNotchRow button 'import' 'Импорт настроек' 'Загрузить из сохранённого файла' -Value 'Загрузить…'
@@ -346,6 +363,10 @@ function Get-NotifierNotchDevicesRows {
     $rows += New-NotifierNotchRow header -Title 'Доступ из сети'
     $rows += New-NotifierNotchRow switch 'net' 'Доступ из сети' $sub -On $on
     $rows += New-NotifierNotchRow button 'connect' 'Подключить устройство' 'Mac или телефон в той же сети Wi-Fi' -Value 'Подключить'
+    if ($net.Server) {
+        if ($net.Tls) { $rows += New-NotifierNotchRow info 'tls' 'Шифрование' "Включено $([char]0x00B7) хуки ходят по https, порт $($net.Tls.Port)" }
+        else { $rows += New-NotifierNotchRow button 'tls' 'Шифрование' "Выключено $([char]0x2014) токены хуков идут по Wi-Fi открытым текстом" -Value 'Включить' }
+    }
     $counts = @{}
     foreach ($s in $Sessions) { if ($null -eq $s) { continue }; $id = ''; if ($s.PSObject.Properties['device']) { $id = [string]$s.device }; $counts[$id] = 1 + [int]$counts[$id] }
     $devices = @($net.Network.devices | Where-Object { $_ })
@@ -463,6 +484,8 @@ function Invoke-NotifierNotchSetting {
         '^event\.(done|permission|error|limit)$' { Set-NotifierEventOption -Type $Matches[1] -Enabled (-not [bool]$c.events[$Matches[1]].enabled) }
         '^(approvals|quickReplies|groups)$' { Set-NotifierOptionValue -Name $Key -Value (-not [bool]$c[$Key].enabled); $script:SessionsDirty = $true }
         '^showPrompt$' { Set-NotifierOptionValue -Name showPrompt -Value (-not [bool]$c.showPrompt) }
+        '^update\.enabled$' { Set-NotifierOptionValue -Name update -Value (-not [bool]$c.update.enabled) }
+        '^push\.preview$' { Set-NotifierOptionValue -Name push -Field preview -Value (-not [bool]$c.push.preview) }
         '^notch\.attention$' {
             $on = -not [bool]$c.notch.attention
             Set-NotifierOptionValue -Name notch -Field attention -Value $on
@@ -626,6 +649,12 @@ function Get-NotifierSelectOptions {
             $cur = if ($c.inactive.enabled) { [string][int]$c.inactive.hours } else { 'off' }
             Get-NumberSelectOptions -Values 1, 2, 4, 8, 24 -Current $cur -Off 'off' -Format { "$($args[0]) ч" }
         }
+        '^push\.away$' {
+            $cur = if ($c.push.enabled) { [string][int]$c.push.away } else { 'off' }
+            New-SelectOption 'off' 'Выключено' ($cur -eq 'off')
+            New-SelectOption '0' 'Всегда' ($cur -eq '0')
+            foreach ($m in @(5, 15, 30)) { New-SelectOption ([string]$m) "Нет за ПК $m мин" ($cur -eq [string]$m) }
+        }
         '^budget$' {
             $cur = if ($c.budget.enabled) { [string][int]$c.budget.daily } else { 'off' }
             Get-NumberSelectOptions -Values 5, 10, 20, 50, 100, 200 -Current $cur -Off 'off' -Format { "`$$($args[0])" }
@@ -705,6 +734,11 @@ function Set-NotifierSelectValue {
             Set-NotifierMascot
         }
         '^remind$' { Set-NotifierOptionValue -Name approvals -Field remindMinutes -Value ([int]$Value) }
+        '^push\.away$' {
+            if ($Value -eq 'off') { Set-NotifierOptionValue -Name push -Value $false }
+            elseif ($null -eq (Get-NotifierPushTarget ([string]$config.push.url))) { Edit-NotifierPushSettings -Away ([int]$Value) }
+            else { $section = $config.push; $section.enabled = $true; $section.away = [int]$Value; Set-NotifierConfigValue -Name push -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot }
+        }
         '^(longTasks|context|stalled|inactive|budget)$' {
             $name = $Matches[1]
             $field = @{ longTasks = 'minutes'; context = 'warnPercent'; stalled = 'minutes'; inactive = 'hours'; budget = 'daily' }[$name]
@@ -949,7 +983,11 @@ function Invoke-NotifierNotchCommand {
                 elseif ($id -eq 'export') { Export-NotifierSettingsDialog }
                 elseif ($id -eq 'import') { Import-NotifierSettingsDialog }
                 elseif ($id -eq 'connect') { Show-NotifierConnectDialog }
+                elseif ($id -eq 'tls') { [void](Enable-NotifierNetworkTls -Owner $null) }
                 elseif ($id -eq 'replyTexts') { Edit-NotifierQuickReplyTexts }
+                elseif ($id -eq 'push') { Edit-NotifierPushSettings }
+                elseif ($id -eq 'update') { [void](Invoke-NotifierUpdateNow) }
+                elseif ($id -eq 'diag') { Show-NotifierDiagnostics }
                 elseif ($id -like 'sound.*') { $keepHold = $true; Show-NotifierSoundMenuAt -Type $id.Substring(6) -Location $Event.Location }
                 elseif ($Event.Action) { Invoke-NotifierDeviceActionById -Id $id -Action ([string]$Event.Action) }
                 Push-NotifierNotchPage

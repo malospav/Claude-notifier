@@ -87,15 +87,15 @@
   </header>
 
   <section class="banner" id="mac" hidden>
-    <h2>Показывать здесь сеансы этого Mac</h2>
-    <p>Установите хуки Claude Code на этот Mac — одна команда в Терминале.</p>
+    <h2>Показывать здесь сеансы этого компьютера</h2>
+    <p>Установите хуки Claude Code на этот Mac, Linux или в WSL — одна команда в терминале. Для WSL откройте эту страницу в Windows и выполните команду в окне WSL.</p>
     <div id="mac-step1"><button id="mac-get">Получить команду установки</button></div>
     <div id="mac-step2" hidden>
       <textarea id="mac-cmd" rows="2" readonly></textarea>
       <div class="row" style="margin-top:8px"><button id="mac-copy">Скопировать</button><span class="sub" id="mac-copied"></span></div>
       <ol>
-        <li>Откройте Терминал: ⌘ + Пробел, наберите «Терминал», Enter.</li>
-        <li>Вставьте команду (⌘ V) и нажмите Enter.</li>
+        <li>Откройте терминал (на Mac: ⌘ + Пробел, «Терминал», Enter; для WSL — окно Ubuntu или «wsl»).</li>
+        <li>Вставьте команду и нажмите Enter.</li>
         <li>Команда действует 10 минут и только один раз.</li>
       </ol>
     </div>
@@ -219,11 +219,12 @@
     });
   }
 
-  function isMac() { return /Macintosh/.test(navigator.userAgent) && !(navigator.maxTouchPoints > 1); }
+  // Хуки ставятся на компьютер: Mac, Linux или Windows (для WSL); не на телефон и планшет.
+  function isDesktop() { return /Macintosh|Windows|Linux|X11/.test(navigator.userAgent) && !/Android|iPhone|iPad|Mobile/.test(navigator.userAgent) && !(navigator.maxTouchPoints > 1); }
 
   fetch('/api/me', { credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (m) {
     me = m;
-    if (m && !m.hooks && isMac()) document.getElementById('mac').hidden = false;
+    if (m && !m.hooks && isDesktop()) document.getElementById('mac').hidden = false;
   });
 
   document.getElementById('mac-get').onclick = function () {
@@ -240,7 +241,7 @@
     var t = document.getElementById('mac-cmd'), done = false;
     t.focus(); t.select();
     try { done = document.execCommand('copy'); } catch (e) { }
-    document.getElementById('mac-copied').textContent = done ? 'Скопировано' : 'Выделите и скопируйте ⌘ C';
+    document.getElementById('mac-copied').textContent = done ? 'Скопировано' : 'Выделите и скопируйте (⌘ C или Ctrl+C)';
   }
   document.getElementById('mac-copy').onclick = copy;
 

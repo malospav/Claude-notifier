@@ -32,6 +32,7 @@ function Initialize-NotifierNet {
         Error        = ''
         DataRoot     = $DataRoot
         Address      = Get-NotifierLanAddress
+        Tls          = $null   # @{ Port; Pin } — шифрование настроено (setup-network.ps1), сервер слушает и https
         PcName       = $env:COMPUTERNAME
     }
     if ($script:Net.Network.enabled) { [void](Start-NotifierNetServer) }
@@ -43,7 +44,17 @@ function Start-NotifierNetServer {
     if ($net.Server) { return $true }
     $net.Address = Get-NotifierLanAddress
     try {
-        $net.Server = Start-NotifierHttpServer -Prefix (Get-NotifierHttpPrefix -Port $net.Network.port) -Queue $net.Queue
+        $prefixes = @(Get-NotifierHttpPrefix -Port $net.Network.port)
+        $net.Tls = Test-NotifierTlsSetup -Port $net.Network.port
+        if ($net.Tls) { $prefixes += "https://+:$($net.Tls.Port)/" }
+        try { $net.Server = Start-NotifierHttpServer -Prefix $prefixes -Queue $net.Queue }
+        catch {
+            if (-not $net.Tls) { throw }
+            # https не поднялся (нет резервации URL) — работаем без шифрования, как раньше.
+            Write-NotifierLog -Level WARN -Message "network: https не запущен ($($_.Exception.Message)) $([char]0x2014) только http" -DataRoot $net.DataRoot
+            $net.Tls = $null
+            $net.Server = Start-NotifierHttpServer -Prefix $prefixes[0] -Queue $net.Queue
+        }
         $net.Error = ''
         Write-NotifierLog -Level INFO -Message "network: сервер запущен на порту $($net.Network.port)" -DataRoot $net.DataRoot
         return $true

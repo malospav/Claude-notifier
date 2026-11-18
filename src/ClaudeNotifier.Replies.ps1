@@ -244,6 +244,7 @@ function Invoke-NotifierToastButton {
     #>
     param([AllowEmptyString()][string]$Arguments, [string]$DataRoot = $script:TrayDataRoot)
     $p = $Arguments -split '\|'
+    if ($Arguments -eq 'cn|||update') { return (Invoke-NotifierUpdateNow) }   # уведомление «Доступно обновление»
     if ($p.Count -ne 4 -or $p[0] -ne 'cn' -or $p[3] -notmatch '^(allow|always|deny|answer:\d+|reply:\d+)$') { return '' }
     $session = @(Get-NotifierSessions -DataRoot $DataRoot | Where-Object { [string]$_.session_id -eq $p[1] }) | Select-Object -First 1
     if ($null -eq $session) { return 'Сеанс уже завершён' }

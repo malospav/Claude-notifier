@@ -20,6 +20,7 @@ $script:StaticFiles = @{
     '/mac/hook.sh'      = @('mac\hook.sh', 'text/plain; charset=utf-8')
     '/mac/settings.js'  = @('mac\settings.js', 'text/plain; charset=utf-8')
     '/mac/uninstall.sh' = @('mac\uninstall.sh', 'text/plain; charset=utf-8')
+    '/mac/settings.py'  = @('mac\settings.py', 'text/plain; charset=utf-8')   # Linux и WSL без Node.js
 }
 
 # Тело запроса читается здесь, в фоновом runspace, с жёстким сроком: медленный или зависший клиент
@@ -64,6 +65,58 @@ function Get-NotifierHttpPrefix {
     return "http://+:$Port/"
 }
 
+# --- HTTPS в локальной сети ---
+# setup-network.ps1 (с правами администратора) создаёт самоподписанный сертификат «claude-notifier» в LocalMachine\My
+# и привязывает его к порту <port + 1> (netsh http add sslcert). Хуки Mac, Linux и WSL ходят по https и сверяют
+# отпечаток открытого ключа (curl --pinnedpubkey sha256//…), запомненный при установке: токены не идут открытым текстом.
+
+function Get-NotifierTlsPort([int]$Port) { return ($Port + 1) }
+
+function Get-NotifierTlsCertificate {
+    <# .SYNOPSIS Сертификат claude-notifier (самый свежий) из LocalMachine\My или $null. Открытая часть читается без прав администратора. #>
+    param([string]$Store = 'Cert:\LocalMachine\My')
+    try {
+        return (@(Get-ChildItem -LiteralPath $Store -ErrorAction Stop | Where-Object { $_.FriendlyName -eq 'claude-notifier' -and $_.NotAfter -gt [DateTime]::Now }) |
+            Sort-Object NotAfter -Descending | Select-Object -First 1)
+    }
+    catch { return $null }
+}
+
+function ConvertTo-DerLength([int]$N) {
+    if ($N -lt 128) { return , [byte[]]@($N) }
+    $b = @(); while ($N -gt 0) { $b = @([byte]($N -band 0xFF)) + $b; $N = $N -shr 8 }
+    return , [byte[]](@([byte](0x80 + $b.Count)) + $b)
+}
+
+function Get-NotifierTlsPin {
+    <#
+    .SYNOPSIS
+    Отпечаток для curl --pinnedpubkey: base64(SHA-256(SubjectPublicKeyInfo)) — как
+    openssl x509 -pubkey | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64.
+    #>
+    param([Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+    $pk = $Certificate.PublicKey
+    if ($pk.Oid.Value -ne '1.2.840.113549.1.1.1') { throw "ключ $($pk.Oid.Value) не поддерживается (нужен RSA)" }
+    $algDer = [byte[]]@(0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00)   # rsaEncryption, NULL
+    $key = $pk.EncodedKeyValue.RawData
+    $bits = [byte[]](@([byte]0x03) + (ConvertTo-DerLength ($key.Length + 1)) + @([byte]0x00) + $key)
+    $body = [byte[]]($algDer + $bits)
+    $spki = [byte[]](@([byte]0x30) + (ConvertTo-DerLength $body.Length) + $body)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return [Convert]::ToBase64String($sha.ComputeHash($spki)) } finally { $sha.Dispose() }
+}
+
+function Test-NotifierTlsSetup {
+    <# .SYNOPSIS Сертификат есть и привязан к порту <Port + 1> (netsh http show sslcert). Возвращает @{ Port; Pin } или $null. #>
+    param([Parameter(Mandatory = $true)][int]$Port)
+    $cert = Get-NotifierTlsCertificate
+    if ($null -eq $cert) { return $null }
+    $tp = Get-NotifierTlsPort $Port
+    $o = (& netsh http show sslcert ipport=0.0.0.0:$tp 2>$null) -join "`n"
+    if ($o.IndexOf($cert.Thumbprint, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $null }
+    try { return @{ Port = $tp; Pin = (Get-NotifierTlsPin -Certificate $cert) } } catch { return $null }
+}
+
 function Start-NotifierHttpServer {
     <#
     .SYNOPSIS
@@ -72,11 +125,11 @@ function Start-NotifierHttpServer {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][string]$Prefix,
+        [Parameter(Mandatory = $true)][string[]]$Prefix,   # http://+:47600/ и, если настроено шифрование, https://+:47601/
         [Parameter(Mandatory = $true)][System.Collections.Concurrent.ConcurrentQueue[object]]$Queue
     )
     $listener = New-Object System.Net.HttpListener
-    $listener.Prefixes.Add($Prefix)
+    foreach ($p in $Prefix) { $listener.Prefixes.Add($p) }
     $listener.IgnoreWriteExceptions = $true
     $listener.Start()
     try {
@@ -246,9 +299,11 @@ function Test-NotifierMacHooksOutdated {
     try { return ($ver -ne (Get-NotifierMacHooksVersion)) } catch { return $false }
 }
 
-function Get-NotifierServerBaseUrl([hashtable]$Ctx) {
+function Get-NotifierServerBaseUrl([hashtable]$Ctx, [switch]$Secure) {
+    # -Secure — адрес https (если шифрование настроено): для хуков и команды установки.
     $address = $Ctx.Address
     if ([string]::IsNullOrEmpty($address)) { $address = '127.0.0.1' }
+    if ($Secure -and $Ctx['Tls']) { return "https://$($address):$($Ctx.Tls.Port)" }
     return "http://$($address):$($Ctx.Network.port)"
 }
 
@@ -369,12 +424,14 @@ function Invoke-NotifierHttpRequest {
         }
         $token = Add-NotifierDeviceToken -Device $device -Hook
         $Ctx.NetworkDirty = $true
-        $base = Get-NotifierServerBaseUrl $Ctx
+        $base = Get-NotifierServerBaseUrl $Ctx -Secure
         $alt = "http://$($Ctx.PcName.ToLowerInvariant()).local:$($Ctx.Network.port)"
+        $pin = ''
+        if ($Ctx['Tls']) { $alt = "https://$($Ctx.PcName.ToLowerInvariant()).local:$($Ctx.Tls.Port)"; $pin = [string]$Ctx.Tls.Pin }
         # SHA-256 файлов: install.sh сверяет скачанное и не ставит подменённые по дороге скрипты.
         $script = Get-WebTemplate 'install.sh' @{
-            URL = $base; URL2 = $alt; TOKEN = $token; PCNAME = $Ctx.PcName
-            HOOKS_VER = (Get-NotifierMacHooksVersion); SHA_HOOK = (Get-StaticSha256 '/mac/hook.sh'); SHA_SETTINGS = (Get-StaticSha256 '/mac/settings.js'); SHA_UNINSTALL = (Get-StaticSha256 '/mac/uninstall.sh')
+            URL = $base; URL2 = $alt; TOKEN = $token; PCNAME = $Ctx.PcName; PIN = $pin
+            HOOKS_VER = (Get-NotifierMacHooksVersion); SHA_HOOK = (Get-StaticSha256 '/mac/hook.sh'); SHA_SETTINGS = (Get-StaticSha256 '/mac/settings.js'); SHA_UNINSTALL = (Get-StaticSha256 '/mac/uninstall.sh'); SHA_SETTINGS_PY = (Get-StaticSha256 '/mac/settings.py')
         }
         Write-NotifierLog -Level INFO -Message "network: скрипт установки выдан устройству $($device.id)" -DataRoot $Ctx.DataRoot
         return (New-HttpResponse 200 $script)
@@ -463,6 +520,8 @@ function Invoke-NotifierHttpRequest {
         $code = New-NotifierToken
         $Ctx.InstallCodes[$code] = @{ DeviceId = [string]$device.id; Expires = $Now.AddMinutes($script:InstallCodeMinutes) }
         $command = "curl -fsSL $(Get-NotifierServerBaseUrl $Ctx)/install/$code | sh"
+        # Шифрование настроено — и сама команда идёт по https с проверкой отпечатка ключа ПК.
+        if ($Ctx['Tls']) { $command = "curl -fsSLk --pinnedpubkey 'sha256//$($Ctx.Tls.Pin)' $(Get-NotifierServerBaseUrl $Ctx -Secure)/install/$code | sh" }
         return (New-JsonResponse 200 @{ command = $command; minutes = $script:InstallCodeMinutes })
     }
     if ($method -eq 'POST' -and $path -eq '/api/hello') {
@@ -483,6 +542,11 @@ function Invoke-NotifierHttpRequest {
         $ver = $ver -replace '[^0-9a-f]', ''
         if ($ver.Length -gt 64) { $ver = $ver.Substring(0, 64) }
         $device | Add-Member -NotePropertyName hooks_ver -NotePropertyValue $ver -Force
+        # Система: mac | linux | wsl (у прежних установок поля нет — это Mac).
+        $os = 'mac'
+        try { $os = [string](ConvertFrom-Json -InputObject $Request.Body -ErrorAction Stop).os } catch { }
+        if (@('mac', 'linux', 'wsl') -notcontains $os) { $os = 'mac' }
+        $device | Add-Member -NotePropertyName os -NotePropertyValue $os -Force
         # Тот же Mac подключён заново. Прежнее подключение с этим именем ещё в списке — его сеансы переходят
         # к новому, а оно удаляется (иначе два «MacBook» и сеансы на мёртвом). Уже отключённое — сеансы возвращаются.
         if ([string]$device.name -ne '') {
@@ -513,6 +577,14 @@ function Invoke-NotifierHttpRequest {
             return ($o.PSObject.Properties['device'] -and [string]$o.device -eq $devId)
         }
         switch ("$method $path") {
+            'GET /api/mac/update' {
+                # Самообновление хуков: версия совпадает — 204; иначе список файлов с SHA-256 (hook.sh сверяет скачанное).
+                $ver = Get-NotifierMacHooksVersion
+                if ([string]$Request.Query['have'] -eq $ver) { return (New-HttpResponse 204 '') }
+                $lines = @("version $ver")
+                foreach ($f in @('hook.sh', 'settings.js', 'settings.py', 'uninstall.sh')) { $lines += "$f $(Get-StaticSha256 "/mac/$f")" }
+                return (New-HttpResponse 200 (($lines -join "`n") + "`n"))
+            }
             'POST /api/mac/permreq' {
                 # Как на ПК: в приложении Claude ждём полный срок (у него свой диалог параллельно), в CLI — cliWaitSeconds.
                 if (-not $config.approvals.enabled -or $null -eq $hookJson) { return (New-HttpResponse 204 '') }
@@ -635,4 +707,4 @@ function Invoke-NotifierNetworkSetup {
     return 'failed'
 }
 
-Export-ModuleMember -Function Get-NotifierMacHooksVersion, Test-NotifierMacHooksOutdated, Test-NotifierNetworkSetup, Invoke-NotifierNetworkSetup, Get-NotifierHttpPrefix, Start-NotifierHttpServer, Stop-NotifierHttpServer, ConvertFrom-NotifierHttpContext, Write-NotifierHttpResponse, Get-NotifierSessionsPayload, Invoke-NotifierHttpRequest, Get-NotifierServerBaseUrl
+Export-ModuleMember -Function Get-NotifierTlsPort, Get-NotifierTlsCertificate, Get-NotifierTlsPin, Test-NotifierTlsSetup, Get-NotifierMacHooksVersion, Test-NotifierMacHooksOutdated, Test-NotifierNetworkSetup, Invoke-NotifierNetworkSetup, Get-NotifierHttpPrefix, Start-NotifierHttpServer, Stop-NotifierHttpServer, ConvertFrom-NotifierHttpContext, Write-NotifierHttpResponse, Get-NotifierSessionsPayload, Invoke-NotifierHttpRequest, Get-NotifierServerBaseUrl
