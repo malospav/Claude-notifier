@@ -333,7 +333,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         Assert-MockCalled Show-NotifierSelect -Times 1 -Exactly -ParameterFilter { $Key -eq 'mascot:' -and $Width -eq 160 -and $Location.Y -eq 20 }
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should Be 'sphynx'   # щелчок сам ничего не меняет
         $opts = @(Get-NotifierSelectOptions -Key 'mascot:')
-        ($opts | ForEach-Object { $_.Label }) -join ',' | Should Be 'Сфинкс,Огонёк'
+        ($opts | ForEach-Object { $_.Label }) -join ',' | Should Be 'Сфинкс,Плоский сфинкс,Огонёк,Котик в коробке,Пингвин,Белый котик,Привидение,Моти'
         @($opts | Where-Object { $_.Current })[0].Value | Should Be 'sphynx'
         Set-NotifierSelectValue -Key 'mascot:' -Value 'flame'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should Be 'flame'
@@ -593,5 +593,51 @@ Describe 's_015_01 · шторка вверху экрана' {
         finally { $g.Dispose(); $bmp.Dispose() }
         # Выбор маскота: неизвестное значение — сфинкс.
         [ClaudeNotifier.Ui.Mascot]::Kind = 'whatever'; [ClaudeNotifier.Ui.Mascot]::Kind | Should Be 'sphynx'
+    }
+
+    It 'плоские маскоты: список совпадает с настройками и config.json, каждый рисуется во всех состояниях' {
+        $kinds = @([ClaudeNotifier.Ui.Mascot]::Kinds)
+        ($kinds -join ',') | Should Be ($script:NotchMascots -join ',')
+        $root = Join-Path $TestDrive 'mascots'
+        New-Item -ItemType Directory $root -Force | Out-Null
+        $bmp = New-Object System.Drawing.Bitmap 160, 130
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            foreach ($k in $kinds) {
+                # config.json принимает маскота и для этого ПК, и для устройства
+                [IO.File]::WriteAllText((Join-Path $root 'config.json'), "{`"notch`":{`"mascot`":`"$k`",`"mascots`":{`"d1`":`"$k`"}}}", [Text.Encoding]::UTF8)
+                $cfg = Get-NotifierConfig -DataRoot $root
+                $cfg.notch.mascot | Should Be $k
+                $cfg.notch.mascots['d1'] | Should Be $k
+                Format-NotifierMascot $k | Should Not BeNullOrEmpty
+                [ClaudeNotifier.Ui.Mascot]::SetDevice('d1', $k)
+                [ClaudeNotifier.Ui.Mascot]::For('d1') | Should Be $k
+                if ($k -eq 'sphynx') { continue }   # 3D — отдельные тесты, нужен WPF
+                # Картинка для списка выбора: нужного размера и не пустая
+                $pv = [ClaudeNotifier.Ui.Mascot]::Preview($k, 30)
+                try {
+                    $pv.Width | Should Be 30
+                    $opaque = 0
+                    for ($x = 0; $x -lt 30; $x += 3) { for ($y = 0; $y -lt 30; $y += 3) { if ($pv.GetPixel($x, $y).A -gt 200) { $opaque++ } } }
+                    ($opaque -gt 10) | Should Be $true
+                }
+                finally { $pv.Dispose() }
+                $mood = New-Object ClaudeNotifier.Ui.CatMood
+                $mood.Agents = 2; $mood.HasLook = $true; $mood.LookX = 0.5
+                foreach ($st in @('working', 'permission', 'waiting', 'error', 'stalled', 'none', '')) {
+                    foreach ($size in @(1, 14, 40, 120)) {
+                        $g.Clear([System.Drawing.Color]::Black)
+                        [ClaudeNotifier.Ui.Mascot]::Paint($g, (New-Object System.Drawing.RectangleF(10, 5, $size, $size)), $st, 1.3, 2, $true, $mood, 'd1')
+                    }
+                }
+                # Маскот действительно нарисован: в середине кадра не чёрный фон
+                $g.Clear([System.Drawing.Color]::Black)
+                [ClaudeNotifier.Ui.Mascot]::Paint($g, (New-Object System.Drawing.RectangleF(20, 10, 120, 110)), 'waiting', 0, 1, $false, $null, 'd1')
+                $hit = 0
+                for ($x = 50; $x -le 110; $x += 6) { for ($y = 50; $y -le 110; $y += 6) { $p = $bmp.GetPixel($x, $y); if ($p.R + $p.G + $p.B -gt 120) { $hit++ } } }
+                ($hit -gt 10) | Should Be $true
+            }
+        }
+        finally { $g.Dispose(); $bmp.Dispose(); [ClaudeNotifier.Ui.Mascot]::ClearDevices() }
     }
 }

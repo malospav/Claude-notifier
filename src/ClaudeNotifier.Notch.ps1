@@ -47,9 +47,18 @@ function Format-NotifierScreenName {
     return $text
 }
 
-$script:NotchMascots = @('sphynx', 'flame')
+$script:NotchMascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi')   # порядок — как в списке настроек
 function Format-NotifierMascot([string]$Mascot) {
-    switch ($Mascot) { 'flame' { return 'Огонёк' } default { return 'Сфинкс' } }
+    switch ($Mascot) {
+        'flatsphynx' { return 'Плоский сфинкс' }
+        'flame' { return 'Огонёк' }
+        'boxcat' { return 'Котик в коробке' }
+        'penguin' { return 'Пингвин' }
+        'kitty' { return 'Белый котик' }
+        'ghost' { return 'Привидение' }
+        'mochi' { return 'Моти' }
+        default { return 'Сфинкс' }
+    }
 }
 
 function Set-NotifierMascot {
@@ -62,7 +71,7 @@ function Set-NotifierMascot {
 }
 
 function Get-NotifierMascotOf {
-    <# .SYNOPSIS Маскот устройства ('' — этот ПК): sphynx | flame. У устройства без своего — как у этого ПК. #>
+    <# .SYNOPSIS Маскот устройства ('' — этот ПК): одно из NotchMascots. У устройства без своего — как у этого ПК. #>
     param([string]$Device = '', $Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
     if ($Device -ne '' -and $Config.notch.mascots.ContainsKey($Device)) { return [string]$Config.notch.mascots[$Device] }
     return [string]$Config.notch.mascot
@@ -701,16 +710,33 @@ function Show-NotifierSelect {
     )
     $options = @(Get-NotifierSelectOptions -Key $Key)
     if ($options.Count -eq 0) { return }
-    if ($script:SelectMenu -and -not $script:SelectMenu.IsDisposed) { $script:SelectMenu.Dispose() }
+    if ($script:SelectMenu -and -not $script:SelectMenu.IsDisposed) {
+        foreach ($it in @($script:SelectMenu.Items)) { if ($it.Image) { $it.Image.Dispose() } }   # картинки маскотов
+        $script:SelectMenu.Dispose()
+    }
     $theme = [ClaudeNotifier.Ui.Theme]::Create($true)
     $menu = New-NotifierMenu -Theme $theme
     $menu.ShowCheckMargin = $true
     if ($Width -gt 0) { $menu.MinimumSize = New-Object System.Drawing.Size($Width, 0) }
+    # Маскоты — с картинкой у каждого пункта: выбирать по виду, а не по названию.
+    $mascots = $Key -match '^(notch\.mascot|mascot:)'
+    $pcMascot = ''
+    if ($mascots -and ('ClaudeNotifier.Ui.Mascot' -as [type])) {
+        $menu.ShowImageMargin = $true
+        $menu.ImageScalingSize = New-Object System.Drawing.Size($theme.S(30), $theme.S(30))
+        $pcMascot = [string](Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot
+    }
+    else { $mascots = $false }
     $script:SelectAfter = $After
     foreach ($o in $options) {
         if ($o.Separator) { [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) }
         $mi = New-Object System.Windows.Forms.ToolStripMenuItem ([string]$o.Label)
         $mi.Padding = New-Object System.Windows.Forms.Padding($theme.S(4), $theme.S(5), $theme.S(8), $theme.S(5))
+        if ($mascots) {
+            $kind = if ([string]$o.Value -eq '') { $pcMascot } else { [string]$o.Value }   # «Как у этого ПК» — маскот ПК
+            $mi.Image = [ClaudeNotifier.Ui.Mascot]::Preview($kind, $theme.S(30))
+            $mi.ImageScaling = [System.Windows.Forms.ToolStripItemImageScaling]::None
+        }
         $mi.Checked = [bool]$o.Current
         $mi.Tag = @{ Key = $Key; Value = [string]$o.Value }
         $mi.add_Click({

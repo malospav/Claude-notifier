@@ -19,6 +19,9 @@ $NotifierStrings = @{
     'state.error'      = 'Ошибка'
 }
 
+# Маскоты шторки (ClaudeNotifier.Ui.Mascot.Kinds): 3D-сфинкс и плоские векторные.
+$script:Mascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi')
+
 function Get-NotifierDefaultConfig {
     <#
     .SYNOPSIS
@@ -48,7 +51,7 @@ function Get-NotifierDefaultConfig {
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
-        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{} }   # mascots — маскот сеансов с других устройств: { id устройства: sphynx | flame }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{} }   # mascot — sphynx | flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
     }
 }
@@ -273,13 +276,13 @@ function Get-NotifierConfig {
         }
         $mascot = Get-JsonProperty $notch.value 'mascot'
         if ($mascot.found) {
-            if (@('sphynx', 'flame') -contains [string]$mascot.value) { $config.notch.mascot = [string]$mascot.value }
-            else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.mascot' должно быть sphynx или flame" -DataRoot $DataRoot }
+            if ($script:Mascots -contains [string]$mascot.value) { $config.notch.mascot = [string]$mascot.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.mascot' должно быть одним из: $($script:Mascots -join ', ')" -DataRoot $DataRoot }
         }
         $mascots = Get-JsonProperty $notch.value 'mascots'
         if ($mascots.found -and $mascots.value -is [System.Management.Automation.PSCustomObject]) {
             foreach ($p in $mascots.value.PSObject.Properties) {
-                if (@('sphynx', 'flame') -contains [string]$p.Value) { $config.notch.mascots[[string]$p.Name] = [string]$p.Value }
+                if ($script:Mascots -contains [string]$p.Value) { $config.notch.mascots[[string]$p.Name] = [string]$p.Value }
             }
         }
     }
