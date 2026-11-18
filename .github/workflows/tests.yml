@@ -19,36 +19,11 @@ jobs:
         shell: powershell
         run: |
           Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
-      # Только латиница в скриптах шагов: Windows PowerShell 5.1 читает временный .ps1 без BOM как ANSI,
-      # и кириллица ломает разбор (тесты тогда вовсе не запускаются). Файлы тестов — UTF-8 с BOM, с ними всё в порядке.
+      # Каждый файл тестов — в своём процессе с ограничением 4 минуты; упавшие и зависшие — аннотациями ::error
+      # (видны без входа в GitHub). Скрипт шага — только латиница: Windows PowerShell 5.1 читает его без BOM как ANSI.
       - name: Тесты
         shell: powershell
-        run: |
-          [Console]::OutputEncoding = [Text.Encoding]::UTF8
-          Import-Module Pester -RequiredVersion 5.7.1
-          $c = New-PesterConfiguration
-          $c.Run.Path = 'tests\unit'
-          $c.Run.PassThru = $true
-          $c.Output.Verbosity = 'Normal'
-          $c.TestResult.Enabled = $true
-          $c.TestResult.OutputPath = 'pester.xml'
-          $r = Invoke-Pester -Configuration $c
-          "Passed: $($r.PassedCount), failed: $($r.FailedCount), skipped: $($r.SkippedCount), failed files: $($r.FailedContainersCount)"
-          # Each failure as a GitHub annotation: visible on the run page and via the API without signing in.
-          foreach ($f in $r.Failed) {
-            $msg = ($f.ErrorRecord | Select-Object -First 1).Exception.Message -replace '\s+', ' '
-            if ($msg.Length -gt 400) { $msg = $msg.Substring(0, 400) }
-            Write-Output ("::error title=" + ($f.ExpandedPath -replace '[:,\r\n]', ' ') + "::" + $msg)
-          }
-          foreach ($f in $r.FailedContainers) { Write-Output ("::error title=Failed test file::" + $f.Item) }
-          if ($r.FailedCount -gt 0 -or $r.FailedContainersCount -gt 0) { exit 1 }
-      - name: Отчёт
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pester-windows
-          path: pester.xml
-          if-no-files-found: ignore
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\Invoke-CiTests.ps1
 
   linux:
     name: Скрипты Linux и WSL (sh, node, python3)
@@ -146,39 +121,5 @@ jobs:
           sh "$HOME/.claude-notifier/uninstall.sh"
           test ! -d "$HOME/.claude-notifier"
 
-  macos:
-    name: Скрипты Mac (sh, BSD-утилиты, osascript)
-    runs-on: macos-14   # явный образ: macos-latest здесь ни разу не получил машину
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Синтаксис sh -n
-        run: |
-          for f in src/mac/hook.sh src/mac/uninstall.sh src/web/install.sh; do sh -n "$f"; echo "ok $f"; done
-      - name: hook.sh — ПК недоступен — код 0 и событие в очереди
-        run: |
-          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME/.claude-notifier"
-          printf "CN_URL='http://127.0.0.1:9'\nCN_URL2=''\n" > "$HOME/.claude-notifier/env"
-          printf 'Authorization: Bearer x\n' > "$HOME/.claude-notifier/auth"
-          for i in 1 2 3; do echo '{"session_id":"s1"}' | sh src/mac/hook.sh stop; done
-          n=$(ls "$HOME/.claude-notifier/queue" | wc -l | tr -d ' ')
-          echo "в очереди: $n"; test "$n" = 3
-          # Не больше 50 событий: старые выбрасываются (head без отрицательных чисел — BSD)
-          for i in $(seq 1 55); do echo '{"session_id":"s1"}' | sh src/mac/hook.sh prompt; done
-          n=$(ls "$HOME/.claude-notifier/queue" | wc -l | tr -d ' ')
-          echo "в очереди: $n"; test "$n" = 50
-          # Сводка ECC не отправляется и не копится
-          rm -rf "$HOME/.claude-notifier/queue"
-          echo '{"session_id":"s2"}' | ECC_LLM_SUMMARY_SUBPROCESS=1 sh src/mac/hook.sh stop
-          test ! -d "$HOME/.claude-notifier/queue"
-      - name: settings.js (osascript) — ставит и убирает 8 хуков, чужие не трогает
-        run: |
-          S="$RUNNER_TEMP/settings.json"
-          echo '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]},"model":"x"}' > "$S"
-          osascript -l JavaScript src/mac/settings.js install "$S" "$HOME/.claude-notifier/hook.sh"
-          n=$(grep -o '.claude-notifier/hook.sh' "$S" | wc -l | tr -d ' ')
-          echo "наших хуков: $n"; test "$n" = 8
-          grep -q 'echo mine' "$S"
-          osascript -l JavaScript src/mac/settings.js uninstall "$S" "$HOME/.claude-notifier/hook.sh"
-          if grep -q '.claude-notifier/hook.sh' "$S"; then echo 'хуки не убраны'; exit 1; fi
-          grep -q 'echo mine' "$S"; grep -q '"model"' "$S"
+# Задание macOS убрано: машины macOS этому аккаунту GitHub не выдаются (задание отменялось, не начавшись).
+# Скрипты для Mac (sh) проверяет задание linux; osascript (settings.js под macOS) — только вручную на Mac.
