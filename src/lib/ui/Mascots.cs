@@ -14,13 +14,22 @@ using Microsoft.Win32;
 namespace ClaudeNotifier.Ui {
     // Настроение сфинкса от шторки: «Ага!» (сколько секунд назад Claude сделал действие), глубокая задумчивость
     // (долго без действий), сколько агентов работает, куда смотреть (курсор рядом в раскрытой шторке).
-    // Выбранный маскот шторки (настройка «Маскот»): сфинкс (3D), плоский сфинкс или огонёк (оба векторные).
+    public sealed class CatMood {
+        public float AhaAge = -1f;
+        public bool Deep;
+        public int Agents;
+        public bool HasLook;
+        public float LookX, LookY;
+        public float LookW = 1f;          // 0..1 — насколько маскот сейчас смотрит на курсор (плавно растёт и спадает)
+    }
+
+    // Выбранный маскот шторки (настройка «Маскот»): все векторные. Прежний объёмный «sphynx» — теперь плоский сфинкс.
     public static class Mascot {
-        static volatile string kind = "sphynx";
+        static volatile string kind = "flatsphynx";
         public static string Kind { get { return kind; } set { kind = Normalize(value); } }
-        public static readonly string[] Kinds = { "sphynx", "flatsphynx", "flame", "boxcat", "penguin", "kitty", "ghost", "mochi",
+        public static readonly string[] Kinds = { "flatsphynx", "flame", "boxcat", "penguin", "kitty", "ghost", "mochi",
             "dino", "frog", "reaper", "onigiri", "cupcat", "fox", "leaf", "bee" };
-        public static string Normalize(string v) { return Array.IndexOf(Kinds, v) >= 0 ? v : "sphynx"; }
+        public static string Normalize(string v) { return Array.IndexOf(Kinds, v) >= 0 ? v : "flatsphynx"; }
         public static void Paint(Graphics g, RectangleF r, string state, float t, int seed, bool animate, CatMood mood) {
             Paint(g, r, state, t, seed, animate, mood, null);
         }
@@ -54,7 +63,6 @@ namespace ClaudeNotifier.Ui {
         public static void PaintKind(Graphics g, RectangleF r, string kind, string state, float t, int seed, bool animate, CatMood mood) {
             switch (Normalize(kind)) {
                 case "flame": Flame.Paint(g, r, state, t, seed, animate, mood); break;
-                case "flatsphynx": FlatSphynx.Paint(g, r, state, t, seed, animate, mood); break;
                 case "boxcat": FlatPals.BoxCat(g, r, state, t, seed, animate, mood); break;
                 case "penguin": FlatPals.Penguin(g, r, state, t, seed, animate, mood); break;
                 case "kitty": FlatPals.Kitty(g, r, state, t, seed, animate, mood); break;
@@ -68,7 +76,7 @@ namespace ClaudeNotifier.Ui {
                 case "fox": FlatPals.Fox(g, r, state, t, seed, animate, mood); break;
                 case "leaf": FlatPals.Leaf(g, r, state, t, seed, animate, mood); break;
                 case "bee": FlatPals.Bee(g, r, state, t, seed, animate, mood); break;
-                default: Cat.Paint(g, r, state, t, seed, animate, mood); break;
+                default: FlatSphynx.Paint(g, r, state, t, seed, animate, mood); break;
             }
         }
     }

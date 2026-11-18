@@ -95,6 +95,14 @@ function Get-NotifierDiagnostics {
     }
     $auto = $false; try { $auto = [bool](Test-NotifierAutostart) } catch { }
     if ($auto) { $items += New-NotifierDiagItem ok 'Автозапуск' 'Запускается при входе в Windows' }
+    if ($config.notch.stats) {
+        try {
+            $ct = [ClaudeNotifier.Ui.SysStats]::CpuTemp; $gt = [ClaudeNotifier.Ui.SysStats]::GpuTemp
+            if ($ct -gt 0) { $items += New-NotifierDiagItem ok 'Температура' "ЦП $([int][Math]::Round($ct))°$(if ($gt -gt 0) { ", ГП $([int][Math]::Round($gt))°" })" }
+            elseif ([ClaudeNotifier.Ui.SysStats]::Cpu -ge 0) { $items += New-NotifierDiagItem warn 'Температура ЦП' "Недоступна $([char]0x2014) запустите LibreHardwareMonitor от администратора (шторка берёт данные из него)" }
+        }
+        catch { }
+    }
     else { $items += New-NotifierDiagItem warn 'Автозапуск' "Выключен $([char]0x2014) после перезагрузки уведомлений не будет, пока не откроете приложение" }
     if ($script:UpdateInfo) { $items += New-NotifierDiagItem warn 'Обновления' "Доступно: новых изменений $($script:UpdateInfo.Count)" }
     elseif (Get-NotifierAppVersion) { $items += New-NotifierDiagItem ok 'Обновления' (Format-NotifierUpdateSubtitle) }

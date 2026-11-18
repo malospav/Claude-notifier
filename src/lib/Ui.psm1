@@ -21,12 +21,10 @@ function Import-NotifierUi {
     [CmdletBinding()]
     param([string]$CacheDir = (Join-Path $(if ($env:CLAUDE_NOTIFIER_HOME) { $env:CLAUDE_NOTIFIER_HOME } else { Join-Path $env:USERPROFILE '.claude-notifier' }) 'cache'))
     if ('ClaudeNotifier.Ui.Theme' -as [type]) { return 'loaded' }
-    # WPF (3D-сфинкс) нужен только компилятору; во время работы он загружается сам при первом 3D-рендере,
-    # а кадры, что уже на диске, рендерить не нужно — обычно WPF не загружается вовсе.
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     $files = @(Get-NotifierUiSources)
     $source = (@($files | ForEach-Object { [IO.File]::ReadAllText($_, [Text.Encoding]::UTF8) }) -join "`n//--file--`n")
-    $refs = @('System.Windows.Forms', 'System.Drawing', 'PresentationCore', 'PresentationFramework', 'WindowsBase', 'System.Xaml')
+    $refs = @('System.Windows.Forms', 'System.Drawing', 'System.Management')   # System.Management — температура ЦП из WMI мониторов
     $tmp = $null
     try {
         $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -35,7 +33,7 @@ function Import-NotifierUi {
         $dll = Join-Path $CacheDir "ClaudeNotifier.Ui.$hash.dll"
         $result = 'cache'
         if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
-            Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase, System.Xaml
+            Add-Type -AssemblyName System.Management
             New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null
             $tmp = Join-Path $CacheDir "build.$PID.$([guid]::NewGuid().ToString('N')).dll"
             Add-Type -Path $files -ReferencedAssemblies $refs -OutputAssembly $tmp -OutputType Library
@@ -43,10 +41,8 @@ function Import-NotifierUi {
             $result = 'compiled'
         }
         if (-not ('ClaudeNotifier.Ui.Theme' -as [type])) { [void][System.Reflection.Assembly]::Load([IO.File]::ReadAllBytes($dll)) }
-        # Кадры 3D-сфинкса на диске — своя папка для каждой версии интерфейса; прежние удаляются.
-        $sprites = Join-Path $CacheDir "sprites-$hash"
-        [ClaudeNotifier.Ui.SphynxSprites]::DiskDir = $sprites
-        foreach ($old in @(Get-ChildItem -LiteralPath $CacheDir -Directory -Filter 'sprites-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne (Split-Path -Leaf $sprites) })) {
+        # Кадры прежнего объёмного сфинкса больше не нужны — папки sprites-* удаляются.
+        foreach ($old in @(Get-ChildItem -LiteralPath $CacheDir -Directory -Filter 'sprites-*' -ErrorAction SilentlyContinue)) {
             Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
         # Сборки прежних версий больше не нужны (загруженные из байтов файлы не заняты).
@@ -62,7 +58,7 @@ function Import-NotifierUi {
         $script:UiImportError = $_.Exception.Message
         if ($tmp -and (Test-Path -LiteralPath $tmp)) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
         if (-not ('ClaudeNotifier.Ui.Theme' -as [type])) {
-            Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase, System.Xaml
+            Add-Type -AssemblyName System.Management
             Add-Type -Path $files -ReferencedAssemblies $refs
         }
         return 'inline'

@@ -20,7 +20,7 @@ $NotifierStrings = @{
 }
 
 # Маскоты шторки (ClaudeNotifier.Ui.Mascot.Kinds): 3D-сфинкс и плоские векторные.
-$script:Mascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi', 'dino', 'frog', 'reaper', 'onigiri', 'cupcat', 'fox', 'leaf', 'bee')
+$script:Mascots = @('flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi', 'dino', 'frog', 'reaper', 'onigiri', 'cupcat', 'fox', 'leaf', 'bee')
 
 function Get-NotifierDefaultConfig {
     <#
@@ -54,7 +54,7 @@ function Get-NotifierDefaultConfig {
         update          = @{ enabled = $true }                      # раз в 6 ч проверять обновление на GitHub (app\version.json)
         budget          = @{ enabled = $false; daily = 20 }        # расход за сегодня (примерно, по ценам API) дошёл до суммы, $ — одно уведомление в день
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
-        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{}; stats = $true; attention = $true }   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — sphynx | flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'flatsphynx'; mascots = @{}; stats = $true; attention = $true }   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
     }
 }
@@ -301,6 +301,7 @@ function Get-NotifierConfig {
             else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.position' должно быть left, center или right" -DataRoot $DataRoot }
         }
         $mascot = Get-JsonProperty $notch.value 'mascot'
+        if ($mascot.found -and [string]$mascot.value -eq 'sphynx') { $mascot.value = 'flatsphynx' }   # объёмного сфинкса больше нет
         if ($mascot.found) {
             if ($script:Mascots -contains [string]$mascot.value) { $config.notch.mascot = [string]$mascot.value }
             else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.mascot' должно быть одним из: $($script:Mascots -join ', ')" -DataRoot $DataRoot }
@@ -308,7 +309,8 @@ function Get-NotifierConfig {
         $mascots = Get-JsonProperty $notch.value 'mascots'
         if ($mascots.found -and $mascots.value -is [System.Management.Automation.PSCustomObject]) {
             foreach ($p in $mascots.value.PSObject.Properties) {
-                if ($script:Mascots -contains [string]$p.Value) { $config.notch.mascots[[string]$p.Name] = [string]$p.Value }
+                $mv = [string]$p.Value; if ($mv -eq 'sphynx') { $mv = 'flatsphynx' }
+                if ($script:Mascots -contains $mv) { $config.notch.mascots[[string]$p.Name] = $mv }
             }
         }
     }

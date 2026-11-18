@@ -340,15 +340,15 @@ Describe 's_015_01 · шторка вверху экрана' {
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.screen | Should -Be ''
         Get-NotifierSelectLabel -Key 'notch.screen' | Should -Be 'Авто'
         # Маскот этого ПК — селект: щелчок открывает список под кнопкой, выбор применяется сразу.
-        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'sphynx'
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'flatsphynx'
         @(Get-NotifierNotchSettingsRows | Where-Object { $_.Key -eq 'mascot:' })[0].Value | Should -Be 'Сфинкс'
         Mock Show-NotifierSelect { }
         Invoke-NotifierNotchSetting -Key 'mascot:' -Location (New-Object System.Drawing.Point 10, 20) -Width 160
         Assert-MockCalled Show-NotifierSelect -Times 1 -Exactly -ParameterFilter { $Key -eq 'mascot:' -and $Width -eq 160 -and $Location.Y -eq 20 }
-        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'sphynx'   # щелчок сам ничего не меняет
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'flatsphynx'   # щелчок сам ничего не меняет
         $opts = @(Get-NotifierSelectOptions -Key 'mascot:')
-        ($opts | ForEach-Object { $_.Label }) -join ',' | Should -Be 'Сфинкс,Плоский сфинкс,Огонёк,Котик в коробке,Пингвин,Белый котик,Привидение,Моти,Динозаврик,Лягушка с чашкой,Жнец,Онигири,Котик в чашке,Лисёнок,Шмалючька,Пчёлка'
-        @($opts | Where-Object { $_.Current })[0].Value | Should -Be 'sphynx'
+        ($opts | ForEach-Object { $_.Label }) -join ',' | Should -Be 'Сфинкс,Огонёк,Котик в коробке,Пингвин,Белый котик,Привидение,Моти,Динозаврик,Лягушка с чашкой,Жнец,Онигири,Котик в чашке,Лисёнок,Шмалючька,Пчёлка'
+        @($opts | Where-Object { $_.Current })[0].Value | Should -Be 'flatsphynx'
         Set-NotifierSelectValue -Key 'mascot:' -Value 'flame'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'flame'
         [ClaudeNotifier.Ui.Mascot]::Kind | Should -Be 'flame'
@@ -356,16 +356,16 @@ Describe 's_015_01 · шторка вверху экрана' {
         @(Get-NotifierSelectOptions -Key 'mascot:' | Where-Object { $_.Current })[0].Value | Should -Be 'flame'
         Set-NotifierSelectValue -Key 'mascot:' -Value 'bogus'   # неизвестное значение не записывается
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascot | Should -Be 'flame'
-        Set-NotifierSelectValue -Key 'mascot:' -Value 'sphynx'
-        [ClaudeNotifier.Ui.Mascot]::Kind | Should -Be 'sphynx'
+        Set-NotifierSelectValue -Key 'mascot:' -Value 'flatsphynx'
+        [ClaudeNotifier.Ui.Mascot]::Kind | Should -Be 'flatsphynx'
         # Свой маскот у устройства: только у него, этот ПК — прежний.
         Set-NotifierSelectValue -Key 'mascot:dev-mac' -Value 'flame'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.mascots['dev-mac'] | Should -Be 'flame'
         [ClaudeNotifier.Ui.Mascot]::For('dev-mac') | Should -Be 'flame'
-        [ClaudeNotifier.Ui.Mascot]::For('') | Should -Be 'sphynx'
-        [ClaudeNotifier.Ui.Mascot]::For('other') | Should -Be 'sphynx'
-        Set-NotifierSelectValue -Key 'mascot:dev-mac' -Value 'sphynx'
-        [ClaudeNotifier.Ui.Mascot]::For('dev-mac') | Should -Be 'sphynx'
+        [ClaudeNotifier.Ui.Mascot]::For('') | Should -Be 'flatsphynx'
+        [ClaudeNotifier.Ui.Mascot]::For('other') | Should -Be 'flatsphynx'
+        Set-NotifierSelectValue -Key 'mascot:dev-mac' -Value 'flatsphynx'
+        [ClaudeNotifier.Ui.Mascot]::For('dev-mac') | Should -Be 'flatsphynx'
         # Разделы настроек — заголовки строк; на странице — боковое меню, раздел по щелчку.
         $titles = @(Get-NotifierNotchSettingsRows | Where-Object { $_.Kind -eq 'header' } | ForEach-Object { $_.Title })
         ($titles -join ',') | Should -Be 'Уведомления,Телефон,Ответы,Сеансы,Шторка,Маскоты,Система'
@@ -479,12 +479,6 @@ Describe 's_015_01 · шторка вверху экрана' {
             $v.MoodFor($v[0], $r, $false).Deep | Should -Be $true
         }
         finally { [ClaudeNotifier.Ui.NotchView]::DeepAfterSeconds = 25; $v.Dispose() }
-        # Случайные мелочи: детерминированы (время и номер сфинкса), бывают все четыре вида.
-        $kinds = @{}
-        for ($t = 0.0; $t -lt 600; $t += 0.1) { $p = 0.0; $k = [ClaudeNotifier.Ui.Cat]::EventAt($t, 3, [ref]$p); if ($k -gt 0) { $kinds[$k] = $true } }
-        ($kinds.Keys | Sort-Object) -join ',' | Should -Be '1,2,3,4'
-        $p1 = 0.0; $p2 = 0.0
-        [ClaudeNotifier.Ui.Cat]::EventAt(123.4, 5, [ref]$p1) | Should -Be ([ClaudeNotifier.Ui.Cat]::EventAt(123.4, 5, [ref]$p2))
         # Данные трея: действия, агенты, «остановился».
         $s = New-S 'z' 'working'
         $s | Add-Member -NotePropertyName stats -NotePropertyValue ([pscustomobject]@{ tools = 42; context = 1; output = 1; prompts = 1 })
@@ -501,7 +495,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         try {
             foreach ($cfg in @(@(-1, $false, 0, $false), @(0.2, $false, 3, $false), @(-1, $true, 5, $false), @(-1, $false, 0, $true))) {
                 $md = New-Object ClaudeNotifier.Ui.CatMood; $md.AhaAge = $cfg[0]; $md.Deep = $cfg[1]; $md.Agents = $cfg[2]; $md.HasLook = $cfg[3]; $md.LookX = 0.7; $md.LookY = -0.4
-                foreach ($st in @('working', 'stalled')) { [ClaudeNotifier.Ui.Cat]::Paint($g, (New-Object System.Drawing.RectangleF(10, 10, 120, 90)), $st, 3.3, 1, $true, $md) }
+                foreach ($st in @('working', 'stalled')) { [ClaudeNotifier.Ui.Mascot]::PaintKind($g, (New-Object System.Drawing.RectangleF(10, 10, 120, 90)), 'flatsphynx', $st, 3.3, 1, $true, $md) }
             }
         }
         finally { $g.Dispose(); $bmp.Dispose() }
@@ -537,26 +531,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         Assert-MockCalled Show-NotifierNotchSessionMenu -Times 1 -Exactly -Scope It -ParameterFilter { $Card.Id -eq 'a' }
     }
 
-    It 'взгляд на курсор без рывков: промежуточный поворот — смесь соседних кадров того же размера' {
-        $skin = [Drawing.Color]::FromArgb(0xE9, 0xB5, 0xA2)
-        $p = New-Object ClaudeNotifier.Ui.SphynxPose; $p.State = 'waiting'; $p.Yaw = 0.0175; $p.Pitch = 0.02
-        [ClaudeNotifier.Ui.SphynxSprites]::PerFrame = 8; [ClaudeNotifier.Ui.SphynxSprites]::BeginFrame()
-        $b = [ClaudeNotifier.Ui.SphynxSprites]::GetBlended(60, 46, $p, $skin, $skin, 7)
-        if ([ClaudeNotifier.Ui.Sphynx3D]::Available) {
-            $b | Should -Not -BeNullOrEmpty
-            $b.Width | Should -Be 60   # кадры хранятся в итоговом размере (1×)
-            $b.GetPixel(30, 23).A | Should -BeGreaterThan 250   # середина морды непрозрачна
-        }
-        $m = New-Object ClaudeNotifier.Ui.CatMood
-        $m.LookW | Should -Be 1
-        $m.HasLook = $true; $m.LookX = 0.5; $m.LookW = 0.3
-        $bmp = New-Object Drawing.Bitmap(80, 60); $g = [Drawing.Graphics]::FromImage($bmp)
-        { [ClaudeNotifier.Ui.Cat]::Paint($g, (New-Object Drawing.RectangleF(0, 0, 80, 60)), 'waiting', 1.0, 7, $true, $m) } | Should -Not -Throw
-        $g.Dispose(); $bmp.Dispose()
-        [ClaudeNotifier.Ui.SphynxSprites]::PerFrame = 2
-    }
-
-    It 'фон: таймер трея в покое реже (250 мс), при событиях и открытой шторке — 100 мс; кадры 3D — с потолком в секунду' {
+    It 'фон: таймер трея в покое реже (250 мс), при событиях и открытой шторке — 100 мс; в шторке без 3D' {
         $now = [datetime]::UtcNow
         Get-NotifierTickInterval -LastActivity $now.AddSeconds(-1) -Now $now -Expanded $false -IdleSeconds 0 | Should -Be 100
         Get-NotifierTickInterval -LastActivity $now.AddSeconds(-30) -Now $now -Expanded $false -IdleSeconds 0 | Should -Be 250
@@ -565,36 +540,6 @@ Describe 's_015_01 · шторка вверху экрана' {
         Get-NotifierTickInterval -LastActivity $now.AddSeconds(-1) -Now $now -Expanded $false -IdleSeconds 300 | Should -Be 100      # но событие — быстро
         ([ClaudeNotifier.Ui.Native]::InputIdleSeconds() -ge 0) | Should -Be $true
         [ClaudeNotifier.Ui.NotchView]::Paused | Should -Be $false
-        [ClaudeNotifier.Ui.SphynxSprites]::RatePerSec | Should -BeGreaterThan 0
-    }
-
-    It 'кадры 3D на диске: после первого рендера берутся с диска, без нового рендера' {
-        if (-not [ClaudeNotifier.Ui.Sphynx3D]::Available) { return }
-        $old = [ClaudeNotifier.Ui.SphynxSprites]::DiskDir
-        try {
-            [ClaudeNotifier.Ui.SphynxSprites]::DiskDir = Join-Path $TestDrive 'sprites'
-            [ClaudeNotifier.Ui.SphynxSprites]::ClearMemory()
-            $skin = [Drawing.Color]::FromArgb(0xE9, 0xB5, 0xA2)
-            $p = New-Object ClaudeNotifier.Ui.SphynxPose; $p.State = 'waiting'; $p.Yaw = 0.27
-            [ClaudeNotifier.Ui.SphynxSprites]::PerFrame = 8; [ClaudeNotifier.Ui.SphynxSprites]::BeginFrame()
-            $r0 = [ClaudeNotifier.Ui.SphynxSprites]::Renders
-            $a = [ClaudeNotifier.Ui.SphynxSprites]::Get(64, 50, $p, $skin, $skin, 3)
-            ([ClaudeNotifier.Ui.SphynxSprites]::Renders - $r0) | Should -Be 1
-            @(Get-ChildItem (Join-Path $TestDrive 'sprites') -Filter *.png).Count | Should -Be 1
-            [ClaudeNotifier.Ui.SphynxSprites]::ClearMemory()   # как новый запуск трея
-            $d0 = [ClaudeNotifier.Ui.SphynxSprites]::DiskHits; $r1 = [ClaudeNotifier.Ui.SphynxSprites]::Renders
-            [ClaudeNotifier.Ui.SphynxSprites]::BeginFrame()
-            $b = [ClaudeNotifier.Ui.SphynxSprites]::Get(64, 50, $p, $skin, $skin, 3)
-            ([ClaudeNotifier.Ui.SphynxSprites]::DiskHits - $d0) | Should -Be 1
-            [ClaudeNotifier.Ui.SphynxSprites]::Renders | Should -Be $r1
-            $b.Width | Should -Be 64
-            $b.GetPixel(32, 25).A | Should -BeGreaterThan 250
-        }
-        finally {
-            [ClaudeNotifier.Ui.SphynxSprites]::ClearMemory()
-            [ClaudeNotifier.Ui.SphynxSprites]::DiskDir = $old
-            [ClaudeNotifier.Ui.SphynxSprites]::PerFrame = 2
-        }
     }
 
     It 'персонажи рисуются во всех статусах' {
@@ -620,8 +565,8 @@ Describe 's_015_01 · шторка вверху экрана' {
             ($c.R -gt 200 -and $c.G -gt 140 -and $c.B -lt 160) | Should -Be $true
         }
         finally { $g.Dispose(); $bmp.Dispose() }
-        # Выбор маскота: неизвестное значение — сфинкс.
-        [ClaudeNotifier.Ui.Mascot]::Kind = 'whatever'; [ClaudeNotifier.Ui.Mascot]::Kind | Should -Be 'sphynx'
+        # Выбор маскота: неизвестное значение — плоский сфинкс.
+        [ClaudeNotifier.Ui.Mascot]::Kind = 'whatever'; [ClaudeNotifier.Ui.Mascot]::Kind | Should -Be 'flatsphynx'
     }
 
     It 'окна и диалоги открываются на мониторе приложения (шторки) или над своим окном-владельцем' {
@@ -775,7 +720,6 @@ Describe 's_015_01 · шторка вверху экрана' {
                 Format-NotifierMascot $k | Should -Not -BeNullOrEmpty
                 [ClaudeNotifier.Ui.Mascot]::SetDevice('d1', $k)
                 [ClaudeNotifier.Ui.Mascot]::For('d1') | Should -Be $k
-                if ($k -eq 'sphynx') { continue }   # 3D — отдельные тесты, нужен WPF
                 # Картинка для списка выбора: нужного размера и не пустая
                 $pv = [ClaudeNotifier.Ui.Mascot]::Preview($k, 30)
                 try {

@@ -1,4 +1,4 @@
-﻿// claude-notifier: элементы интерфейса в стиле Apple (WinForms + GDI+, C# 5 для csc из .NET Framework).
+// claude-notifier: элементы интерфейса в стиле Apple (WinForms + GDI+, C# 5 для csc из .NET Framework).
 // Сгруппированные списки, сегментный переключатель, тумблер, кнопки-капсулы, ячейки кода, точка статуса для трея.
 // Движение — по принципам Apple / Emil Kowalski: отклик на нажатие сразу, ease-out, прерываемые анимации
 // с текущего значения, частые действия (обновление списка, клавиатура) не анимируются, «меньше движения» в Windows уважается.
@@ -114,7 +114,6 @@ namespace ClaudeNotifier.Ui {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             BackColor = Color.Black;
             anim.Interval = 33;
-            warm.Tick += delegate { try { WarmTick(); } catch (Exception e) { warm.Stop(); NotchHost.Report(e); } };
             anim.Tick += delegate { try { AnimTick(); } catch (Exception e) { NotchHost.Report(e); } };
             peekTimer.Tick += delegate { try { EndPeek(); } catch (Exception e) { peekTimer.Stop(); NotchHost.Report(e); } };
             ApplyTheme(Theme.Create(true));
@@ -191,44 +190,6 @@ namespace ClaudeNotifier.Ui {
             TrackAttention();
             UpdateTimer();
             Invalidate();
-            ScheduleWarm();
-        }
-
-        // Прогрев: пока шторка свёрнута, кадры крупных сфинксов раскрытой шторки рендерятся заранее, понемногу
-        // в фоне, — первое раскрытие не спотыкается о 3D-рендер (~20 мс на кадр).
-        readonly Timer warm = new Timer();
-        int warmLeft;
-        void ScheduleWarm() {
-            if (Expanded || !Sphynx3D.Available) return;
-            warmLeft = 6;
-            if (!warm.Enabled) { warm.Interval = 400; warm.Start(); }
-        }
-        void WarmTick() {
-            if (Expanded || warmLeft <= 0 || !IsHandleCreated) { warm.Stop(); return; }
-            warmLeft--;
-            long r0 = SphynxSprites.Renders;
-            Size L = LayoutExpanded.Width > 0 ? LayoutExpanded : new Size(theme.S(760), theme.S(232));
-            bool ex = Expanded; Point o = origin; Size l0 = lay;
-            List<KeyValuePair<Rectangle, string>> h0 = new List<KeyValuePair<Rectangle, string>>(hits);
-            List<RectangleF> f0 = new List<RectangleF>(faceRects);
-            Dictionary<string, Rectangle> a0 = new Dictionary<string, Rectangle>(selectAnchors);
-            List<KeyValuePair<Rectangle, string>> t0 = new List<KeyValuePair<Rectangle, string>>(tips);
-            try {
-                using (Bitmap bmp = new Bitmap(L.Width, L.Height))
-                using (Graphics g = Graphics.FromImage(bmp)) {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    origin = Point.Empty; lay = L;
-                    SphynxSprites.BeginFrame(2);
-                    PaintExpanded(g);
-                }
-            } catch { }
-            finally {
-                origin = o; lay = l0; Expanded = ex;
-                hits.Clear(); hits.AddRange(h0); faceRects.Clear(); faceRects.AddRange(f0);
-                selectAnchors.Clear(); foreach (KeyValuePair<string, Rectangle> kv in a0) selectAnchors[kv.Key] = kv.Value;
-                tips.Clear(); tips.AddRange(t0);
-            }
-            if (SphynxSprites.Renders == r0) warm.Stop();   // всё уже в кэше
         }
 
         // --- Настроение сфинксов: «Ага!» на каждое новое действие Claude, задумчивость после долгой паузы ---
@@ -353,7 +314,7 @@ namespace ClaudeNotifier.Ui {
 
         protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdateTimer(); }
         protected override void Dispose(bool disposing) {
-            if (disposing) { anim.Dispose(); warm.Dispose(); peekTimer.Dispose(); if (tipBox != null) tipBox.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall); }
+            if (disposing) { anim.Dispose(); peekTimer.Dispose(); if (tipBox != null) tipBox.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall); }
             base.Dispose(disposing);
         }
 
@@ -567,9 +528,6 @@ namespace ClaudeNotifier.Ui {
             hits.Clear();
             tips.Clear();
             faceRects.Clear();
-            SphynxSprites.RatePerSec = Expanded ? 12 : 3;
-            SphynxSprites.BeginFrame();
-            if (Morphing) SphynxSprites.BeginFrame(0);   // во время перехода — только готовые кадры, без 20-мс рендеров
             // Что рисуем: в переходе до 40 % высоты — свёрнутую раскладку, дальше — раскрытую.
             bool showExpanded = Morphing ? Progress > 0.4f : Expanded;
             // Пока фигура в движении — раскладка итогового размера (содержимое не «плывёт»), в покое — по окну.
@@ -699,7 +657,8 @@ namespace ClaudeNotifier.Ui {
         }
 
         // Загрузка ПК по центру свёрнутой шторки: три колонки «значение / подпись» — ЦП, ГП, ОЗУ. Высокая загрузка —
-        // янтарным (от 70 %) или красным (от 90 %); нет данных — «—». Возвращает занятый прямоугольник.
+        // янтарным (от 70 %) или красным (от 90 %); нет данных — «—». В подписи ЦП и ГП — температура, если известна
+        // (горячо — подпись янтарная или красная). Возвращает занятый прямоугольник.
         Rectangle PaintStats(Graphics g, int h) {
             float cpu = SysStats.Cpu, gpu = SysStats.Gpu, mem = SysStats.MemUsedGb, memTotal = SysStats.MemTotalGb;
             string[] vals = {
@@ -707,7 +666,10 @@ namespace ClaudeNotifier.Ui {
                 gpu < 0 ? "—" : ((int)Math.Round(gpu)) + " %",
                 mem < 0 ? "—" : mem.ToString(mem < 100 ? "0.0" : "0", System.Globalization.CultureInfo.GetCultureInfo("ru-RU")) + " ГБ"
             };
-            string[] labels = { "ЦП", "ГП", "ОЗУ" };
+            // Температура — в подписи: «ЦП 52°», «ГП 64°» (если её удаётся узнать).
+            float cpuT = SysStats.CpuTemp, gpuT = SysStats.GpuTemp;
+            string[] labels = { cpuT > 0 ? "ЦП " + (int)Math.Round(cpuT) + "°" : "ЦП", gpuT > 0 ? "ГП " + (int)Math.Round(gpuT) + "°" : "ГП", "ОЗУ" };
+            float[] temp = { cpuT, gpuT, -1 };
             float memPct = mem >= 0 && memTotal > 0 ? mem / memTotal * 100f : -1;
             float[] load = { cpu, gpu, memPct };
             int colGap = theme.S(14);
@@ -725,7 +687,9 @@ namespace ClaudeNotifier.Ui {
                 Color vc = load[i] >= 90 ? Theme.Hex(0xFF6961) : load[i] >= 70 ? Theme.Hex(0xFFB340) : Theme.Hex(0xE5E5EA);
                 if (load[i] < 0) vc = theme.Muted;
                 TextRenderer.DrawText(g, vals[i], fBold, new Rectangle(x, y, w[i], vh), vc, TextFormatFlags.HorizontalCenter | TextFormatFlags.Bottom | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
-                TextRenderer.DrawText(g, labels[i], fSmall, new Rectangle(x, y + vh, w[i], lh), theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                // Горячо — подпись янтарная (от 80°) или красная (от 90°).
+                Color lc = temp[i] >= 90 ? Theme.Hex(0xFF6961) : temp[i] >= 80 ? Theme.Hex(0xFFB340) : theme.Muted;
+                TextRenderer.DrawText(g, labels[i], fSmall, new Rectangle(x, y + vh, w[i], lh), lc, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                 x += w[i] + colGap;
             }
             return new Rectangle(x0, y, total, vh + lh);

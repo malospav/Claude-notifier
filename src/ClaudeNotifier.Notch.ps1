@@ -47,10 +47,9 @@ function Format-NotifierScreenName {
     return $text
 }
 
-$script:NotchMascots = @('sphynx', 'flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi', 'dino', 'frog', 'reaper', 'onigiri', 'cupcat', 'fox', 'leaf', 'bee')   # порядок — как в списке настроек
+$script:NotchMascots = @('flatsphynx', 'flame', 'boxcat', 'penguin', 'kitty', 'ghost', 'mochi', 'dino', 'frog', 'reaper', 'onigiri', 'cupcat', 'fox', 'leaf', 'bee')   # порядок — как в списке настроек
 function Format-NotifierMascot([string]$Mascot) {
     switch ($Mascot) {
-        'flatsphynx' { return 'Плоский сфинкс' }
         'flame' { return 'Огонёк' }
         'boxcat' { return 'Котик в коробке' }
         'penguin' { return 'Пингвин' }
@@ -325,7 +324,10 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow header -Title 'Шторка'
     $rows += New-NotifierNotchRow choice 'notch.screen' 'Монитор' 'Экран для шторки' -Value (Get-NotifierSelectLabel 'notch.screen' -Config $c)
     $rows += New-NotifierNotchRow choice 'notch.position' 'Положение' 'У верхнего края' -Value (Get-NotifierSelectLabel 'notch.position' -Config $c)
-    $rows += New-NotifierNotchRow switch 'notch.stats' 'Загрузка ПК' 'ЦП, ГП и память в свёрнутой шторке' -On ([bool]$c.notch.stats)
+    $statsSub = 'ЦП, ГП, память и температура в свёрнутой шторке'
+    # Температуру ЦП (Ryzen, многие Intel) Windows без драйвера не отдаёт — подсказать, откуда её взять.
+    try { if ([ClaudeNotifier.Ui.SysStats]::Cpu -ge 0 -and [ClaudeNotifier.Ui.SysStats]::CpuTemp -lt 0) { $statsSub = "Температура ЦП $([char]0x2014) запустите LibreHardwareMonitor" } } catch { }
+    $rows += New-NotifierNotchRow switch 'notch.stats' 'Загрузка ПК' $statsSub -On ([bool]$c.notch.stats)
     $rows += New-NotifierNotchRow switch 'notch.attention' 'Привлекать внимание' 'Шторка зовёт, когда Claude ждёт вас' -On ([bool]$c.notch.attention)
     $rows += New-NotifierNotchRow choice 'hotkey' 'Горячая клавиша' (Format-NotifierHotKeySubtitle) -Value (Get-NotifierSelectLabel 'hotkey' -Config $c)
     $rows += New-NotifierNotchRow switch 'notch' 'Шторка вместо окна' 'Выключить — прежнее окно «Сеансы»' -On $true
