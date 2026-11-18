@@ -62,11 +62,11 @@ Describe 's_012_01 · контекст, подробности, напомина
     It 'подробности карточки: контекст в процентах, файлы, инструменты, последняя команда' {
         $session = [pscustomobject]@{ session_id = 's'; started = ''; prompt = ''; stats = [pscustomobject]@{ context = 170010; window = 200000; percent = 85; output = 75; tools = 4; prompts = 1; compactions = 2; files = 2; recentFiles = @('a.ps1', 'b.md'); topTools = @('Edit 2', 'Bash 1'); commands = @('npm test') } }
         $d = Format-NotifierSessionDetails -Session $session
-        $d | Should Match 'Контекст 85 % — 170 тыс\. из 200 тыс\.'
+        $d | Should Match 'Контекст	85 % — 170 тыс\. из 200 тыс\.'
         $d | Should Match 'сжатий 2'
-        $d | Should Match 'Изменено файлов: 2 \(последние: a\.ps1, b\.md\)'
-        $d | Should Match 'Чаще всего: Edit 2, Bash 1'
-        $d | Should Match 'Последняя команда: npm test'
+        $d | Should Match 'Файлы	изменено 2: a\.ps1, b\.md'
+        $d | Should Match 'Чаще всего	Edit 2, Bash 1'
+        $d | Should Match 'Команда	npm test'
     }
 
     It 'хук передаёт путь журнала, сеанс его хранит' {

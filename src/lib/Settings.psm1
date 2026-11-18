@@ -1,19 +1,23 @@
 ﻿Set-StrictMode -Version 2.0
 
 # Хуки, которые ставит claude-notifier (architecture.md §4): событие Claude Code → (matcher, аргумент bridge).
+# Via = 'curl' — хук запускает встроенный в Windows curl.exe (~20 мс) и отправляет JSON трею на 127.0.0.1;
+# окно сеанса трей находит сам. Остальные — PowerShell-мост: SessionStart заодно запускает трей, если он не
+# работает; PermissionRequest и быстрый ответ ждут решения в отдельном процессе.
 $script:HookSpecs = @(
-    @{ Event = 'Stop'; Matcher = $null; Kind = 'stop' },
-    @{ Event = 'Notification'; Matcher = 'permission_prompt|elicitation_dialog|agent_needs_input'; Kind = 'notification' },
-    @{ Event = 'StopFailure'; Matcher = $null; Kind = 'stopfailure' },
+    @{ Event = 'Stop'; Matcher = $null; Kind = 'stop'; Via = 'curl' },
+    @{ Event = 'Notification'; Matcher = 'permission_prompt|elicitation_dialog|agent_needs_input'; Kind = 'notification'; Via = 'curl' },
+    @{ Event = 'StopFailure'; Matcher = $null; Kind = 'stopfailure'; Via = 'curl' },
     # Окно «Сеансы»: начало, новый запрос (статус «Работает»), завершение сеанса.
     @{ Event = 'SessionStart'; Matcher = $null; Kind = 'sessionstart' },
-    @{ Event = 'UserPromptSubmit'; Matcher = $null; Kind = 'prompt' },
-    @{ Event = 'SessionEnd'; Matcher = $null; Kind = 'sessionend' },
+    @{ Event = 'UserPromptSubmit'; Matcher = $null; Kind = 'prompt'; Via = 'curl' },
+    @{ Event = 'SessionEnd'; Matcher = $null; Kind = 'sessionend'; Via = 'curl' },
     # Ответы из приложения (ADR-008): синхронный PermissionRequest ждёт решения; Stop с asyncRewake — быстрого ответа.
     @{ Event = 'PermissionRequest'; Matcher = $null; Kind = 'permreq'; Mode = 'sync'; Timeout = 3700 },
     @{ Event = 'Stop'; Matcher = $null; Kind = 'replywait'; Mode = 'rewake'; Timeout = 14700 }
 )
 $script:Marker = 'claude-notifier\app\hook-bridge.ps1'
+$script:CurlMarker = '/claude-notifier/hook/'
 $script:StatusLineMarker = 'claude-notifier/app/statusline.ps1'
 
 function Test-NotifierStatusLine {
@@ -97,12 +101,13 @@ function Read-ClaudeSettings {
 }
 
 function Test-NotifierHook {
-    <# .SYNOPSIS $true, если hook-объект поставлен claude-notifier (args указывают на app\hook-bridge.ps1). #>
+    <# .SYNOPSIS $true, если hook-объект поставлен claude-notifier (args: app\hook-bridge.ps1 или адрес /claude-notifier/hook/). #>
     param($Hook)
     if ($Hook -isnot [System.Management.Automation.PSCustomObject]) { return $false }
     $argsProp = $Hook.PSObject.Properties['args']
     if ($null -eq $argsProp) { return $false }
-    return ((@($argsProp.Value) -join ' ').IndexOf($script:Marker, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    $line = @($argsProp.Value) -join ' '
+    return ($line.IndexOf($script:Marker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $line.IndexOf($script:CurlMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0)
 }
 
 function Remove-NotifierHooks {
@@ -144,10 +149,13 @@ function Add-NotifierHooks {
     #>
     param(
         [Parameter(Mandatory = $true)]$Settings,
-        [Parameter(Mandatory = $true)][string]$AppRoot
+        [Parameter(Mandatory = $true)][string]$AppRoot,
+        [int]$Port = 47611,
+        [string]$Curl = (Join-Path $env:SystemRoot 'System32\curl.exe')
     )
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $bridge = Join-Path $AppRoot 'hook-bridge.ps1'
+    $hasCurl = Test-Path -LiteralPath $Curl -PathType Leaf
     if ($null -eq $Settings.PSObject.Properties['hooks']) {
         $Settings | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{})
     }
@@ -156,6 +164,14 @@ function Add-NotifierHooks {
             type    = 'command'
             command = $ps
             args    = @('-NoProfile', '-NonInteractive', '-File', $bridge, $spec.Kind)
+        }
+        if ($hasCurl -and $spec.ContainsKey('Via') -and $spec.Via -eq 'curl') {
+            # JSON хука из stdin → трею; переменные окружения сеанса — в заголовках (без оболочки).
+            $hook.command = $Curl
+            $hook.args = @('-s', '-m', '5', '-o', 'NUL', '-H', 'X-Claude-Notifier: hook',
+                '--variable', '%CLAUDE_CODE_ENTRYPOINT=', '--variable', '%CLAUDE_CODE_HOST_SESSION_ID=',
+                '--expand-header', 'X-Claude-Entry: {{CLAUDE_CODE_ENTRYPOINT}}', '--expand-header', 'X-Claude-Host: {{CLAUDE_CODE_HOST_SESSION_ID}}',
+                '--data-binary', '@-', "http://127.0.0.1:$Port$($script:CurlMarker)$($spec.Kind)")
         }
         $mode = ''
         if ($spec.ContainsKey('Mode')) { $mode = [string]$spec.Mode }

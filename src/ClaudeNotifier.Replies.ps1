@@ -154,6 +154,79 @@ function Invoke-NotifierCardAction {
     return $notice
 }
 
+# --- Кнопки в уведомлениях Windows ---
+
+function Get-NotifierToastButtons {
+    <#
+    .SYNOPSIS
+    Кнопки уведомления: у запроса разрешения — те же решения, что в карточке (без «Свой ответ…»: для него нужно окно);
+    у «Готово» сеанса этого ПК — быстрые ответы. Аргументы кнопки: «cn|<session_id>|<request_id>|<действие>».
+    #>
+    param([Parameter(Mandatory = $true)]$Event, [Parameter(Mandatory = $true)]$Config, [switch]$Request, [string]$DataRoot = $script:TrayDataRoot)
+    $sid = ''
+    if ($Event.PSObject.Properties['session_id']) { $sid = [string]$Event.session_id }
+    if ($sid -eq '' -or ($Event.PSObject.Properties['device'] -and [string]$Event.device -ne '')) { return @() }
+    $mk = { param($content, $req, $act) @{ Content = $content; Arguments = "cn|$sid|$req|$act" } }
+    if ($Request -and $Event.PSObject.Properties['request_id'] -and $Config.approvals.enabled) {
+        $rid = [string]$Event.request_id
+        $req = @((Get-NotifierPendingRequests -DataRoot $DataRoot).Permissions | Where-Object { [string]$_.id -eq $rid }) | Select-Object -First 1
+        if ($null -eq $req) { return @() }
+        switch ([string]$req.kind) {
+            'question' {
+                $out = @(); $i = 0
+                foreach ($o in @($req.options | Select-Object -First 5)) { $out += (& $mk ([string]$o) $rid "answer:$i"); $i++ }
+                return $out
+            }
+            'question-complex' { return @() }
+            'plan' { return @((& $mk 'Утвердить' $rid 'allow'), (& $mk 'Отклонить' $rid 'deny')) }
+            default {
+                $out = @((& $mk 'Разрешить' $rid 'allow'))
+                if ($req.canAlways) { $out += (& $mk 'Всегда' $rid 'always') }
+                $out += (& $mk 'Запретить' $rid 'deny')
+                return $out
+            }
+        }
+    }
+    if ([string]$Event.type -eq 'done' -and $Config.quickReplies.enabled) {
+        $out = @(); $i = 0
+        foreach ($q in $script:QuickReplies) { $out += (& $mk $q '' "reply:$i"); $i++ }
+        return $out
+    }
+    return @()
+}
+
+function Invoke-NotifierToastButton {
+    <#
+    .SYNOPSIS
+    Нажатие кнопки уведомления: «cn|<session_id>|<request_id>|<действие>» → то же, что кнопка карточки. Возвращает подсказку.
+    #>
+    param([AllowEmptyString()][string]$Arguments, [string]$DataRoot = $script:TrayDataRoot)
+    $p = $Arguments -split '\|'
+    if ($p.Count -ne 4 -or $p[0] -ne 'cn' -or $p[3] -notmatch '^(allow|always|deny|answer:\d+|reply:\d+)$') { return '' }
+    $session = @(Get-NotifierSessions -DataRoot $DataRoot | Where-Object { [string]$_.session_id -eq $p[1] }) | Select-Object -First 1
+    if ($null -eq $session) { return 'Сеанс уже завершён' }
+    $item = New-Object ClaudeNotifier.Ui.CardItem
+    $item.Tag = $session
+    if ($p[2] -ne '') {
+        $req = @((Get-NotifierPendingRequests -DataRoot $DataRoot).Permissions | Where-Object { [string]$_.id -eq $p[2] }) | Select-Object -First 1
+        if ($null -eq $req) { return 'Запрос уже решён в Claude' }
+        $item.Tag = @{ Session = $session; Request = $req }
+    }
+    $notice = Invoke-NotifierCardAction -Item $item -ActionId $p[3] -DataRoot $DataRoot
+    Write-NotifierLog -Level INFO -Message "tray: кнопка уведомления '$($p[3])' $([char]0x2192) $notice" -DataRoot $DataRoot
+    return $notice
+}
+
+function Invoke-NotifierToastButtons {
+    <# .SYNOPSIS Из таймера трея: разобрать нажатые кнопки уведомлений. #>
+    if (-not ('ClaudeNotifier.Ui.ToastHook' -as [type])) { return }
+    $a = $null
+    while ([ClaudeNotifier.Ui.ToastHook]::Queue.TryDequeue([ref]$a)) {
+        [void](Invoke-NotifierToastButton -Arguments $a)
+        $script:SessionsDirty = $true
+    }
+}
+
 function Test-NotifierDuplicatePermissionToast {
     <#
     .SYNOPSIS

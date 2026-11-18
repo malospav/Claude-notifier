@@ -520,7 +520,7 @@ function Update-NotifierTrayBlink {
     }
     if ($frame -eq $script:BlinkFrame) { return }
     $script:BlinkFrame = $frame
-    if ($frame -eq '') { $Icon.Icon = Get-NotifierDotIcon ([string]$script:TrayStateShown) }
+    if ($frame -eq '') { $Icon.Icon = Get-NotifierDotIcon ([string]$script:TrayStateShown) -Count ([int]$script:TrayCountShown) }
     else { $Icon.Icon = Get-NotifierDotIcon $frame }
 }
 
@@ -554,6 +554,8 @@ function Register-NotifierHotKey {
 function Invoke-NotifierHotKey {
     <# .SYNOPSIS Горячая клавиша: открыть мини-окно у трея или закрыть открытое. #>
     try {
+        # Есть шторка — клавиша раскрывает и сворачивает её; иначе — мини-окно у трея.
+        if (Test-NotifierNotchActive) { Switch-NotifierNotch; return }
         if ($script:Popover -and -not $script:Popover.IsDisposed) { Close-NotifierPopover; return }
         Show-NotifierPopover -AtTray
     }
@@ -680,6 +682,7 @@ function Invoke-NotifierMenuAction {
                 if ($result -eq 'unknown') { $notice = 'Окно этого сеанса не определено' }
                 elseif ($result -eq 'closed') { $notice = 'Окно сеанса закрыто — сеанс убран из списка' }
                 elseif ($fromPopover) { Close-NotifierPopover }
+                elseif ($script:MenuSource -eq 'notch') { Close-NotifierNotch }
             }
         }
         'remove' {

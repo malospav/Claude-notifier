@@ -36,7 +36,7 @@ Describe 's_013_02 · неактивные сеансы, агенты на ка�
         $s.lastTool | Should Be 'Bash: npm run build'
         @($s.fileList) -join ',' | Should Be 'C:\dev\shop\src\a.ts'
         $d = Format-NotifierSessionDetails -Session ([pscustomobject]@{ session_id = 'x'; state = 'waiting'; stats = [pscustomobject]@{ context = 1; output = 1; tools = 1; prompts = 1; cost = 12.4; agentsCost = 3.1 } })
-        $d | Should Match 'Стоимость ≈ \$15,50 по ценам API \(агенты \$3,10\)'
+        $d | Should Match 'Стоимость	≈ \$15,50 по ценам API \(агенты \$3,10\)'
     }
 
     It 'агенты: активные — не завершённые и писавшие недавно, с описанием и последним действием; стоимость — всех' {
@@ -82,8 +82,10 @@ Describe 's_013_02 · неактивные сеансы, агенты на ка�
         [Math]::Round([double]$s.stats.agentsCost, 6) | Should Be 4
         $card = ConvertTo-NotifierSessionCard -Session $s
         $card.StateText | Should Be 'Работает агент'
-        $card.Details | Should Match 'Агент: Сайт A — Write: index\.html'
-        $card.Details | Should Match 'Стоимость ≈ \$8,00 по ценам API \(агенты \$4,00\)'
+        $card.SubLines[0] | Should Be 'Сайт A — Write: index.html'   # агенты — подстроками, не в подробностях
+        $card.Details | Should Not Match '(?m)^Агент	'
+        $card.Details | Should Match 'Стоимость	≈ \$8,00 по ценам API \(агенты \$4,00\)'
+        ($card.Chips -join ',') | Should Be 'контекст 100 %,≈ $8,00'
         # Событие хука не теряет агентов до следующего прохода трея.
         $l = Update-NotifierSessionList -Sessions @($s) -Event ([pscustomobject]@{ type = 'working'; session_id = 'L'; ts = $now })
         @($l[0].agents).Count | Should Be 1

@@ -2,6 +2,7 @@
 
 Import-Module (Join-Path $PSScriptRoot 'Sessions.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Activity.psm1')   # цены моделей: Get-NotifierMessageCost
+Import-Module (Join-Path $PSScriptRoot 'Text.psm1')       # короткие пути в командах
 
 # Статистика сеанса из журнала Claude Code (transcript_path, JSONL): время начала, размер контекста,
 # токены ответов, число запросов и действий. Журнал бывает десятки мегабайт, поэтому он читается
@@ -289,10 +290,15 @@ function Format-NotifierTokens {
 }
 
 function Format-NotifierSessionDetails {
-    <# .SYNOPSIS Строки подробностей сеанса: начало и длительность, контекст и токены, запросы и действия, ваш запрос. #>
-    param([Parameter(Mandatory = $true)]$Session, [datetime]$Now = [DateTime]::UtcNow)
+    <#
+    .SYNOPSIS
+    Подробности сеанса таблицей: строки «Подпись<Tab>Значение» (окно рисует подпись серым слева, значение справа;
+    для страницы телефона Tab заменяется на «: »). -NoAgents — без строк агентов (карточка показывает их подстроками).
+    #>
+    param([Parameter(Mandatory = $true)]$Session, [datetime]$Now = [DateTime]::UtcNow, [switch]$NoAgents)
     $lines = @()
-    $started = $null
+    $tab = "`t"
+    $dot = " $([char]0x00B7) "
     $st = ''
     if ($Session.PSObject.Properties['started']) { $st = [string]$Session.started }
     $parsed = [DateTimeOffset]::MinValue
@@ -300,54 +306,61 @@ function Format-NotifierSessionDetails {
         $local = $parsed.ToLocalTime()
         $when = $local.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
         if ($local.Date -ne [DateTime]::Now.Date) { $when = $local.ToString('dd.MM HH:mm', [Globalization.CultureInfo]::InvariantCulture) }
-        $lines += "Начат в $when $([char]0x00B7) идёт $(Format-NotifierElapsed -Ts $st -Now $Now)"
+        $lines += "Начат${tab}в $when${dot}идёт $(Format-NotifierElapsed -Ts $st -Now $Now)"
     }
     $stats = $null
     if ($Session.PSObject.Properties['stats']) { $stats = $Session.stats }
     if ($stats) {
-        $dot = " $([char]0x00B7) "
-        $ctx = "Контекст $(Format-NotifierTokens ([int64]$stats.context)) токенов"
+        $ctx = "$(Format-NotifierTokens ([int64]$stats.context)) токенов"
         if ($stats.PSObject.Properties['window'] -and [int64]$stats.window -gt 0) {
-            $ctx = "Контекст $([int]$stats.percent) % $([char]0x2014) $(Format-NotifierTokens ([int64]$stats.context)) из $(Format-NotifierTokens ([int64]$stats.window))"
+            $ctx = "$([int]$stats.percent) % $([char]0x2014) $(Format-NotifierTokens ([int64]$stats.context)) из $(Format-NotifierTokens ([int64]$stats.window))"
         }
-        $lines += "$ctx${dot}ответы $(Format-NotifierTokens ([int64]$stats.output))"
-        $line = "Запросов $([int]$stats.prompts)${dot}действий $([int]$stats.tools)"
+        $lines += "Контекст${tab}$ctx${dot}ответы $(Format-NotifierTokens ([int64]$stats.output))"
+        $line = "Работа${tab}запросов $([int]$stats.prompts)${dot}действий $([int]$stats.tools)"
         if ($stats.PSObject.Properties['compactions'] -and [int]$stats.compactions -gt 0) { $line += "${dot}сжатий $([int]$stats.compactions)" }
         $lines += $line
         if ($stats.PSObject.Properties['files'] -and [int]$stats.files -gt 0) {
-            $line = "Изменено файлов: $([int]$stats.files)"
+            $line = "Файлы${tab}изменено $([int]$stats.files)"
             $recent = @($stats.recentFiles | Where-Object { $_ })
-            if ($recent.Count -gt 0) { $line += " (последние: $($recent -join ', '))" }
+            if ($recent.Count -gt 0) { $line += ": $($recent -join ', ')" }
             $lines += $line
         }
-        if ($stats.PSObject.Properties['topTools'] -and @($stats.topTools).Count -gt 0) { $lines += "Чаще всего: $((@($stats.topTools)) -join ', ')" }
+        if ($stats.PSObject.Properties['topTools'] -and @($stats.topTools).Count -gt 0) { $lines += "Чаще всего${tab}$((@($stats.topTools)) -join ', ')" }
         if ($stats.PSObject.Properties['commands'] -and @($stats.commands).Count -gt 0) {
-            $last = @($stats.commands)[-1]
-            $lines += "Последняя команда: $last"
+            $lines += "Команда${tab}$(Format-NotifierShortText (@($stats.commands)[-1]))"
         }
         $cost = 0.0; $agentsCost = 0.0
         if ($stats.PSObject.Properties['cost']) { $cost = [double]$stats.cost }
         if ($stats.PSObject.Properties['agentsCost']) { $agentsCost = [double]$stats.agentsCost }
         if ($cost + $agentsCost -gt 0) {
-            $line = "Стоимость $([char]0x2248) $(Format-NotifierCost ($cost + $agentsCost)) по ценам API"
+            $line = "Стоимость${tab}$([char]0x2248) $(Format-NotifierCost ($cost + $agentsCost)) по ценам API"
             if ($agentsCost -gt 0) { $line += " (агенты $(Format-NotifierCost $agentsCost))" }
             $lines += $line
         }
     }
     # Работающие агенты: что поручено и что делает сейчас.
-    if ($Session.PSObject.Properties['agents'] -and [string]$Session.state -eq 'working') {
-        $agents = @(@($Session.agents) | Where-Object { $_ })
-        foreach ($a in ($agents | Select-Object -First 4)) {
-            $line = "Агент: $([string]$a.name)"
-            if ([string]$a.doing) { $line += " $([char]0x2014) $([string]$a.doing)" }
-            $lines += $line
-        }
-        if ($agents.Count -gt 4) { $lines += "…и ещё $($agents.Count - 4)" }
+    if (-not $NoAgents -and $Session.PSObject.Properties['agents'] -and [string]$Session.state -eq 'working') {
+        foreach ($text in (Format-NotifierAgentLines $Session 4)) { $lines += "Агент${tab}$text" }
     }
     $prompt = ''
     if ($Session.PSObject.Properties['prompt']) { $prompt = [string]$Session.prompt }
-    if ($prompt) { $lines += "Ваш запрос: $prompt" }
+    if ($prompt) { $lines += "Ваш запрос${tab}$prompt" }
     return ($lines -join "`n")
+}
+
+function Format-NotifierAgentLines {
+    <# .SYNOPSIS Строки работающих агентов: «задача — последнее действие»; больше Max — последняя строка «…и ещё N». #>
+    param($Session, [int]$Max = 3)
+    $agents = @()
+    if ($Session -and $Session.PSObject.Properties['agents']) { $agents = @(@($Session.agents) | Where-Object { $_ }) }
+    $out = @()
+    foreach ($a in ($agents | Select-Object -First $Max)) {
+        $t = [string]$a.name
+        if ([string]$a.doing) { $t += " $([char]0x2014) $(Format-NotifierShortText ([string]$a.doing))" }
+        $out += $t
+    }
+    if ($agents.Count -gt $Max) { $out += "$([char]0x2026)и ещё $($agents.Count - $Max)" }
+    return $out
 }
 
 function Get-NotifierJournalWriteTime {
@@ -369,6 +382,37 @@ function Get-NotifierJournalWriteTime {
     return $t
 }
 
+function Get-NotifierLastAnswer {
+    <#
+    .SYNOPSIS
+    Полный последний ответ Claude из журнала сеанса (последний текстовый блок ответа, без субагентов),
+    без разметки Markdown. Читается только хвост файла (по умолчанию 1 МБ). Нет журнала или ответа — ''.
+    #>
+    param([AllowEmptyString()][string]$Path, [int]$TailBytes = 1048576, [int]$MaxChars = 20000)
+    if ([string]::IsNullOrEmpty($Path) -or -not [IO.File]::Exists($Path)) { return '' }
+    $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        $start = [Math]::Max([int64]0, $fs.Length - $TailBytes)
+        [void]$fs.Seek($start, [IO.SeekOrigin]::Begin)
+        $buf = New-Object byte[] ($fs.Length - $start)
+        $read = 0
+        while ($read -lt $buf.Length) { $n = $fs.Read($buf, $read, $buf.Length - $read); if ($n -le 0) { break }; $read += $n }
+    }
+    finally { $fs.Dispose() }
+    $lines = [Text.Encoding]::UTF8.GetString($buf, 0, $read).Split("`n")
+    $rx = [regex]'"type":"text","text":"((?:[^"\\]|\\.)*)"'
+    for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+        $l = $lines[$i]
+        if (-not $l.Contains('"type":"assistant"') -or $l.Contains('"isSidechain":true') -or -not $l.Contains('"type":"text"')) { continue }
+        $parts = @($rx.Matches($l) | ForEach-Object { ConvertFrom-JsonString $_.Groups[1].Value } | Where-Object { $_.Trim() -ne '' })
+        if ($parts.Count -eq 0) { continue }
+        $text = ConvertTo-NotifierPlainText (($parts -join "`n`n").Trim())
+        if ($text.Length -gt $MaxChars) { $text = $text.Substring(0, $MaxChars) + [char]0x2026 }
+        return $text
+    }
+    return ''
+}
+
 function Format-NotifierApiError {
     <# .SYNOPSIS Текст ошибки API из журнала → понятная фраза. #>
     param([AllowEmptyString()][string]$Text)
@@ -380,4 +424,4 @@ function Format-NotifierApiError {
     return $Text
 }
 
-Export-ModuleMember -Function Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError
+Export-ModuleMember -Function Get-NotifierLastAnswer, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError

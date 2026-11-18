@@ -4,13 +4,16 @@
 
 .DESCRIPTION
 Подключается к ClaudeNotifier.Tray.ps1 через dot-source и работает в его области видимости ($script:…).
-Отрисовка — элементы ClaudeNotifier.Ui.* из lib\Ui.cs: тема как в Windows (светлая/тёмная), Segoe UI Variable.
+Отрисовка — элементы ClaudeNotifier.Ui.* из lib\ui\*.cs: тема как в Windows (светлая/тёмная), Segoe UI Variable.
 #>
 
 Import-Module (Join-Path $PSScriptRoot 'lib\Ui.psm1')
 
 $script:NoticeUntil = [datetime]::MinValue
 $script:DotIcons = @{}
+$script:TrayCountShown = 0   # число на точке в трее: сколько сеансов ждут вас
+$script:SessionFilter = @{ Text = ''; Mode = 'all' }   # поиск и фильтр списка сеансов (только в окне)
+$script:SearchOpen = $false   # строку поиска открыли (Ctrl+F); закрывается Esc в пустом поле
 $script:TrayStateShown = $null
 
 function Get-NotifierTheme {
@@ -26,24 +29,48 @@ function Get-NotifierTheme {
 
 function Get-NotifierDotIcon {
     <# .SYNOPSIS Иконка-точка для статуса (кэшируется на время работы трея). #>
-    param([Parameter(Mandatory = $true)][string]$State)
-    if (-not $script:DotIcons.ContainsKey($State)) {
+    param([Parameter(Mandatory = $true)][string]$State, [int]$Count = 0)
+    if ($Count -lt 2) { $Count = 0 }
+    $key = "$State|$Count"
+    if (-not $script:DotIcons.ContainsKey($key)) {
         [void](Import-NotifierUi)
         $size = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width
-        $script:DotIcons[$State] = [ClaudeNotifier.Ui.TrayDot]::Create($State, $size)
+        $script:DotIcons[$key] = [ClaudeNotifier.Ui.TrayDot]::Create($State, $size, $Count)
     }
-    return $script:DotIcons[$State]
+    return $script:DotIcons[$key]
+}
+
+function Get-NotifierWaitingCount {
+    <#
+    .SYNOPSIS
+    Сколько сеансов ждут вас: нужно разрешение, ошибка или «Ждёт ответа» не дольше порога «Неактивные»
+    (давние сеансы число не раздувают). На точке в трее число видно с двух.
+    #>
+    param([AllowEmptyCollection()][object[]]$Sessions = @(), [datetime]$Now = [DateTime]::UtcNow)
+    $hours = 2
+    if ($script:TrayDataRoot) { $cfg = Get-NotifierConfig -DataRoot $script:TrayDataRoot; $hours = 0; if ($cfg.inactive.enabled) { $hours = [int]$cfg.inactive.hours } }
+    $n = 0
+    foreach ($s in $Sessions) {
+        $st = [string]$s.state
+        if ($st -eq 'permission' -or $st -eq 'error') { $n++; continue }
+        if ($st -ne 'waiting') { continue }
+        $since = ConvertTo-NotifierUtc ([string]$s.since)
+        if ($hours -le 0 -or $null -eq $since -or ($Now - $since).TotalHours -lt $hours) { $n++ }
+    }
+    return $n
 }
 
 function Update-NotifierTrayStatus {
     <# .SYNOPSIS Меняет точку в трее и подсказку по списку живых сеансов. Возвращает показанный статус. #>
     param([AllowEmptyCollection()][object[]]$Sessions = @(), $Icon = $script:TrayState.Icon)
     $state = Get-NotifierTrayState -Sessions $Sessions
+    $count = Get-NotifierWaitingCount -Sessions $Sessions
     if ($Icon) {
-        if ($state -ne $script:TrayStateShown) { $Icon.Icon = Get-NotifierDotIcon $state }
+        if ($state -ne $script:TrayStateShown -or $count -ne $script:TrayCountShown) { $Icon.Icon = Get-NotifierDotIcon $state -Count $count }
         $Icon.Text = Format-NotifierTrayTooltip -Sessions $Sessions
     }
     $script:TrayStateShown = $state
+    $script:TrayCountShown = $count
     return $state
 }
 
@@ -76,9 +103,11 @@ function ConvertTo-NotifierSessionCard {
         $card.StateText = 'Похоже, остановился'
         $card.Right = Format-NotifierElapsed -Ts ([string]$Session.stalledSince) -Now $Now
     }
-    $card.Preview = [string]$Session.preview
+    $card.Preview = ConvertTo-NotifierPlainText ([string]$Session.preview)   # без **, `, # и ссылок
     $card.Tag = $Session
-    $card.Details = Format-NotifierSessionDetails -Session $Session -Now $Now
+    $card.Details = Format-NotifierSessionDetails -Session $Session -Now $Now -NoAgents
+    if ([string]$Session.state -eq 'working') { $card.SubLines = [string[]]@(Format-NotifierAgentLines $Session 3) }   # агенты — подстроками
+    $card.Chips = [string[]]@(Get-NotifierSessionChips $Session)
     if ($deviceId -eq '') { Add-NotifierCardRequest -Card $card -Session $Session }   # ответы — для сеансов этого ПК
     # Без запроса — кнопки изменённых файлов и папки проекта (видны, когда карточка раскрыта).
     if ($deviceId -eq '' -and $card.Actions.Length -eq 0) {
@@ -93,6 +122,150 @@ function ConvertTo-NotifierSessionCard {
     return $card
 }
 
+function Format-NotifierFilesCount([int]$N) {
+    $w = 'файлов'
+    if ($N % 10 -eq 1 -and $N % 100 -ne 11) { $w = 'файл' }
+    elseif (@(2, 3, 4) -contains ($N % 10) -and @(12, 13, 14) -notcontains ($N % 100)) { $w = 'файла' }
+    return "$N $w"
+}
+
+function Get-NotifierSessionChips {
+    <# .SYNOPSIS Плашки раскрытой карточки: заполненность контекста, стоимость, сколько файлов изменено. #>
+    param($Session)
+    $chips = @()
+    if ($null -eq $Session -or -not $Session.PSObject.Properties['stats'] -or $null -eq $Session.stats) { return $chips }
+    $st = $Session.stats
+    if ($st.PSObject.Properties['window'] -and [int64]$st.window -gt 0) { $chips += "контекст $([int]$st.percent) %" }
+    $cost = 0.0
+    foreach ($k in @('cost', 'agentsCost')) { if ($st.PSObject.Properties[$k]) { $cost += [double]$st.$k } }
+    if ($cost -gt 0) { $chips += "$([char]0x2248) $(Format-NotifierCost $cost)" }
+    if ($st.PSObject.Properties['files'] -and [int]$st.files -gt 0) { $chips += "изменено $(Format-NotifierFilesCount ([int]$st.files))" }
+    return $chips
+}
+
+function Select-NotifierFilteredSessions {
+    <#
+    .SYNOPSIS
+    Поиск и фильтр списка: Mode — all | me (ждут вас: разрешение, ошибка, ждёт ответа) | work (работают);
+    Text — часть имени, проекта, последнего ответа или вашего запроса (без учёта регистра).
+    #>
+    param([AllowEmptyCollection()][object[]]$Sessions = @(), [hashtable]$Filter, [hashtable]$Prefs = @{})
+    if ($null -eq $Filter) { return $Sessions }
+    $text = ([string]$Filter.Text).Trim()
+    $mode = [string]$Filter.Mode
+    $out = @()
+    foreach ($s in $Sessions) {
+        $st = [string]$s.state
+        if ($mode -eq 'me' -and @('permission', 'error', 'waiting') -notcontains $st) { continue }
+        if ($mode -eq 'work' -and $st -ne 'working') { continue }
+        if ($text -ne '') {
+            $hay = @((Get-NotifierSessionName -Session $s -Prefs $Prefs), [string]$s.project, [string]$s.preview)
+            if ($s.PSObject.Properties['prompt']) { $hay += [string]$s.prompt }
+            if (-not (@($hay | Where-Object { $_ -and $_.IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)) { continue }
+        }
+        $out += $s
+    }
+    return $out
+}
+
+function Test-NotifierFilterActive([hashtable]$Filter) {
+    return ($null -ne $Filter -and (([string]$Filter.Text).Trim() -ne '' -or [string]$Filter.Mode -ne 'all'))
+}
+
+function New-NotifierSearchBar {
+    <#
+    .SYNOPSIS
+    Строка над списком сеансов: поле поиска (Ctrl+F, Esc — очистить) и фильтры «Все · Ждут меня · Работают».
+    Видна, когда сеансов больше 5 или фильтр включён. Возвращает @{ Panel; Box; Hint; Buttons }.
+    #>
+    param([Parameter(Mandatory = $true)]$Theme)
+    $t = $Theme
+    $bar = New-Object System.Windows.Forms.Panel
+    $bar.Dock = [System.Windows.Forms.DockStyle]::Top
+    $bar.Height = $t.S(44)
+    $bar.BackColor = $t.Window
+    $bar.Visible = $false
+    $field = New-NotifierGroupPanel -Theme $t -Height 32
+    $glyph = New-Object System.Windows.Forms.Label
+    $glyph.Text = [string][char]0xE721
+    $glyph.Font = [ClaudeNotifier.Ui.IconButton]::IconFont(9)
+    $glyph.ForeColor = $t.Muted; $glyph.BackColor = $t.Surface
+    $glyph.TextAlign = 'MiddleCenter'
+    $glyph.SetBounds($t.S(6), 0, $t.S(24), $t.S(32))
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.BorderStyle = 'None'
+    $box.BackColor = $t.Surface; $box.ForeColor = $t.Text
+    $box.Font = [ClaudeNotifier.Ui.Fonts]::Text(10)
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = 'Поиск по сеансам'
+    $hint.Font = $box.Font
+    $hint.ForeColor = $t.Muted; $hint.BackColor = $t.Surface
+    $hint.AutoSize = $true
+    $hint.add_Click({ $this.Parent.Controls[2].Focus() })
+    $field.Controls.Add($glyph); $field.Controls.Add($hint); $field.Controls.Add($box)
+    $box.add_TextChanged({
+            $script:SessionFilter.Text = $this.Text
+            $this.Parent.Controls[1].Visible = ($this.Text -eq '')
+            [void](Invoke-NotifierSessionsRefresh)
+        })
+    $box.add_KeyDown({
+            param($s, $e)
+            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+                if ($s.Text -eq '') { $script:SearchOpen = $false; $script:SessionsForm.Tag.Cards.Focus(); [void](Invoke-NotifierSessionsRefresh) }
+                $s.Text = ''; $e.Handled = $true; $e.SuppressKeyPress = $true
+            }
+            elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Down) { $script:SessionsForm.Tag.Cards.Focus(); $e.Handled = $true }
+        })
+    $bar.Controls.Add($field)
+    $buttons = @{}
+    foreach ($m in @(@('all', 'Все'), @('me', 'Ждут меня'), @('work', 'Работают'))) {
+        $b = New-Object ClaudeNotifier.Ui.Button2
+        $b.ApplyTheme($t)
+        $b.Text = $m[1]
+        $b.Tag = $m[0]
+        $b.Style = @('secondary', 'primary')[[int]($m[0] -eq 'all')]
+        $b.FitWidth()
+        $b.Height = $t.S(30)
+        $b.add_Click({ Set-NotifierSessionFilterMode ([string]$this.Tag) })
+        $bar.Controls.Add($b)
+        $buttons[$m[0]] = $b
+    }
+    $bar.Tag = @{ Theme = $t; Field = $field; Box = $box; Hint = $hint; Glyph = $glyph; Buttons = $buttons }
+    $bar.add_Layout({
+            $tg = $this.Tag; $th = $tg.Theme
+            $x = $this.ClientSize.Width
+            foreach ($k in @('work', 'me', 'all')) {
+                $b = $tg.Buttons[$k]
+                $x -= $b.Width
+                $b.Location = New-Object System.Drawing.Point($x, [int](($th.S(32) - $b.Height) / 2))
+                $x -= $th.S(6)
+            }
+            $tg.Field.SetBounds(0, 0, [Math]::Max($th.S(80), $x - $th.S(4)), $th.S(32))
+            $tg.Box.SetBounds($th.S(32), [int](($th.S(32) - $tg.Box.Height) / 2), [Math]::Max($th.S(40), $tg.Field.Width - $th.S(40)), $tg.Box.Height)
+            $tg.Hint.Location = New-Object System.Drawing.Point($th.S(31), [int](($th.S(32) - $tg.Hint.Height) / 2))
+        })
+    return @{ Panel = $bar; Box = $box; Hint = $hint; Buttons = $buttons }
+}
+
+function Set-NotifierSessionFilterMode {
+    param([ValidateSet('all', 'me', 'work')][string]$Mode)
+    $script:SessionFilter.Mode = $Mode
+    $form = $script:SessionsForm
+    if ($form -and -not $form.IsDisposed -and $form.Tag.Search) {
+        foreach ($k in @($form.Tag.Search.Buttons.Keys)) { $form.Tag.Search.Buttons[$k].Style = @('secondary', 'primary')[[int]($k -eq $Mode)] }
+    }
+    [void](Invoke-NotifierSessionsRefresh)
+}
+
+function Show-NotifierSearch {
+    <# .SYNOPSIS Ctrl+F в окне: показать строку поиска и поставить курсор в поле. #>
+    $form = $script:SessionsForm
+    if ($null -eq $form -or $form.IsDisposed -or $form.Tag.Tabs.SelectedIndex -ne 0) { return }
+    $script:SearchOpen = $true
+    $form.Tag.Search.Panel.Visible = $true
+    [void]$form.Tag.Search.Box.Focus()
+}
+
 function Update-NotifierSessionsView {
     <#
     .SYNOPSIS
@@ -101,7 +274,8 @@ function Update-NotifierSessionsView {
     param(
         [Parameter(Mandatory = $true)]$Cards,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Sessions,
-        [datetime]$Now = [DateTime]::UtcNow
+        [datetime]$Now = [DateTime]::UtcNow,
+        [hashtable]$Filter = $null   # поиск и фильтр (окно); $null — все сеансы (мини-окно)
     )
     # Группы по устройствам: сначала группа, где самый «срочный» сеанс; внутри группы — порядок срочности.
     # foreach, а не конвейер: Get-NotifierSortedSessions возвращает массив одним объектом.
@@ -120,8 +294,19 @@ function Update-NotifierSessionsView {
         $inactiveHours = 0; if ($cfg.inactive.enabled) { $inactiveHours = [int]$cfg.inactive.hours }
     }
     $pinned = @($prefs.Keys | Where-Object { $prefs[$_].pinned })
+    $all = $Sessions
+    $filtered = Test-NotifierFilterActive $Filter
+    if ($filtered) {
+        $Sessions = @(Select-NotifierFilteredSessions -Sessions $Sessions -Filter $Filter -Prefs $prefs)
+        $Cards.EmptyTitle = 'Ничего не найдено'; $Cards.EmptyHint = 'Измените запрос или выберите «Все».'
+    }
+    elseif ($Cards.EmptyTitle -eq 'Ничего не найдено') {
+        $Cards.EmptyTitle = 'Активных сеансов нет'
+        $Cards.EmptyHint = 'Сеанс появится здесь, как только вы начнёте работу в Claude Code — на этом ПК или на подключённом Mac.'
+    }
     $cardsSorted = @(foreach ($x in (Get-NotifierSortedSessions -Sessions $Sessions -Pinned $pinned)) { ConvertTo-NotifierSessionCard -Session $x -Now $Now -Prefs $prefs -ContextWarn $warn })
     $Cards.SetItems((Get-NotifierGroupedCards -Cards $cardsSorted -MinSessions $minGroup -InactiveHours $inactiveHours -Now $Now))
+    if ($filtered) { return "Показано $(@($Sessions).Count) из $(@($all).Count)" }
     return (Format-NotifierSessionsSubtitle -Sessions $Sessions)
 }
 
@@ -149,6 +334,7 @@ function New-NotifierGroupCard {
     $g.Title = $Project
     $g.IsGroup = $true
     $g.GroupOpen = $Open
+    $g.NeutralState = $true
     $g.Tag = @{ Group = $Key }
     $states = @($Members | ForEach-Object { [string]$_.State })
     foreach ($st in @('permission', 'error', 'waiting', 'working')) { if ($states -contains $st) { $g.State = $st; break } }
@@ -222,7 +408,7 @@ function Get-NotifierGroupedCards {
             $open = $Expanded.ContainsKey($k)
             $g = New-Object ClaudeNotifier.Ui.CardItem
             $g.Id = "group:$k"; $g.Section = $section; $g.Title = 'Неактивные'
-            $g.IsGroup = $true; $g.GroupOpen = $open; $g.HollowDot = $true; $g.State = 'waiting'
+            $g.IsGroup = $true; $g.GroupOpen = $open; $g.HollowDot = $true; $g.State = 'waiting'; $g.NeutralState = $true
             $g.StateText = Format-NotifierSessionCount $sectionIdle.Count
             $g.Meta = "ждут ответа дольше $InactiveHours ч"
             $g.Tag = @{ Group = $k; Ids = @($sectionIdle | ForEach-Object { $_.Id }) }
@@ -278,10 +464,15 @@ function Invoke-NotifierSessionsRefresh {
     $script:SessionsRefreshedAt = [datetime]::UtcNow
     try { [void](Update-NotifierTrayStatus -Sessions $live) } catch { }
     try { Update-NotifierPopover -Sessions $live } catch { }
+    try { Update-NotifierNotch -Sessions $live } catch { Write-NotifierLog -Level WARN -Message "tray: шторка: $($_.Exception.Message)" -DataRoot $DataRoot }
     try { Update-NotifierUsageViews } catch { }
     $form = $script:SessionsForm
     if ($form -and -not $form.IsDisposed) {
-        $subtitle = Update-NotifierSessionsView -Cards $form.Tag.Cards -Sessions $live
+        $subtitle = Update-NotifierSessionsView -Cards $form.Tag.Cards -Sessions $live -Filter $script:SessionFilter
+        if ($form.Tag.Search) {
+            $show = $form.Tag.Tabs.SelectedIndex -eq 0 -and ($live.Count -gt 5 -or (Test-NotifierFilterActive $script:SessionFilter) -or $script:SearchOpen)
+            if ($form.Tag.Search.Panel.Visible -ne $show) { $form.Tag.Search.Panel.Visible = $show }
+        }
         if ($form.Tag.Net) {
             Update-NotifierDevicesView -Ui $form.Tag.Net -Sessions $live
             if ($form.Tag.Tabs.SelectedIndex -eq 1) { $subtitle = Format-NotifierDevicesSubtitle }
@@ -443,7 +634,21 @@ function New-NotifierUsagePanel {
     $card.Controls.Add($week); $card.Controls.Add($gap); $card.Controls.Add($five)
     $outer.Controls.Add($card)
     $outer.Height = $t.S(14) + $t.S(12) + $five.Height + $gap.Height + $week.Height + $t.S(12)
-    return @{ Panel = $outer; Five = $five; Week = $week }
+    return @{ Panel = $outer; Five = $five; Week = $week; Gap = $gap; Theme = $t; Compact = $false }
+}
+
+function Set-NotifierUsageCompact {
+    <# .SYNOPSIS Нет данных о расходе — одна строка «Лимиты Claude» вместо двух пустых полос; есть данные — обе полосы. #>
+    param([Parameter(Mandatory = $true)]$Usage, [bool]$Compact)
+    if ($Usage.Compact -eq $Compact) { return }
+    $Usage.Compact = $Compact
+    $t = $Usage.Theme
+    $Usage.Week.Visible = -not $Compact
+    $Usage.Gap.Visible = -not $Compact
+    $Usage.Five.Label = @('5 часов', 'Лимиты Claude')[[int]$Compact]
+    $h = $t.S(14) + $t.S(12) + $Usage.Five.Height + $t.S(12)
+    if (-not $Compact) { $h += $Usage.Gap.Height + $Usage.Week.Height }
+    $Usage.Panel.Height = $h
 }
 
 function Update-NotifierUsageViews {
@@ -456,6 +661,7 @@ function Update-NotifierUsageViews {
         $f = Format-NotifierUsageWindow -Usage $usage -Window five_hour
         $w = Format-NotifierUsageWindow -Usage $usage -Window seven_day
         if ($null -eq $usage) { $f.Detail = 'нет данных — войдите в Claude Code CLI'; $w.Detail = 'нет данных' }
+        if ($u.ContainsKey('Gap')) { Set-NotifierUsageCompact -Usage $u -Compact ($null -eq $usage) }
         $u.Five.SetValue([double]$f.Percent, [string]$f.Detail)
         $u.Week.SetValue([double]$w.Percent, [string]$w.Detail)
     }
@@ -662,6 +868,8 @@ function New-NotifierSessionsForm {
     $pages.Dock = [System.Windows.Forms.DockStyle]::Fill
     $pages.BackColor = $t.Window
     $pages.Controls.Add($cards)
+    $search = New-NotifierSearchBar -Theme $t
+    $pages.Controls.Add($search.Panel)   # после карточек: пристыковывается сверху, карточки — под ней
     $netUi = $null
     if ($script:Net) {
         $netUi = New-NotifierDevicesPage -Theme $t
@@ -681,6 +889,7 @@ function New-NotifierSessionsForm {
             $tag = $script:SessionsForm.Tag
             $i = $this.SelectedIndex
             $tag.Cards.Visible = ($i -eq 0)
+            if ($i -ne 0) { $tag.Search.Panel.Visible = $false }
             if ($tag.Net) { $tag.Net.Page.Visible = ($i -eq 1) }
             if ($tag.Settings) { $tag.Settings.Page.Visible = ($i -eq 2); if ($i -eq 2) { Update-NotifierSettingsView } }
             $tag.Stats.Page.Visible = ($i -eq 3)
@@ -708,8 +917,13 @@ function New-NotifierSessionsForm {
     $form.Controls.Add($body)
     $form.Controls.Add($caption)
     $form.Tag = @{ Theme = $t; Cards = $cards; Title = $title; Subtitle = $subtitle; Tabs = $tabs; Net = $netUi; Settings = $settingsUi; Stats = $statsUi; Menu = $menu
-        Back = $back; DevicesButton = $btnDevices; SettingsButton = $btnSettings; StatsButton = $btnStats; Usage = $usage; WindowButtons = $winButtons }
-    $form.add_FormClosed({ $script:SessionsForm = $null })
+        Back = $back; DevicesButton = $btnDevices; SettingsButton = $btnSettings; StatsButton = $btnStats; Usage = $usage; WindowButtons = $winButtons; Search = $search }
+    $form.KeyPreview = $true
+    $form.add_KeyDown({
+            param($s, $e)
+            if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) { Show-NotifierSearch; $e.Handled = $true; $e.SuppressKeyPress = $true }
+        })
+    $form.add_FormClosed({ $script:SessionsForm = $null; $script:SearchOpen = $false })
     $form.add_Shown({ $this.Tag.Cards.Focus() })
     return $form
 }
@@ -717,6 +931,13 @@ function New-NotifierSessionsForm {
 function Show-NotifierSessionsWindow {
     <# .SYNOPSIS Открывает окно «Сеансы» или выводит уже открытое на передний план. -Tab 1 — «Устройства». #>
     param([int]$Tab = -1)
+    # Шторка — главное окно: вместо окна «Сеансы» раскрывается она на нужной странице.
+    if (Test-NotifierNotchActive) {
+        $page = 'home'
+        if ($script:NotchPages.ContainsKey($Tab)) { $page = $script:NotchPages[$Tab] }
+        Open-NotifierNotch -Page $page
+        return
+    }
     try {
         if ($null -eq $script:SessionsForm -or $script:SessionsForm.IsDisposed) {
             $script:SessionsForm = New-NotifierSessionsForm

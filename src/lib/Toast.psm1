@@ -36,13 +36,19 @@ function New-NotifierToastXml {
     его играет Sound.psm1.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)]$Event)
+    param([Parameter(Mandatory = $true)]$Event, [object[]]$Actions = @())
 
     $lines = "<text>$(ConvertTo-XmlText ([string]$Event.title))</text>"
     $preview = [string]$Event.preview
     if ($preview -ne '') { $lines += "<text>$(ConvertTo-XmlText $preview)</text>" }
+    # Кнопки (до 5): activationType foreground — нажатие ловит сам трей (ToastHook), внешний обработчик не запускается.
+    $acts = ''
+    foreach ($a in @($Actions | Select-Object -First 5)) {
+        $acts += "<action content=`"$(ConvertTo-XmlText ([string]$a.Content))`" arguments=`"$(ConvertTo-XmlText ([string]$a.Arguments))`" activationType=`"foreground`"/>"
+    }
+    if ($acts) { $acts = "<actions>$acts</actions>" }
 
-    return "<toast><visual><binding template=`"ToastGeneric`">$lines</binding></visual><audio silent=`"true`"/></toast>"
+    return "<toast><visual><binding template=`"ToastGeneric`">$lines</binding></visual>$acts<audio silent=`"true`"/></toast>"
 }
 
 function ConvertTo-WinRtXml([string]$Xml) {
@@ -56,8 +62,16 @@ function Invoke-ToastShow([string]$Xml, [string]$AppId) {
     # Точка подмены в тестах: реальный показ через WinRT.
     $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
     $toast = New-Object Windows.UI.Notifications.ToastNotification (ConvertTo-WinRtXml $Xml)
+    # С кнопками — подписка на нажатие (если интерфейс загружен); уведомление держим, пока оно может быть нажато.
+    if ($Xml.Contains('<actions>') -and ('ClaudeNotifier.Ui.ToastHook' -as [type])) {
+        [ClaudeNotifier.Ui.ToastHook]::Attach($toast)
+        $script:LiveToasts.Add($toast)
+        while ($script:LiveToasts.Count -gt 30) { $script:LiveToasts.RemoveAt(0) }
+    }
     [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($AppId).Show($toast)
 }
+
+$script:LiveToasts = New-Object System.Collections.ArrayList
 
 function Show-NotifierToast {
     <#
@@ -70,11 +84,12 @@ function Show-NotifierToast {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]$Event,
+        [object[]]$Actions = @(),
         [string]$AppId = (Get-NotifierToastAppId),
         [string]$DataRoot = (Get-NotifierDataRoot)
     )
     try {
-        Invoke-ToastShow -Xml (New-NotifierToastXml -Event $Event) -AppId $AppId
+        Invoke-ToastShow -Xml (New-NotifierToastXml -Event $Event -Actions $Actions) -AppId $AppId
         return $true
     }
     catch {

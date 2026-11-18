@@ -50,10 +50,10 @@ Describe 's_010_01 · журнал сеанса' {
         Format-NotifierTokens 1250000 | Should Be '1,3 млн'
         $now = [DateTime]::UtcNow
         $d = Format-NotifierSessionDetails -Now $now -Session ([pscustomobject]@{ started = $now.AddMinutes(-75).ToString('o'); prompt = 'Сделай тесты'; stats = [pscustomobject]@{ context = 721350; output = 885560; tools = 861; prompts = 51 } })
-        $d | Should Match '^Начат в \d\d:\d\d · идёт 1 ч 15 мин'
-        $d | Should Match 'Контекст 721 тыс\. токенов · ответы 886 тыс\.'
-        $d | Should Match 'Запросов 51 · действий 861'
-        $d | Should Match 'Ваш запрос: Сделай тесты$'
+        $d | Should Match '^Начат	в \d\d:\d\d · идёт 1 ч 15 мин'
+        $d | Should Match 'Контекст	721 тыс\. токенов · ответы 886 тыс\.'
+        $d | Should Match 'Работа	запросов 51 · действий 861'
+        $d | Should Match 'Ваш запрос	Сделай тесты$'
         Format-NotifierSessionDetails -Session ([pscustomobject]@{ session_id = 'x' }) | Should Be ''
     }
 }

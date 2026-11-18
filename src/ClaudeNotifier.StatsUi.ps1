@@ -51,6 +51,7 @@ function Complete-NotifierActivityScan {
 }
 
 function Test-NotifierStatsVisible {
+    if ((Test-NotifierNotchActive) -and $script:NotchExpanded -and $script:NotchPage -eq 'stats') { return $true }
     $form = $script:SessionsForm
     return ($form -and -not $form.IsDisposed -and $form.Visible -and $form.Tag.Stats -and $form.Tag.Tabs.SelectedIndex -eq 3)
 }
@@ -162,7 +163,8 @@ function Format-NotifierStatsSubtitle {
 }
 
 function Update-NotifierStatsView {
-    <# .SYNOPSIS Показывает последний итог на странице «Статистика» (если окно открыто). #>
+    <# .SYNOPSIS Показывает последний итог на странице «Статистика» (окна или шторки). #>
+    if ((Test-NotifierNotchActive) -and $script:NotchPage -eq 'stats') { Push-NotifierNotchPage -Page stats }
     $form = $script:SessionsForm
     if ($null -eq $form -or $form.IsDisposed -or $null -eq $form.Tag.Stats) { return }
     $ui = $form.Tag.Stats

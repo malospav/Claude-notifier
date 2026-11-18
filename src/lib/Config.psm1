@@ -48,6 +48,8 @@ function Get-NotifierDefaultConfig {
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{} }   # mascots — маскот сеансов с других устройств: { id устройства: sphynx | flame }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        quiet           = @{ enabled = $false }                    # звук уведомлений выключен (кнопка в шторке)
     }
 }
 
@@ -242,6 +244,29 @@ function Get-NotifierConfig {
     Merge-OptionSection $config $user 'longTasks' @{ minutes = @(1, 60) } $DataRoot
     Merge-OptionSection $config $user 'groups' @{ minSessions = @(2, 20) } $DataRoot
     Merge-OptionSection $config $user 'inactive' @{ hours = @(1, 72) } $DataRoot
+    Merge-OptionSection $config $user 'notch' @{} $DataRoot
+    Merge-OptionSection $config $user 'quiet' @{} $DataRoot
+    $notch = Get-JsonProperty $user 'notch'
+    if ($notch.found -and $notch.value -is [System.Management.Automation.PSCustomObject]) {
+        $scr = Get-JsonProperty $notch.value 'screen'
+        if ($scr.found -and $scr.value -is [string]) { $config.notch.screen = $scr.value }
+        $pos = Get-JsonProperty $notch.value 'position'
+        if ($pos.found) {
+            if (@('left', 'center', 'right') -contains [string]$pos.value) { $config.notch.position = [string]$pos.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.position' должно быть left, center или right" -DataRoot $DataRoot }
+        }
+        $mascot = Get-JsonProperty $notch.value 'mascot'
+        if ($mascot.found) {
+            if (@('sphynx', 'flame') -contains [string]$mascot.value) { $config.notch.mascot = [string]$mascot.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.mascot' должно быть sphynx или flame" -DataRoot $DataRoot }
+        }
+        $mascots = Get-JsonProperty $notch.value 'mascots'
+        if ($mascots.found -and $mascots.value -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($p in $mascots.value.PSObject.Properties) {
+                if (@('sphynx', 'flame') -contains [string]$p.Value) { $config.notch.mascots[[string]$p.Name] = [string]$p.Value }
+            }
+        }
+    }
     Merge-OptionSection $config $user 'quickReplies' @{ minutes = @(1, 240) } $DataRoot
     $showPrompt = Get-JsonProperty $user 'showPrompt'
     if ($showPrompt.found) {
@@ -252,4 +277,9 @@ function Get-NotifierConfig {
     return $config
 }
 
-Export-ModuleMember -Function Get-NotifierDefaultConfig, Get-NotifierConfig, Get-NotifierEventTitle, Set-NotifierConfigValue -Variable NotifierStrings
+function Get-NotifierHookPort {
+    <# .SYNOPSIS Порт на 127.0.0.1, куда хуки (curl.exe) отправляют события трею. #>
+    return 47611
+}
+
+Export-ModuleMember -Function Get-NotifierHookPort, Get-NotifierDefaultConfig, Get-NotifierConfig, Get-NotifierEventTitle, Set-NotifierConfigValue -Variable NotifierStrings

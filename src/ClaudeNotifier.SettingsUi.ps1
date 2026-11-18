@@ -52,7 +52,7 @@ function Set-NotifierEventOption {
 function Set-NotifierOptionValue {
     <# .SYNOPSIS Меняет поле раздела approvals / quickReplies или showPrompt и сохраняет config.json. #>
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups', 'inactive')][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups', 'inactive', 'notch', 'quiet')][string]$Name,
         [string]$Field = 'enabled',
         [Parameter(Mandatory = $true)]$Value,
         [string]$DataRoot = $script:TrayDataRoot
@@ -274,6 +274,21 @@ function New-NotifierSettingsPage {
     $ui.HotkeyRow = @($attention.Controls)[6]
     Add-Group $attention 'Если вы отошли от ПК больше чем на минуту, «Готово» приходит всегда.'
 
+    # Шторка вверху экрана.
+    Add-Header 'Шторка'
+    $swNotch = New-NotifierSwitchControl -Theme $t -Checked ([bool]$config.notch.enabled) -OnChange {
+        Set-NotifierOptionValue -Name notch -Value $this.Checked
+        try { Initialize-NotifierNotch; [void](Invoke-NotifierSessionsRefresh) } catch { }
+    }
+    $btnScreen = New-NotifierButton -Theme $t -Text (Format-NotifierScreenName (Get-NotifierNotchScreen -Config $config)) -Plain -OnClick { Switch-NotifierNotchScreen; Update-NotifierSettingsView }
+    $btnPos = New-NotifierButton -Theme $t -Text (Format-NotifierNotchPosition ([string]$config.notch.position)) -Plain -OnClick { Switch-NotifierNotchPosition; Update-NotifierSettingsView }
+    $ui.Switches['notch'] = $swNotch; $ui.NotchScreen = $btnScreen; $ui.NotchPosition = $btnPos
+    Add-Group (New-NotifierSettingsGroup -Theme $t -Width $width -Rows @(
+            @{ Title = 'Шторка вверху экрана'; Subtitle = 'Персонажи сеансов; щелчок — панель с ответами'; Control = $swNotch },
+            @{ Title = 'Монитор'; Subtitle = 'Щелчок — следующий монитор'; Control = $btnScreen },
+            @{ Title = 'Положение'; Subtitle = 'У верхнего края: слева, по центру или справа'; Control = $btnPos }
+        )) 'Щелчок мимо раскрытой шторки сворачивает её. Горячая клавиша тоже раскрывает шторку.'
+
     # Система.
     Add-Header 'Система'
     $swAuto = New-NotifierSwitchControl -Theme $t -Checked (Test-NotifierAutostart) -OnChange {
@@ -316,6 +331,11 @@ function Update-NotifierSettingsView {
         $ui.Switches['longTasks'].SetChecked([bool]$config.longTasks.enabled)
         $ui.Switches['groups'].SetChecked([bool]$config.groups.enabled)
         $ui.Switches['inactive'].SetChecked([bool]$config.inactive.enabled)
+    }
+    if ($ui.Switches.ContainsKey('notch')) {
+        $ui.Switches['notch'].SetChecked([bool]$config.notch.enabled)
+        $ui.NotchScreen.Text = Format-NotifierScreenName (Get-NotifierNotchScreen -Config $config); $ui.NotchScreen.FitWidth(); $ui.NotchScreen.Parent.PerformLayout()
+        $ui.NotchPosition.Text = Format-NotifierNotchPosition ([string]$config.notch.position); $ui.NotchPosition.FitWidth(); $ui.NotchPosition.Parent.PerformLayout()
         if ($ui.HotkeyRow) { $ui.HotkeyRow.Tag.Subtitle.Text = Format-NotifierHotKeySubtitle }
     }
     $ui.Autostart.SetChecked((Test-NotifierAutostart))

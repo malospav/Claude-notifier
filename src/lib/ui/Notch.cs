@@ -1,0 +1,1336 @@
+﻿// claude-notifier: элементы интерфейса в стиле Apple (WinForms + GDI+, C# 5 для csc из .NET Framework).
+// Сгруппированные списки, сегментный переключатель, тумблер, кнопки-капсулы, ячейки кода, точка статуса для трея.
+// Движение — по принципам Apple / Emil Kowalski: отклик на нажатие сразу, ease-out, прерываемые анимации
+// с текущего значения, частые действия (обновление списка, клавиатура) не анимируются, «меньше движения» в Windows уважается.
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+namespace ClaudeNotifier.Ui {
+    public sealed class NotchItem {
+        public string Id = "";
+        public string Title = "";
+        public string Meta = "";          // «Терминал» / «Приложение» / устройство
+        public string State = "";         // working | waiting | permission | error
+        public string StateText = "";
+        public string Preview = "";
+        public string RequestTitle = "";
+        public string[] Actions = new string[0];   // "id|текст|primary|secondary|destructive"
+        public int Tools;                // действий Claude в сеансе: прибавилось — у сфинкса «Ага!»
+        public int Agents;               // работающих агентов — огоньки вокруг головы
+        public string Device = "";       // id устройства ('' — этот ПК): свой маскот
+        public object Tag;
+    }
+
+    // Строка страницы: header | switch | choice | button | info | device | chart | note.
+    public sealed class NotchRow {
+        public string Kind = "info";
+        public string Key = "";
+        public string Title = "";
+        public string Subtitle = "";
+        public string Value = "";          // текст справа (кнопка, выбор, число)
+        public bool On;                    // switch
+        public string Dot = "";            // цвет точки слева (статус): online | working | ... ; '' — без точки
+        public string[] Actions = new string[0];   // device: "id|текст|style"
+        public double[] Values = new double[0];    // chart
+        public string[] Labels = new string[0];
+        public string[] ValueLabels = new string[0];
+        public int Highlight = -1;
+    }
+
+    public sealed class NotchEventArgs : EventArgs {
+        public string Kind;      // expand | collapse | page | plus | term | open | sound | close | action | set | row
+        public string Id;        // сеанс (или ключ строки)
+        public string Action;    // кнопка ответа, страница, действие строки
+        public Point Location;   // экранные координаты щелчка
+        public NotchEventArgs(string kind, string id, string action, Point location) { Kind = kind; Id = id; Action = action; Location = location; }
+    }
+
+    public sealed class NotchView : Control {
+        // Текст шторки рисуется со сдвигом и обрезкой Graphics (содержимое смещено внутри окна и обрезается
+        // растущей фигурой). Обычный TextRenderer то и другое игнорирует — текст «отставал» от фонов.
+        static class TextRenderer {
+            const TextFormatFlags P = TextFormatFlags.PreserveGraphicsTranslateTransform | TextFormatFlags.PreserveGraphicsClipping;
+            public static void DrawText(IDeviceContext g, string t, Font f, Rectangle r, Color c) { System.Windows.Forms.TextRenderer.DrawText(g, t, f, r, c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | P); }
+            public static void DrawText(IDeviceContext g, string t, Font f, Rectangle r, Color c, TextFormatFlags fl) { System.Windows.Forms.TextRenderer.DrawText(g, t, f, r, c, fl | P); }
+            public static void DrawText(IDeviceContext g, string t, Font f, Rectangle r, Color c, Color back, TextFormatFlags fl) { System.Windows.Forms.TextRenderer.DrawText(g, t, f, r, c, back, fl | P); }
+            public static void DrawText(IDeviceContext g, string t, Font f, Point pt, Color c) { System.Windows.Forms.TextRenderer.DrawText(g, t, f, pt, c, P); }
+            public static void DrawText(IDeviceContext g, string t, Font f, Point pt, Color c, TextFormatFlags fl) { System.Windows.Forms.TextRenderer.DrawText(g, t, f, pt, c, fl | P); }
+            public static Size MeasureText(string t, Font f) { return System.Windows.Forms.TextRenderer.MeasureText(t, f); }
+            public static Size MeasureText(string t, Font f, Size s) { return System.Windows.Forms.TextRenderer.MeasureText(t, f, s); }
+            public static Size MeasureText(string t, Font f, Size s, TextFormatFlags fl) { return System.Windows.Forms.TextRenderer.MeasureText(t, f, s, fl); }
+            public static Size MeasureText(IDeviceContext g, string t, Font f) { return System.Windows.Forms.TextRenderer.MeasureText(g, t, f); }
+            public static Size MeasureText(IDeviceContext g, string t, Font f, Size s) { return System.Windows.Forms.TextRenderer.MeasureText(g, t, f, s); }
+            public static Size MeasureText(IDeviceContext g, string t, Font f, Size s, TextFormatFlags fl) { return System.Windows.Forms.TextRenderer.MeasureText(g, t, f, s, fl); }
+        }
+
+        readonly List<NotchItem> items = new List<NotchItem>();
+        readonly Dictionary<string, NotchRow[]> pages = new Dictionary<string, NotchRow[]>();
+        readonly Dictionary<string, int> scrolls = new Dictionary<string, int>();
+        readonly List<KeyValuePair<Rectangle, string>> hits = new List<KeyValuePair<Rectangle, string>>();
+        readonly Timer anim = new Timer();
+        readonly DateTime born = DateTime.UtcNow;
+        int busyInterval = 100;
+        Theme theme = Theme.Create(true);
+        Font fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall;
+        string hover;
+        int contentHeight, viewHeight;
+        public bool Expanded;
+        public string Page = "home";           // home | chat | stats | devices | settings
+        public string SelectedId = "";
+        // Полоски вверху: сколько осталось от лимитов Claude (5 часов и неделя), %; < 0 — нет данных.
+        public float Left5 = -1, LeftWeek = -1;
+        public string Detail5 = "", DetailWeek = "";
+        public bool LimitsStale;               // данные старые (сервер давно не отвечал) — полоски серые
+        public bool SoundOff;
+        public event EventHandler<NotchEventArgs> Command;
+        public event EventHandler PageChanged;
+        public event EventHandler<NotchEventArgs> Local;   // раскрыть / свернуть — обрабатывает окно шторки сразу
+        readonly Dictionary<string, string> answers = new Dictionary<string, string>();   // id сеанса → полный последний ответ
+
+        public void SetAnswer(string id, string text) { answers[id ?? ""] = text ?? ""; Invalidate(); }
+        public string Answer(string id) { string a; return answers.TryGetValue(id ?? "", out a) ? a : null; }
+
+        public NotchView() {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.Black;
+            anim.Interval = 33;
+            warm.Tick += delegate { WarmTick(); };
+            anim.Tick += delegate {
+                Point c = Cursor.Position;
+                if (c != lastCursor) { lastCursor = c; lastMove = DateTime.UtcNow; }
+                // Частота кадров по тому, что сейчас видно: сфинкс следит за курсором — 40 кадров/с; кто-то работает —
+                // 30 (раскрыта) или 20 (свёрнута); все ждут — 10. Экран заблокирован, компьютер засыпает или вас нет
+                // за компьютером (2 мин без ввода, шторка свёрнута) — анимация стоит, таймер лишь раз в секунду
+                // проверяет, не вернулись ли вы.
+                bool away = Away;
+                int want = Paused || away ? 1000 : Expanded && (DateTime.UtcNow - lastMove).TotalSeconds < 3 ? 25 : busyInterval;
+                if (anim.Interval != want) anim.Interval = want;
+                if (Paused || away) { wasAway = true; return; }
+                if (wasAway) { wasAway = false; Invalidate(); return; }
+                // Двигаются только персонажи: перерисовываем их места, а не всю шторку (текст, кнопки, списки).
+                if (!painted) { Invalidate(); return; }
+                foreach (RectangleF fr in faceRects) {
+                    RectangleF big = RectangleF.Inflate(fr, fr.Width * 0.35f + 2, fr.Height * 0.25f + 2);
+                    Invalidate(Rectangle.Intersect(ClientRectangle, Rectangle.Round(big)));
+                }
+            };
+            ApplyTheme(Theme.Create(true));
+        }
+
+        public Theme Theme { get { return theme; } }
+
+        public void ApplyTheme(Theme t) {
+            theme = t;
+            fTitle = Fonts.Semibold(12f); fBody = Fonts.Text(10f); fSmall = Fonts.Text(9f); fBold = Fonts.Semibold(10f); fHeader = Fonts.Semibold(9f);
+            fIcon = IconButton.IconFont(11f); fIconSmall = IconButton.IconFont(9f);
+            Invalidate();
+        }
+
+        public int Count { get { return items.Count; } }
+        public NotchItem this[int i] { get { return items[i]; } }
+        public NotchRow[] Rows(string page) { NotchRow[] r; return pages.TryGetValue(page, out r) ? r : new NotchRow[0]; }
+
+        public NotchItem Selected {
+            get {
+                foreach (NotchItem it in items) if (it.Id == SelectedId) return it;
+                return items.Count > 0 ? items[0] : null;
+            }
+        }
+
+        public void SetItems(IEnumerable<NotchItem> list) {
+            items.Clear();
+            if (list != null) items.AddRange(list);
+            if (Selected != null && Selected.Id != SelectedId) SelectedId = Selected.Id;
+            TrackMoods();
+            UpdateTimer();
+            Invalidate();
+            ScheduleWarm();
+        }
+
+        // Прогрев: пока шторка свёрнута, кадры крупных сфинксов раскрытой шторки рендерятся заранее, понемногу
+        // в фоне, — первое раскрытие не спотыкается о 3D-рендер (~20 мс на кадр).
+        readonly Timer warm = new Timer();
+        int warmLeft;
+        void ScheduleWarm() {
+            if (Expanded || !Sphynx3D.Available) return;
+            warmLeft = 6;
+            if (!warm.Enabled) { warm.Interval = 400; warm.Start(); }
+        }
+        void WarmTick() {
+            if (Expanded || warmLeft <= 0 || !IsHandleCreated) { warm.Stop(); return; }
+            warmLeft--;
+            long r0 = SphynxSprites.Renders;
+            Size L = LayoutExpanded.Width > 0 ? LayoutExpanded : new Size(theme.S(760), theme.S(232));
+            bool ex = Expanded; Point o = origin; Size l0 = lay;
+            List<KeyValuePair<Rectangle, string>> h0 = new List<KeyValuePair<Rectangle, string>>(hits);
+            List<RectangleF> f0 = new List<RectangleF>(faceRects);
+            try {
+                using (Bitmap bmp = new Bitmap(L.Width, L.Height))
+                using (Graphics g = Graphics.FromImage(bmp)) {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    origin = Point.Empty; lay = L;
+                    SphynxSprites.BeginFrame(2);
+                    PaintExpanded(g);
+                }
+            } catch { }
+            finally {
+                origin = o; lay = l0; Expanded = ex;
+                hits.Clear(); hits.AddRange(h0); faceRects.Clear(); faceRects.AddRange(f0);
+            }
+            if (SphynxSprites.Renders == r0) warm.Stop();   // всё уже в кэше
+        }
+
+        // --- Настроение сфинксов: «Ага!» на каждое новое действие Claude, задумчивость после долгой паузы ---
+        sealed class MoodState { public int Tools = -1; public DateTime LastChange = DateTime.UtcNow; public readonly List<DateTime> Ahas = new List<DateTime>(); }
+        sealed class LookState { public float X, Y, W; public DateTime At = DateTime.UtcNow; }
+        readonly Dictionary<string, LookState> looks = new Dictionary<string, LookState>();
+        readonly Dictionary<string, MoodState> moods = new Dictionary<string, MoodState>();
+        Point lastCursor;
+        DateTime lastMove = DateTime.MinValue;
+        public static double DeepAfterSeconds = 25;   // столько секунд без действий — «задумался» (тесты уменьшают)
+
+        void TrackMoods() {
+            DateTime now = DateTime.UtcNow;
+            HashSet<string> alive = new HashSet<string>();
+            foreach (NotchItem it in items) {
+                alive.Add(it.Id);
+                MoodState m;
+                if (!moods.TryGetValue(it.Id, out m)) { m = new MoodState(); m.Tools = it.Tools; moods[it.Id] = m; continue; }
+                if (it.Tools > m.Tools && m.Tools >= 0) {
+                    // Новые действия — до трёх «озарений» подряд, с паузой 0,9 с.
+                    int n = Math.Min(3, it.Tools - m.Tools);
+                    DateTime at = now;
+                    if (m.Ahas.Count > 0 && m.Ahas[m.Ahas.Count - 1].AddMilliseconds(900) > at) at = m.Ahas[m.Ahas.Count - 1].AddMilliseconds(900);
+                    for (int i = 0; i < n; i++) { m.Ahas.Add(at); at = at.AddMilliseconds(900); }
+                    m.LastChange = now;
+                }
+                if (it.State != "working") m.LastChange = now;
+                m.Tools = it.Tools;
+            }
+            foreach (string k in new List<string>(moods.Keys)) if (!alive.Contains(k)) moods.Remove(k);
+        }
+
+        public void PulseAha(string id) { MoodState m; if (moods.TryGetValue(id, out m)) { m.Ahas.Add(DateTime.UtcNow); m.LastChange = DateTime.UtcNow; } }
+
+        public CatMood MoodFor(NotchItem it, RectangleF face, bool look) {
+            CatMood md = new CatMood();
+            md.Agents = it.Agents;
+            DateTime now = DateTime.UtcNow;
+            MoodState m;
+            if (moods.TryGetValue(it.Id, out m)) {
+                m.Ahas.RemoveAll(delegate (DateTime a) { return (now - a).TotalSeconds > 2; });
+                DateTime latest = DateTime.MinValue;
+                foreach (DateTime a in m.Ahas) if (a <= now && a > latest) latest = a;
+                if (latest != DateTime.MinValue && (now - latest).TotalSeconds < 0.8) md.AhaAge = (float)(now - latest).TotalSeconds;   // «Ага!» длится 0,8 с
+                md.Deep = it.State == "working" && md.AhaAge < 0 && (now - m.LastChange).TotalSeconds > DeepAfterSeconds;
+            }
+            // Курсор недавно двигался рядом — сфинкс смотрит на него (только крупные в раскрытой шторке).
+            // Без рывков: взгляд догоняет курсор с затуханием (~0,15 с), а «вес» взгляда плавно растёт и спадает.
+            if (look) {
+                bool has = false; float tx = 0, ty = 0;
+                if (Expanded && (now - lastMove).TotalSeconds < 2.0 && IsHandleCreated) {
+                    Point c = PointToScreen(new Point((int)(face.X + face.Width / 2) + origin.X, (int)(face.Y + face.Height / 2) + origin.Y));
+                    Point cur = Cursor.Position;
+                    float dx = cur.X - c.X, dy = cur.Y - c.Y;
+                    if (Math.Abs(dx) < theme.S(700) && Math.Abs(dy) < theme.S(500)) {
+                        has = true;
+                        tx = Math.Max(-1f, Math.Min(1f, dx / theme.S(240)));
+                        ty = Math.Max(-1f, Math.Min(1f, -dy / theme.S(200)));
+                    }
+                }
+                LookState ls;
+                if (!looks.TryGetValue(it.Id, out ls)) { ls = new LookState(); looks[it.Id] = ls; if (has) { ls.X = tx; ls.Y = ty; } }
+                float dt = (float)Math.Max(0, Math.Min(0.1, (now - ls.At).TotalSeconds));
+                ls.At = now;
+                float follow = 1f - (float)Math.Exp(-dt * 7.0), fade = 1f - (float)Math.Exp(-dt * 4.0);
+                if (has) { ls.X += (tx - ls.X) * follow; ls.Y += (ty - ls.Y) * follow; }
+                ls.W += ((has ? 1f : 0f) - ls.W) * fade;
+                if (ls.W > 0.01f) { md.HasLook = true; md.LookX = ls.X; md.LookY = ls.Y; md.LookW = ls.W; }
+            }
+            return md;
+        }
+
+        readonly List<RectangleF> faceRects = new List<RectangleF>();
+        bool painted, wasAway;
+        public static int AwaySeconds = 120;
+        // Вас нет за компьютером: давно не было ввода, а шторка свёрнута (раскрытую не замораживаем).
+        public bool Away { get { return !Expanded && AwaySeconds > 0 && Native.InputIdleSeconds() >= AwaySeconds; } }
+        // Пауза анимации (экран заблокирован, компьютер засыпает) — ставит NotchHost.
+        public static volatile bool Paused;
+        void PaintFace(Graphics g, RectangleF r, NotchItem it, bool look) {
+            RectangleF fr = r; fr.Offset(origin.X, origin.Y);
+            faceRects.Add(fr);
+            if (it == null) { Mascot.Paint(g, r, "none", T, 0, Animate, null); return; }
+            int seed = (it.Id.GetHashCode() & 0x7fff) % 97;
+            Mascot.Paint(g, r, it.State, T, seed, Animate, MoodFor(it, r, look), it.Device);
+        }
+
+        public void SetRows(string page, NotchRow[] rows) { pages[page] = rows ?? new NotchRow[0]; Invalidate(); }
+
+        public void SetPage(string page) {
+            if (Page == page) return;
+            Page = page;
+            EventHandler h = PageChanged; if (h != null) h(this, EventArgs.Empty);
+            Invalidate();
+        }
+
+        // Анимация персонажей: 30 кадров/с, пока кто-то работает или ждёт решения; иначе — только моргание.
+        void UpdateTimer() {
+            bool busy = false;
+            foreach (NotchItem it in items) if (it.State == "working" || it.State == "permission" || it.State == "stalled") busy = true;
+            bool need = Visible && Motion.Enabled && items.Count > 0;
+            busyInterval = busy ? (Expanded ? 33 : 50) : 100;   // свёрнутая — 20 кадров/с хватает
+            int interval = Expanded && (DateTime.UtcNow - lastMove).TotalSeconds < 3 ? 25 : busyInterval;
+            if (anim.Interval != interval) anim.Interval = interval;
+            if (need && !anim.Enabled) anim.Start();
+            if (!need && anim.Enabled) anim.Stop();
+        }
+
+        protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdateTimer(); }
+        protected override void Dispose(bool disposing) { if (disposing) { anim.Dispose(); warm.Dispose(); } base.Dispose(disposing); }
+
+        float T { get { return (float)(DateTime.UtcNow - born).TotalSeconds; } }
+        bool Animate { get { return Motion.Enabled; } }
+        bool SessionPage { get { return Page == "home"; } }
+
+        NotchItem Main() {
+            foreach (NotchItem it in items) if (it.State == "permission" || it.State == "error") return it;
+            return Selected;
+        }
+
+        void Hit(Rectangle r, string id) { r.Offset(origin); hits.Add(new KeyValuePair<Rectangle, string>(r, id)); }
+
+        // --- Раскрытие без рывков: окно на время анимации не меняет размер и форму (это дорого и дёргается),
+        // а внутри прозрачного окна плавно растёт нарисованная фигура шторки. Содержимое не перекладывается:
+        // раскрытая раскладка проявляется из чёрного, свёрнутая — гаснет (и наоборот при сворачивании).
+        public static readonly Color Key = Color.FromArgb(255, 1, 0, 1);   // прозрачный цвет окна (щелчки проходят насквозь)
+        public RectangleF Shape;          // фигура шторки в координатах окна; пусто — всё окно
+        public float Corner = -1;         // радиус нижних углов; < 0 — по размеру
+        public bool Morphing;             // идёт переход свёрнута ↔ раскрыта
+        public float Progress;            // 0 — свёрнута, 1 — раскрыта (по высоте фигуры)
+        public Size LayoutExpanded, LayoutCollapsed;
+        Point origin;                     // где начинается раскладка содержимого
+        Size lay;                         // размер раскладки содержимого
+
+        public RectangleF ShapeRect { get { return Shape.Width > 0 && Shape.Height > 0 ? Shape : new RectangleF(0, 0, ClientSize.Width, ClientSize.Height); } }
+
+        public static GraphicsPath ShapePath(RectangleF s, float r) {
+            GraphicsPath p = new GraphicsPath();
+            r = Math.Max(0.5f, Math.Min(r, Math.Min(s.Width, s.Height) / 2f));
+            p.AddLine(s.Left, s.Top, s.Right, s.Top);
+            p.AddLine(s.Right, s.Top, s.Right, s.Bottom - r);
+            p.AddArc(s.Right - 2 * r, s.Bottom - 2 * r, 2 * r, 2 * r, 0, 90);
+            p.AddLine(s.Right - r, s.Bottom, s.Left + r, s.Bottom);
+            p.AddArc(s.Left, s.Bottom - 2 * r, 2 * r, 2 * r, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        public double PaintMaxMs, PaintSumMs; public int PaintCount;   // замер отрисовки в переходе
+        protected override void OnPaint(PaintEventArgs e) {
+            System.Diagnostics.Stopwatch pw = System.Diagnostics.Stopwatch.StartNew();
+            try { PaintNotch(e); }
+            finally {
+                if (Morphing) { double ms = pw.Elapsed.TotalMilliseconds; PaintSumMs += ms; PaintCount++; if (ms > PaintMaxMs) PaintMaxMs = ms; }
+            }
+        }
+
+        // Шторка в layered-окне: рисуется не сама (WM_PAINT), а в буфер окна (PaintInto); вне фигуры — прозрачно.
+        public bool External;
+        public Color Outside = Key;
+        public void PaintInto(Graphics g, Rectangle clip) { PaintNotch(new PaintEventArgs(g, clip)); }
+        public float CornerRadius {
+            get { RectangleF s = ShapeRect; return Corner >= 0 ? Corner : (Expanded ? Math.Min(s.Height * 0.12f + 6, 28) : s.Height * 0.45f); }
+        }
+        protected override void WndProc(ref Message m) {
+            // В layered-окне дочерние окна на экран не выводятся: свой WM_PAINT только подтверждаем (без работы).
+            if (External && m.Msg == 0x000F) { Native.ValidateAll(Handle); return; }
+            base.WndProc(ref m);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e) { if (!External) base.OnPaintBackground(e); }
+
+        void PaintNotch(PaintEventArgs e) {
+            Graphics g = e.Graphics;
+            RectangleF s = ShapeRect;
+            float r = CornerRadius;
+            hits.Clear();
+            faceRects.Clear();
+            SphynxSprites.RatePerSec = Expanded ? 12 : 3;
+            SphynxSprites.BeginFrame();
+            if (Morphing) SphynxSprites.BeginFrame(0);   // во время перехода — только готовые кадры, без 20-мс рендеров
+            // Что рисуем: в переходе до 40 % высоты — свёрнутую раскладку, дальше — раскрытую.
+            bool showExpanded = Morphing ? Progress > 0.4f : Expanded;
+            // Пока фигура в движении — раскладка итогового размера (содержимое не «плывёт»), в покое — по окну.
+            Size want = showExpanded ? LayoutExpanded : LayoutCollapsed;
+            if (Shape.Width > 0 && want.Width > 0) lay = want;
+            else lay = new Size((int)Math.Round(s.Width), (int)Math.Round(s.Height));
+            origin = new Point((int)Math.Round(s.X + (s.Width - lay.Width) / 2f), (int)Math.Round(s.Y));
+            using (GraphicsPath path = ShapePath(s, r)) {
+                // Углы шторки — рисованные (у окна нет Region); вне фигуры — прозрачное.
+                g.Clear(Outside);
+                g.SmoothingMode = SmoothingMode.None;   // край без сглаживания — иначе цветная кайма у прозрачного цвета
+                using (SolidBrush b = new SolidBrush(Color.Black)) g.FillPath(b, path);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                GraphicsState st = g.Save();
+                g.SetClip(path, CombineMode.Intersect);
+                g.TranslateTransform(origin.X, origin.Y);
+                if (showExpanded) PaintExpanded(g); else PaintCollapsed(g);
+                g.Restore(st);
+                // Проявление: поверх содержимого — чёрный с прозрачностью (дёшево, без отрисовки в отдельный кадр).
+                if (Morphing) {
+                    float veil = showExpanded ? 1f - Math.Min(1f, (Progress - 0.4f) / 0.45f) : Math.Min(1f, Progress / 0.4f);
+                    int a = (int)Math.Round(255 * Math.Max(0f, Math.Min(1f, veil)));
+                    if (a > 0) {
+                        g.SmoothingMode = SmoothingMode.None;
+                        using (SolidBrush b = new SolidBrush(Color.FromArgb(a, 0, 0, 0))) g.FillPath(b, path);
+                    }
+                }
+            }
+            painted = true;
+        }
+
+        void PaintCollapsed(Graphics g) {
+            Hit(new Rectangle(0, 0, lay.Width, lay.Height), "expand");
+            int h = lay.Height, pad = theme.S(16);
+            NotchItem main = Main();
+            float fh = Math.Min(h * 0.8f, theme.S(30)), fw = fh * 1.3f;
+            PaintFace(g, new RectangleF(pad, (h - fh) / 2, fw, fh), main, false);
+            float sh = Math.Min(h * 0.6f, theme.S(23)), sw = sh * 1.3f, gap = theme.S(2);
+            float x = lay.Width - pad;
+            int shown = 0, rest = 0;
+            for (int i = items.Count - 1; i >= 0; i--) {
+                NotchItem it = items[i];
+                if (main != null && it.Id == main.Id) continue;
+                if (shown >= 5) { rest++; continue; }
+                x -= sw;
+                PaintFace(g, new RectangleF(x, (h - sh) / 2, sw, sh), it, false);
+                x -= gap; shown++;
+            }
+            if (rest > 0) {
+                string more = "+" + rest;
+                int mw = TextRenderer.MeasureText(more, fSmall).Width;
+                TextRenderer.DrawText(g, more, fSmall, new Rectangle((int)x - mw, 0, mw, h), theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+        }
+
+        // Полоска лимита: «5 часов · сброс в 14:05» слева, «осталось 62 %» справа, под ними — полоса остатка.
+        void PaintLimit(Graphics g, Rectangle r, string name, float left, string detail) {
+            bool hot = hover == "page:stats-limits";
+            bool none = left < 0;
+            float v = none ? 0 : Math.Max(0, Math.Min(100, left));
+            Color c = none || LimitsStale ? Theme.Hex(0x636366) : v <= 10 ? Theme.Hex(0xFF453A) : v <= 25 ? Theme.Hex(0xFFB340) : Theme.Hex(0x30D158);
+            int lineH = theme.S(16), barH = theme.S(6);
+            int ty = r.Y + theme.S(4), by = ty + lineH + theme.S(4);
+            string pct = none ? "нет данных" : "осталось " + ((int)Math.Round(v)) + " %";
+            int pw = TextRenderer.MeasureText(pct, fBold).Width;
+            TextRenderer.DrawText(g, pct, fBold, new Rectangle(r.Right - pw, ty, pw, lineH), none ? theme.Muted : (hot ? Color.White : Theme.Hex(0xE5E5EA)),
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            string label = string.IsNullOrEmpty(detail) ? name : name + " · " + detail;
+            TextRenderer.DrawText(g, label, fSmall, new Rectangle(r.X, ty, Math.Max(0, r.Width - pw - theme.S(6)), lineH), hot ? Theme.Hex(0xC7C7CC) : theme.Muted,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            RectangleF bar = new RectangleF(r.X, by, r.Width, barH);
+            Draw.Fill(g, bar, barH / 2f, Theme.Hex(0x2C2C2E));
+            if (v > 0) Draw.Fill(g, new RectangleF(bar.X, bar.Y, Math.Max(barH, bar.Width * v / 100f), barH), barH / 2f, c);
+            Hit(r, "page:stats-limits");
+        }
+
+        void IconButtonAt(Graphics g, Rectangle r, string glyph, string id, bool active, string tip) {
+            bool hot = hover == id;
+            if (active || hot) Draw.Fill(g, r, r.Height / 2f, active ? Theme.Hex(0x2C2C2E) : Theme.Hex(0x1C1C1E));
+            TextRenderer.DrawText(g, glyph, fIcon, r, active ? Color.White : Theme.Hex(0xB0B0B5),
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            Hit(r, id);
+        }
+
+        void PaintExpanded(Graphics g) {
+            int W = lay.Width, H = lay.Height, pad = theme.S(14), bs = theme.S(34), gap = theme.S(4);
+            int y0 = theme.S(10), x = pad;
+            // Страницы — слева; справа — звук и «закрыть»; между ними — полоски оставшихся лимитов.
+            string[,] tabs = { { "home", "\uE80F" }, { "stats", "\uE9D2" }, { "devices", "\uE772" }, { "settings", "\uE713" } };
+            for (int i = 0; i < tabs.GetLength(0); i++) { IconButtonAt(g, new Rectangle(x, y0, bs, bs), tabs[i, 1], "page:" + tabs[i, 0], Page == tabs[i, 0] || (Page == "answer" && tabs[i, 0] == "home"), null); x += bs + gap; }
+            int rx = W - pad;
+            rx -= bs; IconButtonAt(g, new Rectangle(rx, y0, bs, bs), "\uE711", "close", false, null);
+            rx -= bs + gap; IconButtonAt(g, new Rectangle(rx, y0, bs, bs), SoundOff ? "\uE74F" : "\uE767", "sound", false, null);
+            // Две полоски остатка лимитов; щелчок — статистика.
+            int lx = x + theme.S(14), lr = rx - theme.S(16), lgap = theme.S(18);
+            if (lr - lx > theme.S(160)) {
+                int bw = (lr - lx - lgap) / 2;
+                PaintLimit(g, new Rectangle(lx, y0, bw, bs), "5 часов", Left5, Detail5);
+                PaintLimit(g, new Rectangle(lx + bw + lgap, y0, bw, bs), "Неделя", LeftWeek, DetailWeek);
+            }
+            int top = y0 + bs + theme.S(12);
+            if (SessionPage) {
+                int ch = H - top - pad;
+                int lw = (int)((W - pad * 3) * 0.54f);
+                Rectangle left = new Rectangle(pad, top, lw, ch), right = new Rectangle(pad * 2 + lw, top, W - pad * 3 - lw, ch);
+                Draw.Fill(g, left, theme.S(18), Theme.Hex(0x161618));
+                Draw.Fill(g, right, theme.S(18), Theme.Hex(0x161618));
+                PaintMain(g, left);
+                PaintOthers(g, right);
+            } else if (Page == "answer") {
+                PaintAnswer(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
+            } else if (Page == "settings") {
+                PaintSettings(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
+            } else {
+                PaintRows(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
+            }
+        }
+
+        // --- «Настройки»: слева — разделы (заголовки строк), справа — строки выбранного раздела в две колонки ---
+        public int SettingsSection;
+        sealed class Section { public string Title; public readonly List<NotchRow> Rows = new List<NotchRow>(); }
+
+        List<Section> Sections() {
+            List<Section> list = new List<Section>();
+            Section cur = null;
+            foreach (NotchRow row in Rows("settings")) {
+                if (row.Kind == "header") { cur = new Section { Title = row.Title }; list.Add(cur); continue; }
+                if (cur == null) { cur = new Section { Title = "Общие" }; list.Add(cur); }
+                cur.Rows.Add(row);
+            }
+            return list;
+        }
+
+        static string SectionIcon(string title) {
+            switch (title) {
+                case "Уведомления": return "\uEA8F";
+                case "Ответы": return "\uE8BD";
+                case "Сеансы": return "\uE9D9";
+                case "Шторка": return "\uE7F4";
+                case "Маскоты": return "\uE76E";
+                case "Система": return "\uE713";
+                default: return "\uE712";
+            }
+        }
+
+        int SidebarWidth { get { return theme.S(176); } }
+        static bool FullWidth(NotchRow r) { return r.Kind == "note" || r.Kind == "device" || r.Kind == "chart"; }
+
+        // Высота раздела в две колонки (полноширинные строки — на всю ширину).
+        int GridHeight(List<NotchRow> rows, int width) {
+            int colW = (width - theme.S(8)) / 2, h = 0, i = 0;
+            while (i < rows.Count) {
+                if (FullWidth(rows[i])) { h += RowHeight(rows[i], width) + theme.S(8); i++; continue; }
+                int rh = RowHeight(rows[i], colW);
+                if (i + 1 < rows.Count && !FullWidth(rows[i + 1])) { rh = Math.Max(rh, RowHeight(rows[i + 1], colW)); i += 2; } else i++;
+                h += rh + theme.S(8);
+            }
+            return Math.Max(0, h - theme.S(8));
+        }
+
+        // Высота страницы настроек — по самому большому разделу (и по боковому меню): при переключении разделов
+        // шторка не прыгает.
+        int SettingsHeight(int width) {
+            List<Section> secs = Sections();
+            int gw = width - SidebarWidth - theme.S(14), h = secs.Count * theme.S(40);
+            foreach (Section s in secs) h = Math.Max(h, theme.S(30) + GridHeight(s.Rows, gw));
+            return h;
+        }
+
+        void PaintSettings(Graphics g, Rectangle area) {
+            List<Section> secs = Sections();
+            if (secs.Count == 0) { TextRenderer.DrawText(g, "Загружаю…", fBody, area, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix); return; }
+            if (SettingsSection >= secs.Count || SettingsSection < 0) SettingsSection = 0;
+            // Боковое меню.
+            Rectangle side = new Rectangle(area.X, area.Y, SidebarWidth, area.Height);
+            Draw.Fill(g, side, theme.S(16), Theme.Hex(0x111113));
+            int iy = side.Y + theme.S(6), ih = theme.S(36);
+            for (int i = 0; i < secs.Count; i++) {
+                Rectangle it = new Rectangle(side.X + theme.S(6), iy, side.Width - theme.S(12), ih);
+                string id = "section:" + i;
+                bool sel = i == SettingsSection, hot = hover == id;
+                if (sel || hot) Draw.Fill(g, it, theme.S(10), sel ? Theme.Hex(0x2C2C2E) : Theme.Hex(0x1C1C1E));
+                TextRenderer.DrawText(g, SectionIcon(secs[i].Title), fIconSmall, new Rectangle(it.X + theme.S(8), it.Y, theme.S(22), ih), sel ? Theme.Hex(0x0A84FF) : Theme.Hex(0x98989D),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(g, secs[i].Title, sel ? fBold : fBody, new Rectangle(it.X + theme.S(36), it.Y, it.Width - theme.S(40), ih), sel ? Color.White : Theme.Hex(0xC7C7CC),
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                Hit(it, id);
+                iy += ih + theme.S(4);
+            }
+            // Раздел: заголовок и строки в две колонки.
+            Section s = secs[SettingsSection];
+            Rectangle body = new Rectangle(side.Right + theme.S(14), area.Y, area.Right - side.Right - theme.S(14), area.Height);
+            TextRenderer.DrawText(g, s.Title, fTitle, new Rectangle(body.X + theme.S(4), body.Y, body.Width, theme.S(24)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter);
+            Rectangle grid = new Rectangle(body.X, body.Y + theme.S(30), body.Width, body.Height - theme.S(30));
+            viewHeight = grid.Height;
+            contentHeight = GridHeight(s.Rows, grid.Width);
+            int scroll = Scroll;
+            Region old = g.Clip;
+            g.SetClip(grid, CombineMode.Intersect);
+            int colW = (grid.Width - theme.S(8)) / 2, y = grid.Y - scroll, idx = 0;
+            while (idx < s.Rows.Count) {
+                NotchRow a = s.Rows[idx];
+                if (FullWidth(a)) {
+                    int fh = RowHeight(a, grid.Width);
+                    PaintRow(g, a, new Rectangle(grid.X, y, grid.Width, fh), grid);
+                    y += fh + theme.S(8); idx++; continue;
+                }
+                NotchRow b = idx + 1 < s.Rows.Count && !FullWidth(s.Rows[idx + 1]) ? s.Rows[idx + 1] : null;
+                int rh = RowHeight(a, colW);
+                if (b != null) rh = Math.Max(rh, RowHeight(b, colW));
+                PaintRow(g, a, new Rectangle(grid.X, y, colW, rh), grid);
+                if (b != null) PaintRow(g, b, new Rectangle(grid.X + colW + theme.S(8), y, colW, rh), grid);
+                y += rh + theme.S(8); idx += b != null ? 2 : 1;
+            }
+            g.Clip = old;
+            if (contentHeight > grid.Height) {
+                int th = Math.Max(theme.S(24), grid.Height * grid.Height / contentHeight);
+                int ty = grid.Y + (int)((grid.Height - th) * (scroll / (float)Math.Max(1, contentHeight - grid.Height)));
+                Draw.Fill(g, new RectangleF(grid.Right + theme.S(4), ty, theme.S(3), th), theme.S(1.5f), Color.FromArgb(120, 142, 142, 147));
+            }
+        }
+
+        // --- Полный ответ: щелчок по карточке сеанса на главной ---
+
+        int AnswerTextWidth(int width) { return width - theme.S(32); }
+
+        string AnswerText(NotchItem it) {
+            string full = Answer(it.Id);
+            string text = !string.IsNullOrEmpty(full) ? full : it.Preview;
+            if (!string.IsNullOrEmpty(it.RequestTitle)) text = it.RequestTitle + (string.IsNullOrEmpty(text) ? "" : "\n\n" + text);
+            return string.IsNullOrEmpty(text) ? "Ответа пока нет." : text;
+        }
+
+        // Высота содержимого страницы ответа: заголовок, текст целиком, кнопки.
+        public int AnswerContentHeight(int width) {
+            NotchItem it = Selected;
+            if (it == null) return theme.S(120);
+            int text = TextRenderer.MeasureText(AnswerText(it), fBody, new Size(AnswerTextWidth(width), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl).Height;
+            return theme.S(56) + text + theme.S(16) + theme.S(52);
+        }
+
+        void PaintAnswer(Graphics g, Rectangle area) {
+            NotchItem it = Selected;
+            Draw.Fill(g, area, theme.S(18), Theme.Hex(0x161618));
+            if (it == null) { TextRenderer.DrawText(g, "Сеансов нет", fBody, area, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter); return; }
+            int pad = theme.S(16);
+            // Заголовок: «назад», персонаж, название, статус.
+            Rectangle back = new Rectangle(area.X + theme.S(10), area.Y + theme.S(10), theme.S(30), theme.S(30));
+            Draw.Fill(g, back, back.Height / 2f, hover == "page:home" ? Theme.Hex(0x3A3A3C) : Theme.Hex(0x2C2C2E));
+            TextRenderer.DrawText(g, "\uE72B", fIconSmall, back, Theme.Hex(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            Hit(back, "page:home");
+            float fh = theme.S(26), fw = fh * 1.3f;
+            PaintFace(g, new RectangleF(back.Right + theme.S(10), area.Y + theme.S(12), fw, fh), it, true);
+            int tx = back.Right + theme.S(10) + (int)fw + theme.S(10);
+            TextRenderer.DrawText(g, it.Title, fTitle, new Rectangle(tx, area.Y + theme.S(8), area.Right - tx - pad, theme.S(20)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, it.StateText, fSmall, new Rectangle(tx, area.Y + theme.S(28), area.Right - tx - pad, theme.S(18)), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            Rectangle arrow = new Rectangle(area.Right - theme.S(40), area.Y + theme.S(12), theme.S(26), theme.S(26));
+            Draw.Fill(g, arrow, arrow.Height / 2f, hover == "open" ? Theme.Hex(0x3A3A3C) : Theme.Hex(0x2C2C2E));
+            TextRenderer.DrawText(g, "\uE8A7", fIconSmall, arrow, Theme.Hex(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            Hit(arrow, "open");
+            // Кнопки ответа — внизу, всегда видны.
+            int barH = theme.S(52);
+            Rectangle bar = new Rectangle(area.X, area.Bottom - barH, area.Width, barH);
+            int bx = area.X + pad, by = bar.Y + theme.S(10), bhh = theme.S(30);
+            if (it.Actions.Length == 0) {
+                TextRenderer.DrawText(g, it.State == "working" ? "Claude работает — ответить можно, когда он закончит." : "Сейчас Claude не ждёт ответа.", fSmall,
+                    new Rectangle(bx, bar.Y, area.Width - pad * 2, barH), theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            }
+            foreach (string a in it.Actions) {
+                string[] p = a.Split('|');
+                string id = p[0], text = p.Length > 1 ? p[1] : p[0], style = p.Length > 2 ? p[2] : "secondary";
+                int bw = TextRenderer.MeasureText(text, fBold).Width + theme.S(24);
+                if (bx + bw > area.Right - pad) break;
+                Rectangle br = new Rectangle(bx, by, bw, bhh);
+                PaintPill(g, br, text, style, hover == "act:" + id);
+                Hit(br, "act:" + id);
+                bx += bw + theme.S(8);
+            }
+            // Текст ответа целиком — с прокруткой колесом.
+            Rectangle textArea = new Rectangle(area.X + pad, area.Y + theme.S(56), AnswerTextWidth(area.Width), bar.Y - area.Y - theme.S(60));
+            string body = AnswerText(it);
+            int th = TextRenderer.MeasureText(body, fBody, new Size(textArea.Width, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl).Height;
+            viewHeight = textArea.Height; contentHeight = th;
+            int scroll = Scroll;
+            Region old = g.Clip;
+            g.SetClip(textArea, CombineMode.Intersect);   // сужаем, а не заменяем: при сворачивании текст режется формой шторки
+            TextRenderer.DrawText(g, body, fBody, new Rectangle(textArea.X, textArea.Y - scroll, textArea.Width, th + theme.S(4)), Theme.Hex(0xE5E5EA), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
+            g.Clip = old;
+            if (th > textArea.Height) {
+                int sh = Math.Max(theme.S(24), textArea.Height * textArea.Height / th);
+                int sy = textArea.Y + (int)((textArea.Height - sh) * (scroll / (float)Math.Max(1, th - textArea.Height)));
+                Draw.Fill(g, new RectangleF(area.Right - theme.S(8), sy, theme.S(3), sh), theme.S(1.5f), Color.FromArgb(120, 142, 142, 147));
+            }
+        }
+
+        void PaintMain(Graphics g, Rectangle r) {
+            NotchItem it = Selected;
+            if (it != null) {
+                if (hover == "answer") Draw.Fill(g, r, theme.S(18), Theme.Hex(0x1C1C1F));
+                Hit(r, "answer");   // щелчок по карточке — полный ответ и варианты ответа
+            }
+            if (it == null) {
+                PaintFace(g, new RectangleF(r.X + theme.S(18), r.Y + (r.Height - theme.S(64)) / 2f, theme.S(84), theme.S(64)), null, false);
+                TextRenderer.DrawText(g, "Сеансов нет", fTitle, new Rectangle(r.X + theme.S(120), r.Y, r.Width - theme.S(130), r.Height / 2), Color.White, TextFormatFlags.Bottom | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(g, "Начните работу в Claude Code — сеанс появится здесь.", fSmall, new Rectangle(r.X + theme.S(120), r.Y + r.Height / 2 + theme.S(4), r.Width - theme.S(130), r.Height / 2), theme.Muted, TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+                return;
+            }
+            int fw = theme.S(96), fh = theme.S(74);
+            if (it.Actions.Length > 0 && r.Height < theme.S(150)) { fw = theme.S(66); fh = theme.S(50); }
+            PaintFace(g, new RectangleF(r.X + theme.S(16), r.Y + theme.S(16), fw, fh), it, true);
+            int tx = r.X + theme.S(16) + fw + theme.S(16), tw = r.Right - tx - theme.S(44);
+            int y = r.Y + theme.S(14);
+            int titleW = Math.Min(tw, TextRenderer.MeasureText(it.Title, fTitle).Width);
+            TextRenderer.DrawText(g, it.Title, fTitle, new Rectangle(tx, y, titleW + 2, theme.S(22)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+            if (!string.IsNullOrEmpty(it.Meta) && titleW + theme.S(8) + TextRenderer.MeasureText(it.Meta, fBody).Width <= tw)
+                TextRenderer.DrawText(g, it.Meta, fBody, new Rectangle(tx + titleW + theme.S(8), y + theme.S(2), tw - titleW - theme.S(8), theme.S(22)), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            y += theme.S(24);
+            float d = theme.S(7);
+            using (SolidBrush b = new SolidBrush(TrayDot.ColorFor(it.State))) g.FillEllipse(b, tx, y + theme.S(10) - d / 2, d, d);
+            TextRenderer.DrawText(g, it.StateText, fBody, new Rectangle(tx + theme.S(13), y, tw - theme.S(13), theme.S(20)), Theme.Hex(0xAEAEB2), TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+            y += theme.S(24);
+            string body = !string.IsNullOrEmpty(it.RequestTitle) ? it.RequestTitle : it.Preview;
+            int lines = 2;
+            int bottomReserve = it.Actions.Length > 0 ? theme.S(40) : theme.S(28);
+            int bh = Math.Max(0, Math.Min(r.Bottom - bottomReserve - y, TextRenderer.MeasureText("Ag", fSmall).Height * lines));
+            if (!string.IsNullOrEmpty(body) && bh > 0)
+                TextRenderer.DrawText(g, body, fSmall, new Rectangle(tx, y, tw + theme.S(30), bh), Theme.Hex(0x98989D), TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.TextBoxControl);
+            if (it.Actions.Length > 0) {
+                int bx = r.X + theme.S(16), by = r.Bottom - theme.S(38), bhh = theme.S(28);
+                foreach (string a in it.Actions) {
+                    string[] p = a.Split('|');
+                    string id = p[0], text = p.Length > 1 ? p[1] : p[0], style = p.Length > 2 ? p[2] : "secondary";
+                    int bw = TextRenderer.MeasureText(text, fBold).Width + theme.S(22);
+                    if (bx + bw > r.Right - theme.S(12)) break;
+                    Rectangle br = new Rectangle(bx, by, bw, bhh);
+                    PaintPill(g, br, text, style, hover == "act:" + id);
+                    Hit(br, "act:" + id);
+                    bx += bw + theme.S(6);
+                }
+            } else {
+                string open = "Полный ответ  \u203A";
+                Rectangle or = new Rectangle(tx, r.Bottom - theme.S(32), TextRenderer.MeasureText(open, fBold).Width, theme.S(22));
+                TextRenderer.DrawText(g, open, fBold, or, hover == "answer" ? Color.White : Theme.Hex(0xD1D1D6), TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            }
+            Rectangle arrow = new Rectangle(r.Right - theme.S(36), r.Y + theme.S(10), theme.S(26), theme.S(26));
+            Draw.Fill(g, arrow, arrow.Height / 2f, hover == "open" ? Theme.Hex(0x3A3A3C) : Theme.Hex(0x2C2C2E));
+            TextRenderer.DrawText(g, "", fIconSmall, arrow, Theme.Hex(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            Hit(arrow, "open");
+        }
+
+        void PaintPill(Graphics g, Rectangle br, string text, string style, bool hot) {
+            Color fill = style == "primary" ? (hot ? theme.AccentHover : theme.Accent) : (hot ? Theme.Hex(0x3A3A3C) : Theme.Hex(0x2C2C2E));
+            Color tc = style == "destructive" ? Theme.Hex(0xFF6961) : Color.White;
+            Draw.Fill(g, br, br.Height / 2f, fill);
+            TextRenderer.DrawText(g, text, fBold, br, tc, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        }
+
+        void PaintOthers(Graphics g, Rectangle r) {
+            NotchItem sel = Selected;
+            int pad = theme.S(12), chH = theme.S(40), gap = theme.S(8);
+            int x = r.X + pad, y = r.Y + pad, colW = Math.Max(theme.S(120), (r.Width - pad * 2 - gap) / 2);
+            int shown = 0, total = 0;
+            foreach (NotchItem it in items) {
+                if (sel != null && it.Id == sel.Id) continue;
+                total++;
+                if (y + chH > r.Bottom - pad + 1) continue;
+                Rectangle chip = new Rectangle(x, y, colW, chH);
+                bool hot = hover == "item:" + it.Id || hover == "remove:" + it.Id;
+                Draw.Fill(g, chip, chH / 2f, hot ? Theme.Hex(0x2C2C2E) : Theme.Hex(0x1F1F21));
+                float fh = chH * 0.62f, fw = fh * 1.3f;
+                PaintFace(g, new RectangleF(chip.X + theme.S(8), chip.Y + (chH - fh) / 2, fw, fh), it, false);
+                // Крестик справа — убрать сеанс из списка (вернётся, если в нём что-то произойдёт).
+                int xs = theme.S(22);
+                Rectangle xr = new Rectangle(chip.Right - theme.S(8) - xs, chip.Y + (chH - xs) / 2, xs, xs);
+                bool xhot = hover == "remove:" + it.Id;
+                if (xhot) Draw.Fill(g, xr, xs / 2f, Theme.Hex(0x3A3A3C));
+                TextRenderer.DrawText(g, "\uE711", fIconSmall, xr, xhot ? Color.White : (hot ? Theme.Hex(0x98989D) : Theme.Hex(0x5A5A5E)),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                int tx = chip.X + theme.S(8) + (int)fw + theme.S(8);
+                TextRenderer.DrawText(g, it.Title, fBold, new Rectangle(tx, chip.Y, xr.X - tx - theme.S(4), chH), Theme.Hex(0xC7C7CC),
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                Hit(chip, "item:" + it.Id);
+                Hit(xr, "remove:" + it.Id);   // добавлен позже — важнее плашки
+                shown++;
+                if (x == r.X + pad) x += colW + gap; else { x = r.X + pad; y += chH + gap; }
+            }
+            if (total == 0) TextRenderer.DrawText(g, "Других сеансов нет", fBody, r, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            else if (shown < total) TextRenderer.DrawText(g, "ещё " + (total - shown), fSmall, new Rectangle(r.X, r.Bottom - theme.S(22), r.Width - pad, theme.S(18)), theme.Muted, TextFormatFlags.Right | TextFormatFlags.NoPrefix);
+        }
+
+        // --- Страницы-списки: «Статистика», «Устройства», «Настройки» ---
+
+        int RowHeight(NotchRow row, int width) {
+            switch (row.Kind) {
+                case "header": return theme.S(30);
+                case "chart": return theme.S(156);
+                case "note": return Math.Min(theme.S(60), TextRenderer.MeasureText(row.Title, fSmall, new Size(width - theme.S(8), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height + theme.S(10));
+                default: return string.IsNullOrEmpty(row.Subtitle) ? theme.S(44) : theme.S(56);
+            }
+        }
+
+        public int ContentHeight(string page, int width) {
+            if (page == "settings") return SettingsHeight(width);
+            int h = 0;
+            foreach (NotchRow row in Rows(page)) h += RowHeight(row, width) + (row.Kind == "header" ? 0 : theme.S(6));
+            return h;
+        }
+
+        void PaintRows(Graphics g, Rectangle area) {
+            NotchRow[] rows = Rows(Page);
+            viewHeight = area.Height;
+            contentHeight = ContentHeight(Page, area.Width);
+            int scroll = Scroll;
+            Region old = g.Clip;
+            g.SetClip(area, CombineMode.Intersect);   // сужаем, а не заменяем: при сворачивании строки режутся формой шторки
+            int y = area.Y - scroll;
+            if (rows.Length == 0) TextRenderer.DrawText(g, "Загружаю…", fBody, area, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            foreach (NotchRow row in rows) {
+                int h = RowHeight(row, area.Width);
+                Rectangle r = new Rectangle(area.X, y, area.Width, h);
+                if (r.Bottom >= area.Y && r.Top <= area.Bottom) PaintRow(g, row, r, area);
+                y += h + (row.Kind == "header" ? 0 : theme.S(6));
+            }
+            g.Clip = old;
+            // Полоса прокрутки.
+            if (contentHeight > area.Height) {
+                int th = Math.Max(theme.S(24), area.Height * area.Height / contentHeight);
+                int ty = area.Y + (int)((area.Height - th) * (scroll / (float)Math.Max(1, contentHeight - area.Height)));
+                Draw.Fill(g, new RectangleF(area.Right + theme.S(4), ty, theme.S(3), th), theme.S(1.5f), Color.FromArgb(120, 142, 142, 147));
+            }
+        }
+
+        int Scroll {
+            get { int s; scrolls.TryGetValue(Page, out s); return Math.Max(0, Math.Min(s, Math.Max(0, contentHeight - viewHeight))); }
+            set { scrolls[Page] = value; }
+        }
+
+        void PaintRow(Graphics g, NotchRow row, Rectangle r, Rectangle area) {
+            if (row.Kind == "header") {
+                TextRenderer.DrawText(g, row.Title.ToUpperInvariant(), fHeader, new Rectangle(r.X + theme.S(6), r.Y + theme.S(8), r.Width, r.Height - theme.S(8)), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                return;
+            }
+            if (row.Kind == "note") {
+                TextRenderer.DrawText(g, row.Title, fSmall, new Rectangle(r.X + theme.S(6), r.Y, r.Width - theme.S(8), r.Height), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+                return;
+            }
+            string hitId = row.Kind == "switch" || row.Kind == "choice" ? "set:" + row.Key : (row.Kind == "button" ? "row:" + row.Key : null);
+            bool hot = hitId != null && hover == hitId;
+            Draw.Fill(g, r, theme.S(14), hot ? Theme.Hex(0x1F1F22) : Theme.Hex(0x161618));
+            if (row.Kind == "chart") { PaintChart(g, row, r); return; }
+            int pad = theme.S(14), rightW = 0;
+            // Правая часть: тумблер, выбор, кнопка, значение или действия устройства.
+            if (row.Kind == "switch") {
+                int sw = theme.S(42), sh = theme.S(24);
+                Rectangle t = new Rectangle(r.Right - pad - sw, r.Y + (r.Height - sh) / 2, sw, sh);
+                Draw.Fill(g, t, sh / 2f, row.On ? Theme.Hex(0x30D158) : Theme.Hex(0x39393D));
+                float kd = sh - theme.S(4);
+                float kx = row.On ? t.Right - theme.S(2) - kd : t.X + theme.S(2);
+                Draw.Fill(g, new RectangleF(kx, t.Y + theme.S(2), kd, kd), kd / 2, Color.White);
+                rightW = sw + theme.S(10);
+            } else if (row.Kind == "choice" || row.Kind == "button") {
+                string text = row.Value + (row.Kind == "choice" ? "  ›" : "");
+                int bw = Math.Min(r.Width / 2, TextRenderer.MeasureText(text, fBold).Width + theme.S(24));
+                Rectangle b = new Rectangle(r.Right - pad - bw, r.Y + (r.Height - theme.S(28)) / 2, bw, theme.S(28));
+                PaintPill(g, b, text, "secondary", hot);
+                rightW = bw + theme.S(10);
+            } else if (row.Kind == "device") {
+                int bx = r.Right - pad;
+                for (int i = row.Actions.Length - 1; i >= 0; i--) {
+                    string[] p = row.Actions[i].Split('|');
+                    string text = p.Length > 1 ? p[1] : p[0], style = p.Length > 2 ? p[2] : "secondary";
+                    int bw = TextRenderer.MeasureText(text, fBold).Width + theme.S(20);
+                    bx -= bw;
+                    Rectangle b = new Rectangle(bx, r.Y + (r.Height - theme.S(26)) / 2, bw, theme.S(26));
+                    string id = "row:" + row.Key + ":" + p[0];
+                    PaintPill(g, b, text, style, hover == id);
+                    Hit(Rectangle.Intersect(b, area), id);
+                    bx -= theme.S(6);
+                }
+                rightW = r.Right - pad - bx;
+            } else if (!string.IsNullOrEmpty(row.Value)) {
+                int vw = Math.Min(r.Width / 2, TextRenderer.MeasureText(row.Value, fBody).Width + theme.S(4));
+                TextRenderer.DrawText(g, row.Value, fBody, new Rectangle(r.Right - pad - vw, r.Y, vw, r.Height), Theme.Hex(0xAEAEB2), TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                rightW = vw + theme.S(10);
+            }
+            int tx = r.X + pad;
+            if (!string.IsNullOrEmpty(row.Dot)) {
+                float d = theme.S(8);
+                Color dc = row.Dot == "online" ? Theme.Hex(0x30D158) : TrayDot.ColorFor(row.Dot);
+                using (SolidBrush b = new SolidBrush(dc)) g.FillEllipse(b, tx, r.Y + r.Height / 2f - d / 2, d, d);
+                tx += theme.S(16);
+            }
+            int tw = Math.Max(theme.S(40), r.Right - pad - rightW - tx);
+            if (string.IsNullOrEmpty(row.Subtitle)) {
+                TextRenderer.DrawText(g, row.Title, fBold, new Rectangle(tx, r.Y, tw, r.Height), Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            } else {
+                TextRenderer.DrawText(g, row.Title, fBold, new Rectangle(tx, r.Y + theme.S(9), tw, theme.S(20)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, row.Subtitle, fSmall, new Rectangle(tx, r.Y + theme.S(29), tw, theme.S(18)), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            }
+            if (hitId != null) Hit(Rectangle.Intersect(r, area), hitId);
+        }
+
+        void PaintChart(Graphics g, NotchRow row, Rectangle r) {
+            int n = row.Values.Length;
+            if (n == 0) return;
+            double max = 0; foreach (double v in row.Values) max = Math.Max(max, v);
+            int pad = theme.S(16), labelH = theme.S(20), valueH = theme.S(16);
+            int top = r.Y + pad + valueH, bottom = r.Bottom - pad - labelH;
+            float slot = (r.Width - pad * 2) / (float)n, bw = Math.Min(theme.S(34), slot * 0.56f);
+            for (int i = 0; i < n; i++) {
+                float cx = r.X + pad + slot * i + slot / 2;
+                float h = max > 0 ? (float)((bottom - top) * row.Values[i] / max) : 0;
+                h = Math.Max(row.Values[i] > 0 ? theme.S(4) : theme.S(2), h);
+                bool hi = i == row.Highlight;
+                Draw.Fill(g, new RectangleF(cx - bw / 2, bottom - h, bw, h), theme.S(5), hi ? theme.Accent : Theme.Hex(0x3A3A3C));
+                if (i < row.ValueLabels.Length && row.Values[i] > 0)
+                    TextRenderer.DrawText(g, row.ValueLabels[i], fSmall, new Rectangle((int)(cx - slot / 2), (int)(bottom - h) - valueH, (int)slot, valueH), hi ? Color.White : theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                if (i < row.Labels.Length)
+                    TextRenderer.DrawText(g, row.Labels[i], hi ? fBold : fSmall, new Rectangle((int)(cx - slot / 2), bottom + theme.S(4), (int)slot, labelH), hi ? Color.White : theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            }
+        }
+
+        string HitAt(Point p) {
+            for (int i = hits.Count - 1; i >= 0; i--) if (hits[i].Key.Contains(p)) return hits[i].Value;
+            return null;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e) {
+            base.OnMouseMove(e);
+            string h = HitAt(e.Location);
+            if (h != hover) { hover = h; Cursor = h != null ? Cursors.Hand : Cursors.Default; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); if (hover != null) { hover = null; Invalidate(); } }
+
+        protected override void OnMouseWheel(MouseEventArgs e) {
+            base.OnMouseWheel(e);
+            if (!Expanded || SessionPage) return;
+            Scroll = Math.Max(0, Math.Min(Scroll - e.Delta / 120 * theme.S(56), Math.Max(0, contentHeight - viewHeight)));
+            Invalidate();
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e) {
+            base.OnMouseUp(e);
+            string hit = HitAt(e.Location);
+            if (e.Button == MouseButtons.Right) {
+                // Правый щелчок по сеансу (плашка или большая карточка) — меню сеанса в трее.
+                string id = null;
+                if (hit != null && hit.StartsWith("item:")) id = hit.Substring(5);
+                else if (hit != null && hit.StartsWith("remove:")) id = hit.Substring(7);
+                else if (hit == "answer" || hit == "open") { NotchItem s = Selected; if (s != null) id = s.Id; }
+                EventHandler<NotchEventArgs> h = Command;
+                if (id != null && h != null) h(this, new NotchEventArgs("menu", id, null, PointToScreen(e.Location)));
+                return;
+            }
+            if (e.Button != MouseButtons.Left) return;
+            ClickArea(hit, PointToScreen(e.Location));
+        }
+
+        // Щелчок по области: вкладки, выбор сеанса и раскрытие — здесь; остальное — событием Command (в очередь трея).
+        public void ClickArea(string hit, Point p) {
+            if (hit == null) return;
+            NotchItem sel = Selected;
+            string id = sel != null ? sel.Id : "";
+            EventHandler<NotchEventArgs> h = Command;
+            if (hit.StartsWith("section:")) {
+                int si; if (int.TryParse(hit.Substring(8), out si)) { SettingsSection = si; scrolls["settings"] = 0; Invalidate(); }
+                return;
+            }
+            if (hit.StartsWith("page:")) {
+                string page = hit.Substring(5);
+                if (page == "stats-limits") page = "stats";
+                SetPage(page);
+                if (h != null) h(this, new NotchEventArgs("page", id, page, p));
+                return;
+            }
+            if (hit.StartsWith("item:")) { SelectedId = hit.Substring(5); Invalidate(); return; }
+            if (hit.StartsWith("remove:")) { if (h != null) h(this, new NotchEventArgs("remove", hit.Substring(7), null, p)); return; }
+            if (hit == "expand" || hit == "close") {
+                EventHandler<NotchEventArgs> l = Local;
+                if (l != null) l(this, new NotchEventArgs(hit, id, null, p));
+                if (h != null) h(this, new NotchEventArgs(hit, id, null, p));
+                return;
+            }
+            if (hit == "answer") {
+                if (scrolls.ContainsKey("answer")) scrolls["answer"] = 0;
+                SetPage("answer");
+                if (h != null) h(this, new NotchEventArgs("page", id, "answer", p));
+                return;
+            }
+            string kind = hit, action = null;
+            if (hit.StartsWith("act:")) { kind = "action"; action = hit.Substring(4); }
+            else if (hit.StartsWith("set:")) { kind = "set"; id = hit.Substring(4); }
+            else if (hit.StartsWith("row:")) {
+                kind = "row";
+                string rest = hit.Substring(4);
+                int c = rest.IndexOf(':');
+                if (c >= 0) { id = rest.Substring(0, c); action = rest.Substring(c + 1); } else { id = rest; }
+            }
+            else if (hit == "open-text") kind = "open";
+            // Тумблер переключается сразу (трей запишет настройку и пришлёт строки заново).
+            if (kind == "set") foreach (NotchRow row in Rows(Page)) if (row.Key == id && row.Kind == "switch") { row.On = !row.On; Invalidate(); }
+            if (h != null) h(this, new NotchEventArgs(kind, id, action, p));
+        }
+
+        public string[] HitIds() { string[] r = new string[hits.Count]; for (int i = 0; i < hits.Count; i++) r[i] = hits[i].Value; return r; }
+    }
+
+    // Окно шторки: без рамки, поверх всех окон, без кнопки на панели задач и без перехвата фокуса.
+    // Прижато к верхнему краю выбранного монитора; нижние углы скруглены; размер меняется пружиной.
+    public sealed class NotchForm : Form {
+        public readonly NotchView View = new NotchView();
+        readonly Timer spring = new Timer();
+        readonly Timer outside = new Timer();
+        readonly System.Diagnostics.Stopwatch clock = new System.Diagnostics.Stopwatch();
+        readonly float[] sw = new float[2], sh = new float[2];
+        DateTime expandedAt = DateTime.MinValue;
+        Size target;
+        public Rectangle ScreenBounds = Screen.PrimaryScreen.Bounds;
+        public string Position = "center";   // left | center | right
+        public int Margin2 = 0;
+        public bool Hold;                     // открыт диалог трея — щелчок мимо не сворачивает
+        public bool Animating { get { return running; } }
+        volatile bool running;
+        System.Threading.Thread vsync;
+
+        public NotchForm() {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = Color.Black;
+            Text = "Claude Notifier — шторка";
+            View.Dock = DockStyle.Fill;
+            // Layered-окно с попиксельной прозрачностью: края шторки сглажены, вне фигуры окно прозрачно и
+            // пропускает щелчки. Картинку окну отдаём сами (Present) — по каждой перерисовке панели.
+            View.External = true;
+            View.Outside = Color.Transparent;
+            View.Invalidated += delegate (object s, InvalidateEventArgs e) {
+                dirty = dirty.IsEmpty ? e.InvalidRect : Rectangle.Union(dirty, e.InvalidRect);
+                if (!presentPending && IsHandleCreated) { presentPending = true; try { BeginInvoke((MethodInvoker)Present); } catch { presentPending = false; } }
+            };
+            VisibleChanged += delegate { if (Visible) { dirty = ClientRectangle; Present(); } };
+            Controls.Add(View);
+            spring.Interval = 8;
+            spring.Tick += delegate { Step(); };   // запасной путь, если синхронизация с экраном недоступна
+            View.PageChanged += delegate { if (View.Expanded) SetTargetSize(SizeFor(), true); };
+            View.Local += delegate (object s, NotchEventArgs e) { SetExpanded(e.Kind == "expand", e.Kind == "expand" ? "home" : null); };
+            // Щелчок мимо раскрытой шторки сворачивает её (окно шторки фокус не берёт — проверяем кнопки мыши).
+            outside.Interval = 80;
+            outside.Tick += delegate {
+                // Щелчок мимо нужно ловить только у раскрытой (каждые 80 мс); свёрнутой хватает раза в 0,8 с —
+                // проверить, не перекрыло ли шторку другое окно «поверх всех».
+                int wantOut = View.Expanded ? 80 : 800;
+                if (outside.Interval != wantOut) { outside.Interval = wantOut; topTicks = 0; }
+                if (!View.Expanded || ++topTicks >= 10) { topTicks = 0; RaiseToTop(); }
+                if (!View.Expanded || Hold || (DateTime.UtcNow - expandedAt).TotalMilliseconds < 400) return;
+                if (Control.MouseButtons == MouseButtons.None || ShapeOnScreen().Contains(Cursor.Position)) return;
+                SetExpanded(false, null);
+                RaiseCollapse();
+            };
+            outside.Start();
+        }
+
+        int topTicks;
+        public int Raised;   // сколько раз поднимали наверх (для проверки)
+        public void RaiseToTop() {
+            if (!IsHandleCreated || !Visible) return;
+            if (Native.KeepOnTop(Handle, ShapeOnScreen())) Raised++;
+        }
+
+        public event EventHandler Collapsed;
+        void RaiseCollapse() { EventHandler h = Collapsed; if (h != null) h(this, EventArgs.Empty); }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams {
+            get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x08000000 | 0x00080000; return cp; }   // WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
+        }
+
+        LayeredSurface surface;
+        Rectangle dirty;
+        bool presentPending;
+        public LayeredSurface Surface { get { return surface; } }
+        public double PresentMaxMs, PresentSumMs; public int PresentCount;   // замер
+        public double PaintSum, MaskSum, ComposeSum, PushSum;
+
+        // Перерисовать изменившееся и отдать окну: содержимое и сглаженная форма → попиксельная альфа.
+        public void Present() {
+            presentPending = false;
+            if (IsDisposed || !IsHandleCreated || Width <= 0 || Height <= 0) return;
+            System.Diagnostics.Stopwatch pw = System.Diagnostics.Stopwatch.StartNew();
+            if (surface == null) surface = new LayeredSurface();
+            Rectangle d = dirty; dirty = Rectangle.Empty;
+            if (surface.Width != Width || surface.Height != Height) { surface.Ensure(Width, Height); d = new Rectangle(0, 0, Width, Height); }
+            d.Intersect(new Rectangle(0, 0, Width, Height));
+            if (d.Width <= 0 || d.Height <= 0) return;
+            using (Graphics g = surface.ContentGraphics()) {
+                g.SetClip(d);
+                View.PaintInto(g, d);
+            }
+            double tPaint = pw.Elapsed.TotalMilliseconds;
+            using (Graphics m = Graphics.FromImage(surface.Mask)) {
+                m.SetClip(d);
+                m.CompositingMode = CompositingMode.SourceCopy;
+                m.Clear(Color.Transparent);
+                m.CompositingMode = CompositingMode.SourceOver;
+                m.SmoothingMode = SmoothingMode.AntiAlias;
+                m.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                using (GraphicsPath p = NotchView.ShapePath(View.ShapeRect, View.CornerRadius))
+                using (SolidBrush wb = new SolidBrush(Color.White)) m.FillPath(wb, p);
+            }
+            double tMask = pw.Elapsed.TotalMilliseconds;
+            surface.Compose(d);
+            double tCompose = pw.Elapsed.TotalMilliseconds;
+            surface.Push(Handle, Location);
+            double ms = pw.Elapsed.TotalMilliseconds; PresentSumMs += ms; PresentCount++; if (ms > PresentMaxMs) PresentMaxMs = ms;
+            PaintSum += tPaint; MaskSum += tMask - tPaint; ComposeSum += tCompose - tMask; PushSum += ms - tCompose;
+        }
+
+        // Размер по состоянию: свёрнута — полоска; «Главная» и «Ответ» — панель; остальные страницы — выше (до 600).
+        public Size SizeFor() {
+            Theme t = View.Theme;
+            if (!View.Expanded) return new Size(t.S(240), t.S(38));
+            if (View.Page == "home") return new Size(t.S(760), t.S(232));
+            int top = t.S(10) + t.S(34) + t.S(12) + t.S(14);
+            int content = View.Page == "answer" ? View.AnswerContentHeight(t.S(760) - t.S(28)) : View.ContentHeight(View.Page, t.S(760) - t.S(28));
+            int h = Math.Max(t.S(View.Page == "answer" ? 232 : 320), Math.Min(top + content, t.S(600)));
+            return new Size(t.S(760), Math.Min(h, ScreenBounds.Height - t.S(40)));
+        }
+
+        public Rectangle ShapeOnScreen() {
+            RectangleF s = View.ShapeRect;
+            return new Rectangle(Left + (int)s.X, Top + (int)s.Y, (int)Math.Ceiling(s.Width), (int)Math.Ceiling(s.Height));
+        }
+
+        public void SetExpanded(bool expanded, string page) {
+            bool changed = View.Expanded != expanded;
+            View.Expanded = expanded;
+            if (expanded) { expandedAt = DateTime.UtcNow; if (!string.IsNullOrEmpty(page)) View.Page = page; }
+            Size s = SizeFor();
+            Theme t = View.Theme;
+            View.LayoutCollapsed = new Size(t.S(240), t.S(38));
+            if (expanded) View.LayoutExpanded = s;
+            if (changed && Visible && Motion.Enabled) View.Morphing = true;
+            if (expanded) RaiseToTop();
+            SetTargetSize(s, true);
+            View.Invalidate();
+        }
+
+        // Страницу перерисовали (новые строки) — высота могла поменяться.
+        public void Refit() { if (View.Expanded && View.Page != "home") SetTargetSize(SizeFor(), true); }
+
+        // Окно: на месте по позиции (слева / по центру / справа), у верхнего края экрана. Меняется только в начале
+        // и в конце анимации — не на каждом кадре.
+        void ApplyWindow(int w, int h) {
+            int x = ScreenBounds.X + (ScreenBounds.Width - w) / 2;
+            if (Position == "left") x = ScreenBounds.X + Margin2;
+            else if (Position == "right") x = ScreenBounds.Right - w - Margin2;
+            Rectangle nb = new Rectangle(x, ScreenBounds.Y, w, h);
+            if (Bounds != nb) { Bounds = nb; dirty = new Rectangle(0, 0, w, h); if (Visible) Present(); }
+            if (Region != null) { Region old = Region; Region = null; old.Dispose(); }
+        }
+
+        // Фигура внутри окна — по ширине привязана к той же стороне, что и окно.
+        void ApplyShape(float w, float h) {
+            float x = (ClientSize.Width - w) / 2f;
+            if (Position == "left") x = 0;
+            else if (Position == "right") x = ClientSize.Width - w;
+            View.Shape = new RectangleF(x, 0, w, h);
+            // Радиус углов плавно меняется вместе с высотой: полоска — почти капсула, панель — мягкий угол.
+            Theme t = View.Theme;
+            Size le = View.LayoutExpanded;
+            float h0 = t.S(38), h1 = Math.Max(h0 + 1, le.Height > 0 ? le.Height : t.S(232));
+            float k = Math.Max(0f, Math.Min(1f, (h - h0) / (h1 - h0)));
+            View.Progress = k;
+            float rc = h0 * 0.45f, re = Math.Min(h * 0.12f + 6, 28);
+            View.Corner = rc + (re - rc) * k;
+        }
+
+        // Окно всегда одного размера — с самую большую шторку (+ запас на перелёт пружины): окно не меняет размер
+        // ни во время, ни в конце анимации (это и давало рывки и «призраки»). Всё вне фигуры прозрачно.
+        Size WindowSize() {
+            Theme t = View.Theme;
+            int extra = t.S(16);
+            int w = t.S(760) + extra * 2, h = Math.Min(t.S(600), ScreenBounds.Height - t.S(40)) + extra;
+            return new Size(Math.Min(w, ScreenBounds.Width), Math.Min(h, ScreenBounds.Height));
+        }
+
+        public void SetTargetSize(Size s, bool animate) {
+            target = s;
+            if (View.Expanded) View.LayoutExpanded = s;
+            Size ws = WindowSize();
+            ApplyWindow(ws.Width, ws.Height);
+            if (!animate || !Motion.Enabled || !Visible) {
+                sw[0] = s.Width; sw[1] = 0; sh[0] = s.Height; sh[1] = 0;
+                StopSpring();
+                return;
+            }
+            if (sw[0] <= 0) { RectangleF cur = View.ShapeRect; sw[0] = cur.Width; sh[0] = cur.Height; }
+            ApplyShape(sw[0], sh[0]);
+            View.Invalidate();
+            if (!running) {
+                clock.Restart(); leftover = 0;
+                Frames = 0; MaxGapMs = 0; gapClock.Restart();
+                running = true;
+                StartVsync();
+            }
+        }
+
+        // Замер плавности последней анимации: кадров и самая долгая пауза между ними.
+        public int Frames; public double MaxGapMs;
+        readonly System.Diagnostics.Stopwatch gapClock = new System.Diagnostics.Stopwatch();
+
+        double leftover;
+        void Step() {
+            // Пружина по реальному времени шагами по 1 мс, остаток копится — без дрожания от округления.
+            double ms = clock.Elapsed.TotalMilliseconds; clock.Restart();
+            leftover = Math.Min(leftover + ms, 120);
+            bool a = false, b = false;
+            while (leftover >= 1) {
+                leftover -= 1;
+                a = CardList.SpringStep(sw, target.Width, 0.001f); b = CardList.SpringStep(sh, target.Height, 0.001f);
+                if (a && b) break;
+            }
+            double gap = gapClock.Elapsed.TotalMilliseconds; gapClock.Restart();
+            if (Frames > 0 && gap > MaxGapMs) MaxGapMs = gap;
+            Frames++;
+            if (a && b) { StopSpring(); return; }
+            RectangleF before = View.ShapeRect;
+            ApplyShape(Math.Max(1f, sw[0]), Math.Max(1f, sh[0]));
+            // Перерисовать только то, где фигура была и стала (остальное окно — прозрачное и не меняется).
+            View.Invalidate(Rectangle.Inflate(Rectangle.Round(RectangleF.Union(before, View.ShapeRect)), 2, 2));
+            Present();   // нарисовать и отдать окну сейчас, не дожидаясь очереди сообщений
+        }
+
+        // Кадры анимации — по обновлению экрана: поток ждёт следующий кадр монитора (DwmFlush) и сразу просит
+        // поток шторки сделать шаг и нарисовать. Таймер WinForms для этого плох: его сообщения самые
+        // низкоприоритетные и копятся за отрисовкой — отсюда паузы по 20–30 мс.
+        void StartVsync() {
+            if (vsync != null && vsync.IsAlive) return;
+            vsync = new System.Threading.Thread(delegate () {
+                int fails = 0;
+                while (running) {
+                    if (Native.WaitVBlank() != 0) { fails++; System.Threading.Thread.Sleep(7); }
+                    if (!running) break;
+                    try {
+                        if (IsDisposed || !IsHandleCreated) break;
+                        Invoke((MethodInvoker)delegate { if (running) Step(); });
+                    } catch { break; }
+                    if (fails > 30) {   // композиция выключена — вернуться к таймеру
+                        try { BeginInvoke((MethodInvoker)delegate { if (running) { Native.TimerPrecise(true); spring.Start(); } }); } catch { }
+                        break;
+                    }
+                }
+            });
+            vsync.IsBackground = true;
+            vsync.Name = "Notch vsync";
+            vsync.Start();
+        }
+
+        void StopSpring() {
+            running = false;
+            if (spring.Enabled) { spring.Stop(); Native.TimerPrecise(false); }
+            View.Morphing = false;
+            RectangleF before = View.ShapeRect;
+            ApplyShape(target.Width, target.Height);
+            View.Corner = -1; View.Progress = View.Expanded ? 1 : 0;
+            View.Invalidate(Rectangle.Inflate(Rectangle.Round(RectangleF.Union(before, View.ShapeRect)), 2, 2));
+        }
+
+        protected override void Dispose(bool disposing) { running = false; if (disposing) { if (spring.Enabled) Native.TimerPrecise(false); spring.Dispose(); outside.Dispose(); if (surface != null) surface.Dispose(); } base.Dispose(disposing); }
+    }
+
+    // Поток шторки: своё окно и свой цикл сообщений. Все вызовы из трея — через Post (BeginInvoke) в поток шторки;
+    // щелчки шторки — в очередь Commands.
+    public static class NotchHost {
+        static System.Threading.Thread thread;
+        static NotchForm form;
+        public static readonly System.Collections.Concurrent.ConcurrentQueue<NotchEventArgs> Commands = new System.Collections.Concurrent.ConcurrentQueue<NotchEventArgs>();
+
+        public static bool Running { get { NotchForm f = form; return f != null && !f.IsDisposed && f.IsHandleCreated; } }
+        public static NotchForm Form { get { return form; } }
+
+        public static void Start() {
+            if (Running) return;
+            System.Threading.ManualResetEvent ready = new System.Threading.ManualResetEvent(false);
+            thread = new System.Threading.Thread(delegate () {
+                NotchForm f = new NotchForm();
+                f.View.Command += delegate (object s, NotchEventArgs e) { Commands.Enqueue(e); };
+                f.Collapsed += delegate { Commands.Enqueue(new NotchEventArgs("collapse", "", null, Point.Empty)); };
+                IntPtr h = f.Handle;   // создать окно в этом потоке
+                form = f;
+                // Заблокирован экран или компьютер засыпает — анимация на паузе (не тратим процессор впустую).
+                try {
+                    Microsoft.Win32.SystemEvents.SessionSwitch += delegate (object s, Microsoft.Win32.SessionSwitchEventArgs e) {
+                        Microsoft.Win32.SessionSwitchReason k = e.Reason;
+                        if (k == Microsoft.Win32.SessionSwitchReason.SessionLock || k == Microsoft.Win32.SessionSwitchReason.ConsoleDisconnect || k == Microsoft.Win32.SessionSwitchReason.RemoteDisconnect) NotchView.Paused = true;
+                        else if (k == Microsoft.Win32.SessionSwitchReason.SessionUnlock || k == Microsoft.Win32.SessionSwitchReason.ConsoleConnect || k == Microsoft.Win32.SessionSwitchReason.RemoteConnect) NotchView.Paused = false;
+                    };
+                    Microsoft.Win32.SystemEvents.PowerModeChanged += delegate (object s, Microsoft.Win32.PowerModeChangedEventArgs e) {
+                        if (e.Mode == Microsoft.Win32.PowerModes.Suspend) NotchView.Paused = true;
+                        else if (e.Mode == Microsoft.Win32.PowerModes.Resume) NotchView.Paused = false;
+                    };
+                } catch { }
+                ready.Set();
+                Application.Run(new ApplicationContext());
+                try { f.Dispose(); } catch { }
+            });
+            thread.SetApartmentState(System.Threading.ApartmentState.STA);
+            thread.IsBackground = true;
+            thread.Name = "Notch";
+            thread.Start();
+            ready.WaitOne(10000);
+        }
+
+        public static void Post(Action a) {
+            NotchForm f = form;
+            if (f == null || f.IsDisposed || !f.IsHandleCreated) return;
+            try { f.BeginInvoke(a); } catch { }
+        }
+
+        // Синхронный вызов в потоке шторки (для тестов и чтения состояния).
+        public static T Call<T>(Func<T> fn) {
+            NotchForm f = form;
+            if (f == null || f.IsDisposed || !f.IsHandleCreated) return default(T);
+            return (T)f.Invoke(fn);
+        }
+
+        public static void Place(Rectangle screen, string position, int margin) {
+            Post(delegate {
+                form.ScreenBounds = screen; form.Position = position; form.Margin2 = margin;
+                form.SetTargetSize(form.SizeFor(), false);
+                if (!form.Visible) form.Show();
+            });
+        }
+
+        public static void SetItems(NotchItem[] items) { Post(delegate { form.View.SetItems(items); }); }
+        public static void SetRows(string page, NotchRow[] rows) { Post(delegate { form.View.SetRows(page, rows); form.Refit(); }); }
+        public static void SetAnswer(string id, string text) { Post(delegate { form.View.SetAnswer(id, text); form.Refit(); }); }
+        public static void SetLimits(float left5, string detail5, float leftWeek, string detailWeek, bool stale, bool soundOff) {
+            Post(delegate {
+                NotchView v = form.View;
+                v.Left5 = left5; v.Detail5 = detail5 ?? ""; v.LeftWeek = leftWeek; v.DetailWeek = detailWeek ?? "";
+                v.LimitsStale = stale; v.SoundOff = soundOff; v.Invalidate();
+            });
+        }
+        public static void SetExpanded(bool expanded, string page) { Post(delegate { form.SetExpanded(expanded, page); }); }
+        public static void Toggle(string page) { Post(delegate { form.SetExpanded(!form.View.Expanded, page); }); }
+        public static void SetHold(bool hold) { Post(delegate { form.Hold = hold; }); }
+        public static bool Expanded { get { return Running && Call<bool>(delegate { return form.View.Expanded; }); } }
+        public static string Page { get { return Running ? Call<string>(delegate { return form.View.Page; }) : ""; } }
+        public static string AnswerOf(string id) { return Running ? Call<string>(delegate { return form.View.Answer(id); }) : null; }
+        public static bool IsExpanded() { return Running && Call<bool>(delegate { return form.View.Expanded; }); }
+        // Без ожидания потока шторки (для частого опроса из таймера трея): раскрыта ли сейчас.
+        public static bool ExpandedNow { get { NotchForm f = form; return f != null && !f.IsDisposed && f.View.Expanded; } }
+        public static int ItemCount { get { return Running ? Call<int>(delegate { return form.View.Count; }) : 0; } }
+        public static int RowCount(string page) { return Running ? Call<int>(delegate { return form.View.Rows(page).Length; }) : 0; }
+        // Щелчок по области шторки в её потоке (для тестов).
+        public static void ClickArea(string hit) { if (Running) Call<bool>(delegate { form.View.ClickArea(hit, Point.Empty); return true; }); }
+
+        public static void Stop() {
+            NotchForm f = form;
+            if (f != null && !f.IsDisposed && f.IsHandleCreated) {
+                try { f.BeginInvoke(new Action(delegate { f.Close(); Application.ExitThread(); })); } catch { }
+            }
+            if (thread != null) thread.Join(3000);
+            form = null; thread = null;
+        }
+    }
+}

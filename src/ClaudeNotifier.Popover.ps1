@@ -123,6 +123,7 @@ function Update-NotifierPopover {
 function Show-NotifierPopover {
     <# .SYNOPSIS Открывает мини-окно у трея; повторный щелчок по точке закрывает его. -AtTray — у угла панели задач (горячая клавиша). #>
     param([switch]$AtTray)
+    if (Test-NotifierNotchActive) { Switch-NotifierNotch; return }   # шторка — главное окно: щелчок по точке раскрывает её
     if ($script:Popover -and -not $script:Popover.IsDisposed) { Close-NotifierPopover; return }
     # Щелчок по точке сначала закрывает окно (Deactivate) — не открывать его тут же снова.
     if (([datetime]::UtcNow - $script:PopoverClosedAt).TotalMilliseconds -lt 300) { return }

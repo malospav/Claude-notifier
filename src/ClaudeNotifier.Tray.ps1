@@ -30,6 +30,9 @@ Import-Module (Join-Path $PSScriptRoot 'lib\Sessions.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Shortcut.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Usage.psm1')
 Import-Module (Join-Path $PSScriptRoot 'lib\Limits.psm1')
+Import-Module (Join-Path $PSScriptRoot 'lib\Text.psm1')
+Import-Module (Join-Path $PSScriptRoot 'lib\Transcript.psm1')
+Import-Module (Join-Path $PSScriptRoot 'lib\Event.psm1')        # события из хуков, принятых треем напрямую (curl)
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Ui.ps1')        # окно «Сеансы», точка в трее, диалоги
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Network.ps1')   # доступ из сети, вкладка «Устройства»
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.SettingsUi.ps1')  # вкладка «Настройки», автозапуск
@@ -37,6 +40,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib\Limits.psm1')
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Popover.ps1')     # мини-окно у трея по одиночному щелчку
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.StatsUi.ps1')     # страница «Статистика»: токены и время по дням и проектам
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Attention.ps1')   # контекст, напоминания, мигание точки, горячая клавиша, имя/закрепление
+. (Join-Path $PSScriptRoot 'ClaudeNotifier.Notch.ps1')       # шторка вверху экрана: персонажи сеансов, раскрытая панель
 
 $script:EventTypes = @('done', 'permission', 'error', 'limit', 'start', 'working', 'end', 'show', 'request')
 # Служебные события (SessionStart, UserPromptSubmit, SessionEnd): только для окна «Сеансы».
@@ -47,6 +51,8 @@ $script:SessionsDirty = $false
 $script:SessionsRefreshedAt = [datetime]::MinValue
 $script:MaxBatch = 20
 $script:TickMs = 100
+$script:IdleTickMs = 250
+$script:AwayTickMs = 1000  # вас нет за компьютером: события всё равно доходят (секунда задержки не важна)   # в покое (нет событий 5 с, шторка свёрнута) таймер реже — меньше нагрузки в фоне
 $script:IdleTrimMs = 30000
 $script:RepeatTrimMs = 300000
 
@@ -229,7 +235,8 @@ function Invoke-NotifierEventBatch {
                 if (-not $notifyOnly) { $sessions = Update-NotifierSessionList -Sessions $sessions -Event $event }
             }
             catch { Write-NotifierLog -Level ERROR -Message "tray: статус сеанса не обновлён: $($_.Exception.Message)" -DataRoot $DataRoot }
-            if ($event.type -eq 'request') { $event.type = 'permission' }   # уведомление, звук и история — как «Нужно разрешение»
+            $wasRequest = $event.type -eq 'request'
+            if ($wasRequest) { $event.type = 'permission' }   # уведомление, звук и история — как «Нужно разрешение»
             elseif ($duplicate -and -not ($event.PSObject.Properties['reminder'] -and $event.reminder)) { $shown++; continue }   # дубль уведомления Claude о том же запросе
             if ($script:SilentTypes -contains $event.type -or $remote -eq 'quiet') { $shown++; continue }
             # Сеанс «без уведомлений»: статус обновлён, но ни уведомления, ни звука.
@@ -254,8 +261,10 @@ function Invoke-NotifierEventBatch {
                 continue
             }
             if (-not $NoOutput) {
-                [void](Show-NotifierToast -Event $event -DataRoot $DataRoot)
-                [void](Invoke-NotifierSound -Type $event.type -Config $config -DataRoot $DataRoot)
+                $buttons = @()
+                try { $buttons = @(Get-NotifierToastButtons -Event $event -Config $config -Request:$wasRequest -DataRoot $DataRoot) } catch { }
+                [void](Show-NotifierToast -Event $event -Actions $buttons -DataRoot $DataRoot)
+                if (-not $config.quiet.enabled) { [void](Invoke-NotifierSound -Type $event.type -Config $config -DataRoot $DataRoot) }   # звук выключен в шторке
             }
             $shown++
             Write-NotifierLog -Level INFO -Message "tray: показано '$($event.type)', задержка $(Get-EventLatencyMs $event) мс" -DataRoot $DataRoot
@@ -323,6 +332,15 @@ function Invoke-NotifierUsageTick {
     if ($Now -lt $script:UsageNextAt) { return }
     $script:UsageNextAt = $Now.AddMinutes($script:UsageIntervalMin)
     $script:UsageFetch = Start-NotifierUsageFetch
+    # Нет действующего входа Claude Code CLI (токен истёк — CLI обновляет его только при запуске): расход не
+    # обновляется. Пишем в журнал один раз, пока ситуация не изменится.
+    if ($null -eq $script:UsageFetch) {
+        if (-not $script:UsageNoTokenLogged) {
+            Write-NotifierLog -Level WARN -Message 'usage: нет действующего входа Claude Code CLI — расход не обновляется (запустите claude в терминале)' -DataRoot $script:TrayDataRoot
+            $script:UsageNoTokenLogged = $true
+        }
+    }
+    else { $script:UsageNoTokenLogged = $false }
 }
 
 function Stop-NotifierTray {
@@ -333,7 +351,9 @@ function Stop-NotifierTray {
     param([Parameter(Mandatory = $true)][hashtable]$State)
     if ($State.Timer) { $State.Timer.Stop(); $State.Timer.Dispose() }
     if ($State.Server) { [void](Stop-NotifierPipeServer -Server $State.Server) }
+    try { if ('ClaudeNotifier.Ui.HookServer' -as [type]) { [ClaudeNotifier.Ui.HookServer]::Stop() } } catch { }
     if ($script:HotKey) { try { $script:HotKey.Dispose() } catch { }; $script:HotKey = $null }
+    try { if ('ClaudeNotifier.Ui.NotchHost' -as [type]) { [ClaudeNotifier.Ui.NotchHost]::Stop() } } catch { }
     try { Stop-NotifierNetServer } catch { }
     if ($script:ConnectForm -and -not $script:ConnectForm.IsDisposed) { $script:ConnectForm.Dispose() }
     if ($script:SessionsForm -and -not $script:SessionsForm.IsDisposed) { $script:SessionsForm.Dispose() }
@@ -376,6 +396,68 @@ function New-NotifierTrayIcon {
     return $icon
 }
 
+function Get-NotifierTickInterval {
+    <#
+    .SYNOPSIS
+    Частота таймера трея: 100 мс, пока идут события или открыта шторка (быстрый отклик), иначе 250 мс;
+    вас нет за компьютером (2 мин без ввода) — раз в секунду.
+    #>
+    param([datetime]$LastActivity, [datetime]$Now = [datetime]::UtcNow, [bool]$Expanded = $(try { [ClaudeNotifier.Ui.NotchHost]::ExpandedNow } catch { $false }),
+        [double]$IdleSeconds = $(try { [ClaudeNotifier.Ui.Native]::InputIdleSeconds() } catch { 0 }))
+    if ($Expanded -or ($Now - $LastActivity).TotalSeconds -lt 5) { return $script:TickMs }
+    if ($IdleSeconds -ge 120) { return $script:AwayTickMs }
+    return $script:IdleTickMs
+}
+
+function ConvertFrom-NotifierHookCall {
+    <#
+    .SYNOPSIS
+    Хук, принятый треем напрямую (curl → HookServer) → событие v1, как от PowerShell-моста; $null — отброшено
+    (неразобранный JSON или тип уведомлений выключен).
+    #>
+    param([Parameter(Mandatory = $true)]$Call, [string]$DataRoot = $script:TrayDataRoot)
+    $config = Get-NotifierConfig -DataRoot $DataRoot
+    $event = ConvertTo-NotifierEvent -HookKind ([string]$Call.Kind) -Json ([string]$Call.Body) -EntryPoint ([string]$Call.Entry) -HostSessionId ([string]$Call.HostSession) -Config $config -DataRoot $DataRoot
+    if ($null -eq $event) { return $null }
+    if ($config.events.ContainsKey($event.type) -and -not $config.events[$event.type].enabled) { return $null }
+    # Окно сеанса — как в мосте: у CLI окно консоли (Windows Terminal), иначе первый предок с окном.
+    $hwnd = [int64]0
+    if ($event.origin -eq 'cli') { $hwnd = [int64]$Call.ConsoleHwnd }
+    if ($hwnd -eq 0) { $hwnd = [int64]$Call.WalkHwnd }
+    $event.window = [pscustomobject]@{ hwnd = $hwnd; pid = [int]$Call.ClaudePid }
+    Add-NotifierEventDetails -Event $event -Kind ([string]$Call.Kind) -InputJson ([string]$Call.Body) -Config $config -DataRoot $DataRoot
+    # Тот же вид, что у события из канала (JSON → объект): вложенные таблицы становятся объектами.
+    return (ConvertFrom-Json -InputObject ($event | ConvertTo-Json -Depth 8 -Compress))
+}
+
+function Invoke-NotifierHookCalls {
+    <# .SYNOPSIS Из таймера трея: хуки, принятые напрямую, — в общую очередь событий. Возвращает их число. #>
+    param([int]$Max = 20)
+    if (-not ('ClaudeNotifier.Ui.HookServer' -as [type])) { return 0 }
+    $n = 0
+    $call = $null
+    while ($n -lt $Max -and [ClaudeNotifier.Ui.HookServer]::Calls.TryDequeue([ref]$call)) {
+        $n++
+        try {
+            $event = ConvertFrom-NotifierHookCall -Call $call
+            if ($event) { $script:TrayQueue.Enqueue($event) }
+        }
+        catch { Write-NotifierLog -Level ERROR -Message "tray: хук '$($call.Kind)': $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+    }
+    return $n
+}
+
+function Start-NotifierHookServer {
+    <# .SYNOPSIS Приём хуков от curl на 127.0.0.1:<порт>. Ошибка (порт занят) — в журнал; мост SessionStart работает и так. #>
+    param([string]$DataRoot = $script:TrayDataRoot)
+    try {
+        if ([ClaudeNotifier.Ui.HookServer]::Start((Get-NotifierHookPort))) { return $true }
+        Write-NotifierLog -Level ERROR -Message "tray: приём хуков на порту $(Get-NotifierHookPort) не запущен: $([ClaudeNotifier.Ui.HookServer]::Error)" -DataRoot $DataRoot
+    }
+    catch { Write-NotifierLog -Level ERROR -Message "tray: приём хуков: $($_.Exception.Message)" -DataRoot $DataRoot }
+    return $false
+}
+
 function Start-NotifierTray {
     <#
     .SYNOPSIS
@@ -402,6 +484,7 @@ function Start-NotifierTray {
     $script:TrayNoOutput = [bool]$NoOutput
     try {
         $script:TrayState.Server = Start-NotifierPipeServer -Queue $script:TrayQueue -DataRoot $DataRoot
+        [void](Start-NotifierHookServer -DataRoot $DataRoot)
         try { Initialize-NotifierNet -DataRoot $DataRoot }
         catch { Write-NotifierLog -Level ERROR -Message "tray: доступ из сети не запущен: $($_.Exception.Message)" -DataRoot $DataRoot }
         $script:TrayState.Context = New-Object System.Windows.Forms.ApplicationContext
@@ -411,6 +494,8 @@ function Start-NotifierTray {
         }
         try { [void](Register-NotifierHotKey -DataRoot $DataRoot) }
         catch { Write-NotifierLog -Level WARN -Message "tray: горячая клавиша: $($_.Exception.Message)" -DataRoot $DataRoot }
+        try { Initialize-NotifierNotch -DataRoot $DataRoot }
+        catch { Write-NotifierLog -Level WARN -Message "tray: шторка: $($_.Exception.Message)" -DataRoot $DataRoot }
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = $script:TickMs
         $script:LastActivity = [datetime]::UtcNow   # старт считается активностью: первая обрезка через 30 с
@@ -420,12 +505,16 @@ function Start-NotifierTray {
                 $now = [datetime]::UtcNow
                 try { if ((Invoke-NotifierHttpBatch) -gt 0) { $script:LastActivity = $now } }
                 catch { Write-NotifierLog -Level ERROR -Message "tray: ошибка сети: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+                try { if ((Invoke-NotifierHookCalls) -gt 0) { $script:LastActivity = $now } }
+                catch { Write-NotifierLog -Level ERROR -Message "tray: хуки: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 if ((Invoke-NotifierEventBatch -Queue $script:TrayQueue -DataRoot $script:TrayDataRoot -NoOutput:$script:TrayNoOutput) -gt 0) {
                     $script:LastActivity = $now
                 }
                 try { Invoke-NotifierUsageTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: расход: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 try { Update-NotifierLiveContext -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: контекст: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 try { Update-NotifierTrayBlink -Now $now } catch { }
+                try { Invoke-NotifierNotchCommands } catch { Write-NotifierLog -Level WARN -Message "tray: шторка: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+                try { Invoke-NotifierToastButtons } catch { Write-NotifierLog -Level WARN -Message "tray: кнопка уведомления: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 try { Invoke-NotifierActivityTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: статистика: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 # Раз в 5 с и сразу после событий: точка в трее и открытое окно.
                 if (Test-SessionsRefreshDue -Dirty $script:SessionsDirty -LastRefresh $script:SessionsRefreshedAt -Now $now) {
@@ -435,6 +524,8 @@ function Start-NotifierTray {
                     [void](Invoke-WorkingSetTrim)
                     $script:LastTrim = $now
                 }
+                $want = Get-NotifierTickInterval -LastActivity $script:LastActivity -Now $now
+                if ($script:TrayState.Timer.Interval -ne $want) { $script:TrayState.Timer.Interval = $want }
             }
             catch { Write-NotifierLog -Level ERROR -Message "tray: ошибка таймера: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
         })

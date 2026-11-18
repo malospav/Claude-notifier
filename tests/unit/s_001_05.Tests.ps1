@@ -26,7 +26,8 @@ function Get-OurHooks($Settings) {
     foreach ($ev in $Settings.hooks.PSObject.Properties) {
         foreach ($group in @($ev.Value)) {
             foreach ($h in @($group.hooks)) {
-                if ((@($h.args) -join ' ') -like '*claude-notifier\app\hook-bridge.ps1*') { $r[$ev.Name] = 1 + [int]$r[$ev.Name] }
+                $line = @($h.args) -join ' '
+                if ($line -like '*claude-notifier\app\hook-bridge.ps1*' -or $line -like '*/claude-notifier/hook/*') { $r[$ev.Name] = 1 + [int]$r[$ev.Name] }
             }
         }
     }
@@ -68,11 +69,15 @@ Describe 's_001_05 · install.ps1' {
         $n.matcher | Should Be 'permission_prompt|elicitation_dialog|agent_needs_input'
         $h = @($n.hooks)[0]
         $h.type | Should Be 'command'
-        $h.command | Should BeLike '*\WindowsPowerShell\v1.0\powershell.exe'
+        # Частые хуки — встроенный curl.exe отправляет JSON трею; SessionStart — PowerShell-мост.
+        $h.command | Should BeLike '*\System32\curl.exe'
         $h.async | Should Be $true
-        ($h.args -join ' ') | Should Be ("-NoProfile -NonInteractive -File " + (Join-Path $e.Data 'app\hook-bridge.ps1') + " notification")
-        (@(@($s.hooks.Stop)[0].hooks)[0].args)[-1] | Should Be 'stop'
-        (@(@($s.hooks.StopFailure)[0].hooks)[0].args)[-1] | Should Be 'stopfailure'
+        $h.args[-1] | Should Be 'http://127.0.0.1:47611/claude-notifier/hook/notification'
+        (@(@($s.hooks.Stop)[0].hooks)[0].args)[-1] | Should Match '/hook/stop$'
+        (@(@($s.hooks.StopFailure)[0].hooks)[0].args)[-1] | Should Match '/hook/stopfailure$'
+        $ss = @(@($s.hooks.SessionStart)[0].hooks)[0]
+        $ss.command | Should BeLike '*\WindowsPowerShell\v1.0\powershell.exe'
+        ($ss.args -join ' ') | Should Be ("-NoProfile -NonInteractive -File " + (Join-Path $e.Data 'app\hook-bridge.ps1') + " sessionstart")
         $null -eq @($s.hooks.Stop)[0].PSObject.Properties['matcher'] | Should Be $true
     }
 
@@ -237,6 +242,7 @@ Describe 's_001_05 · Settings.psm1' {
         $ours = [pscustomobject]@{ type = 'command'; command = 'powershell.exe'; args = @('-File', 'C:\Users\u\AppData\Local\claude-notifier\app\hook-bridge.ps1', 'stop') }
         $theirs = [pscustomobject]@{ type = 'command'; command = 'C:\claude-notifier\app\x.cmd' }
         Test-NotifierHook $ours | Should Be $true
+        Test-NotifierHook ([pscustomobject]@{ type = 'command'; command = 'curl.exe'; args = @('--data-binary', '@-', 'http://127.0.0.1:47611/claude-notifier/hook/stop') }) | Should Be $true
         Test-NotifierHook $theirs | Should Be $false
         Test-NotifierHook 'string' | Should Be $false
     }

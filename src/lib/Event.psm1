@@ -132,4 +132,33 @@ function ConvertTo-NotifierEvent {
     }
 }
 
-Export-ModuleMember -Function ConvertTo-NotifierEvent, Format-NotifierPreview
+function Add-NotifierEventDetails {
+    <#
+    .SYNOPSIS
+    Подробности сеанса к событию: статистика журнала (после ответа) и, если включено, начало запроса пользователя.
+    Ошибки не мешают доставке события.
+    #>
+    param($Event, [string]$Kind, [string]$InputJson, $Config, [string]$DataRoot)
+    try {
+        $hook = ConvertFrom-Json -InputObject $InputJson -ErrorAction Stop
+        $tp = $hook.PSObject.Properties['transcript_path']
+        # Путь к журналу — трею: он сам обновляет заполненность контекста, пока сеанс работает.
+        if ($tp -and $tp.Value -is [string] -and $tp.Value -ne '') { $Event | Add-Member -NotePropertyName transcript -NotePropertyValue $tp.Value -Force }
+        if ($Kind -eq 'stop' -or $Kind -eq 'stopfailure') {
+            if ($tp -and $tp.Value -is [string]) {
+                $stats = Get-NotifierTranscriptStats -Path $tp.Value -StateDir (Join-Path $DataRoot 'stats')
+                if ($stats) { $Event | Add-Member -NotePropertyName stats -NotePropertyValue ([pscustomobject]$stats) -Force }
+            }
+        }
+        if ($Kind -eq 'prompt' -and $Config.showPrompt) {
+            $pr = $hook.PSObject.Properties['prompt']
+            # Служебные «сообщения» (отчёт субагента, уведомление о задаче) — не ваш запрос.
+            if ($pr -and $pr.Value -is [string] -and $pr.Value.TrimStart() -notmatch '^<(agent-message|task-notification|system-reminder|command-|local-command)') {
+                $Event | Add-Member -NotePropertyName prompt -NotePropertyValue (Format-NotifierPreview -Text $pr.Value -MaxLength $Config.previewLength) -Force
+            }
+        }
+    }
+    catch { Write-NotifierLog -Level WARN -Message "bridge: подробности сеанса не собраны: $($_.Exception.Message)" -DataRoot $DataRoot }
+}
+
+Export-ModuleMember -Function ConvertTo-NotifierEvent, Format-NotifierPreview, Add-NotifierEventDetails

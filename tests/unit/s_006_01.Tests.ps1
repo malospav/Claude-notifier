@@ -168,14 +168,24 @@ Describe 's_006_01 · новые хуки' {
         $e.title | Should Be "Сеанс $([char]0x00B7) proj"
     }
 
-    It 'установщик ставит 8 хуков: уведомления, сеансы, запрос разрешения (синхронный), быстрый ответ (asyncRewake)' {
+    It 'установщик ставит 8 хуков: частые — через curl.exe трею, SessionStart, запрос разрешения и быстрый ответ — мост' {
         $s = [pscustomobject]@{}
-        Add-NotifierHooks -Settings $s -AppRoot 'C:\x\claude-notifier\app'
+        Add-NotifierHooks -Settings $s -AppRoot 'C:\x\claude-notifier\app' -Port 47611
         @($s.hooks.PSObject.Properties).Count | Should Be 7
-        (@(@($s.hooks.SessionStart)[0].hooks)[0].args)[-1] | Should Be 'sessionstart'
-        (@(@($s.hooks.UserPromptSubmit)[0].hooks)[0].args)[-1] | Should Be 'prompt'
-        (@(@($s.hooks.SessionEnd)[0].hooks)[0].args)[-1] | Should Be 'sessionend'
-        @(@($s.hooks.UserPromptSubmit)[0].hooks)[0].async | Should Be $true
+        (@(@($s.hooks.SessionStart)[0].hooks)[0].args)[-1] | Should Be 'sessionstart'   # мост: заодно запускает трей
+        $prompt = @(@($s.hooks.UserPromptSubmit)[0].hooks)[0]
+        $prompt.command | Should Match 'curl\.exe$'
+        $prompt.args[-1] | Should Be 'http://127.0.0.1:47611/claude-notifier/hook/prompt'
+        ($prompt.args -join ' ') | Should Match 'X-Claude-Notifier: hook'
+        ($prompt.args -join ' ') | Should Match '%CLAUDE_CODE_ENTRYPOINT='
+        $prompt.async | Should Be $true
+        (@(@($s.hooks.SessionEnd)[0].hooks)[0].args)[-1] | Should Match '/hook/sessionend$'
+        (@(@($s.hooks.Stop)[0].hooks)[0].args)[-1] | Should Match '/hook/stop$'
+        Test-NotifierHook $prompt | Should Be $true
+        # Нет curl.exe — всё через мост.
+        $s2 = [pscustomobject]@{}
+        Add-NotifierHooks -Settings $s2 -AppRoot 'C:\x\claude-notifier\app' -Curl 'C:\nope\curl.exe'
+        (@(@($s2.hooks.UserPromptSubmit)[0].hooks)[0].args)[-1] | Should Be 'prompt'
         $perm = @(@($s.hooks.PermissionRequest)[0].hooks)[0]
         $perm.args[-1] | Should Be 'permreq'
         $null -eq $perm.PSObject.Properties['async'] | Should Be $true   # синхронный: Claude ждёт решения

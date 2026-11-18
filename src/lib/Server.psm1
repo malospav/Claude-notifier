@@ -7,6 +7,7 @@ Import-Module (Join-Path $PSScriptRoot 'Sessions.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Devices.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Requests.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Transcript.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Text.psm1')
 
 # HTTP-сервер для устройств в локальной сети (ADR-007).
 # Фоновый runspace только принимает соединения (GetContext) и кладёт их в очередь; разбор запроса,
@@ -221,9 +222,9 @@ function Get-NotifierSessionsPayload {
             state_text  = $(if ($stalled) { 'Похоже, остановился' } elseif (Get-NotifierAgentsStateText $s) { Get-NotifierAgentsStateText $s } else { Get-NotifierSessionStateText ([string]$s.state) })
             elapsed     = $(if ($stalled) { Format-NotifierElapsed -Ts ([string]$s.stalledSince) -Now $Now } else { Format-NotifierElapsed -Ts ([string]$s.since) -Now $Now })
             origin      = [string]$s.origin
-            preview     = [string]$s.preview
+            preview     = (ConvertTo-NotifierPlainText ([string]$s.preview))
             id          = [string]$s.session_id
-            details     = (Format-NotifierSessionDetails -Session $s -Now $Now)
+            details     = ((Format-NotifierSessionDetails -Session $s -Now $Now) -replace "`t", ': ')
             request     = $null
             can_reply   = $false
         }
