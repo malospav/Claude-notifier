@@ -281,7 +281,7 @@ function Get-NotifierSessionsPayload {
             if ($req) {
                 $items[-1].request = [ordered]@{ id = [string]$req.id; kind = [string]$req.kind; title = [string]$req.title; detail = [string]$req.detail; options = @($req.options); can_always = [bool]$req.canAlways }
             }
-            elseif ($pending.Replies.ContainsKey($sid) -and [string]$s.state -eq 'waiting') { $items[-1].can_reply = $true }
+            elseif ($pending.Replies.ContainsKey($sid) -and [string]$s.state -eq 'waiting' -and (Test-NotifierSessionAsks -Session $s -Fallback ([string]$s.preview))) { $items[-1].can_reply = $true }
         }
     }
     return [ordered]@{ pc = $Ctx.PcName; devices = $devices; sessions = $items }

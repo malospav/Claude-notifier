@@ -24,6 +24,8 @@ namespace ClaudeNotifier.Ui {
         public int Tools;                // действий Claude в сеансе: прибавилось — у сфинкса «Ага!»
         public int Agents;               // работающих агентов — огоньки вокруг головы
         public string Device = "";       // id устройства ('' — этот ПК): свой маскот
+        public long WaitSince;           // ждёт вас (запрос, ошибка, вопрос в ответе) с этого момента, UTC ticks; 0 — не ждёт
+        public string Ask = "";          // что спрашивают — для бегущей строки («Закоммитить и отправить?»)
         public object Tag;
     }
 
@@ -84,6 +86,9 @@ namespace ClaudeNotifier.Ui {
         public string Page = "home";           // home | chat | stats | devices | settings
         public string SelectedId = "";
         // Полоски вверху: сколько осталось от лимитов Claude (5 часов и неделя), %; < 0 — нет данных.
+        public bool ShowStats;            // загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки
+        Rectangle statsRect;              // где нарисованы показатели — перерисовать только их при новом замере
+        int statsShown = -1;              // номер замера SysStats, который сейчас на экране
         public float Left5 = -1, LeftWeek = -1;
         public string Detail5 = "", DetailWeek = "";
         public bool LimitsStale;               // данные старые (сервер давно не отвечал) — полоски серые
@@ -110,6 +115,7 @@ namespace ClaudeNotifier.Ui {
             anim.Interval = 33;
             warm.Tick += delegate { try { WarmTick(); } catch (Exception e) { warm.Stop(); NotchHost.Report(e); } };
             anim.Tick += delegate { try { AnimTick(); } catch (Exception e) { NotchHost.Report(e); } };
+            peekTimer.Tick += delegate { try { EndPeek(); } catch (Exception e) { peekTimer.Stop(); NotchHost.Report(e); } };
             ApplyTheme(Theme.Create(true));
         }
 
@@ -126,10 +132,24 @@ namespace ClaudeNotifier.Ui {
                 bool away = Away;
                 int want = Paused || away ? 1000 : Expanded && (DateTime.UtcNow - lastMove).TotalSeconds < 3 ? 25 : busyInterval;
                 if (anim.Interval != want) anim.Interval = want;
+                SetAbsent(Paused || away);   // ушли — копим события; вернулись — сводка
                 if (Paused || away) { wasAway = true; return; }
                 if (wasAway) { wasAway = false; Invalidate(); return; }
                 // Двигаются только персонажи: перерисовываем их места, а не всю шторку (текст, кнопки, списки).
                 if (!painted) { Invalidate(); return; }
+                // Внимание: свечение и бегущая строка меняются каждый кадр — свёрнутую (она маленькая) целиком;
+                // главный маскот вырос — свёрнутой нужна другая высота.
+                if (!Expanded && Attention) {
+                    bool grown = Grown;
+                    if (grown != grownShown) { grownShown = grown; RaiseCollapsedResize(); }
+                    if (GlowItem() != null || PeekActive) { Invalidate(); return; }
+                }
+                // Загрузка ПК: замер нужен, пока показатели видны; новый замер — перерисовать только их.
+                if (ShowStats && !Expanded) {
+                    SysStats.Want();
+                    int v = System.Threading.Thread.VolatileRead(ref SysStats.Version);
+                    if (v != statsShown && statsRect.Width > 0) { statsShown = v; Invalidate(Rectangle.Inflate(statsRect, 2, 2)); }
+                }
                 foreach (RectangleF fr in faceRects) {
                     RectangleF big = RectangleF.Inflate(fr, fr.Width * 0.35f + 2, fr.Height * 0.25f + 2);
                     Invalidate(Rectangle.Intersect(ClientRectangle, Rectangle.Round(big)));
@@ -164,6 +184,7 @@ namespace ClaudeNotifier.Ui {
             if (list != null) items.AddRange(list);
             if (Selected != null && Selected.Id != SelectedId) SelectedId = Selected.Id;
             TrackMoods();
+            TrackAttention();
             UpdateTimer();
             Invalidate();
             ScheduleWarm();
@@ -288,7 +309,20 @@ namespace ClaudeNotifier.Ui {
             faceRects.Add(fr);
             if (it == null) { Mascot.Paint(g, r, "none", T, 0, Animate, null); return; }
             int seed = (it.Id.GetHashCode() & 0x7fff) % 97;
-            Mascot.Paint(g, r, it.State, T, seed, Animate, MoodFor(it, r, look), it.Device);
+            CatMood md = MoodFor(it, r, look);
+            // Маскот зовёт: раз в CallEverySeconds сеанс, который ждёт вас, подпрыгивает и «стучит» по шторке
+            // (дрожь в стороны), с выражением «Ага!». Только в свёрнутой и только если анимации включены.
+            if (!Expanded && Attention && Animate && NeedsYou(it)) {
+                double age = WaitAge(it), ph = (age + seed * 0.37) % CallEverySeconds;
+                if (age > 3 && ph < 1.4) {
+                    float k = (float)(ph / 1.4);
+                    float shake = (float)Math.Sin(ph * Math.PI * 12) * theme.S(2.5f) * (1 - k);
+                    float hop = (float)Math.Abs(Math.Sin(ph * Math.PI * 2.2)) * r.Height * 0.10f;
+                    r.Offset(shake, -hop);
+                    md.AhaAge = (float)(ph % 0.8);
+                }
+            }
+            Mascot.Paint(g, r, it.State, T, seed, Animate, md, it.Device);
         }
 
         public void SetRows(string page, NotchRow[] rows) { pages[page] = rows ?? new NotchRow[0]; Invalidate(); }
@@ -314,7 +348,7 @@ namespace ClaudeNotifier.Ui {
 
         protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdateTimer(); }
         protected override void Dispose(bool disposing) {
-            if (disposing) { anim.Dispose(); warm.Dispose(); if (tipBox != null) tipBox.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall); }
+            if (disposing) { anim.Dispose(); warm.Dispose(); peekTimer.Dispose(); if (tipBox != null) tipBox.Dispose(); Fonts.Free(fTitle, fBody, fSmall, fBold, fHeader, fIcon, fIconSmall); }
             base.Dispose(disposing);
         }
 
@@ -324,7 +358,131 @@ namespace ClaudeNotifier.Ui {
 
         NotchItem Main() {
             foreach (NotchItem it in items) if (it.State == "permission" || it.State == "error") return it;
+            foreach (NotchItem it in items) if (NeedsYou(it)) return it;   // Claude что-то спросил
             return Selected;
+        }
+
+        // --- Внимание к шторке: «выдох» с текстом, свечение по краю, маскот зовёт, растёт, бегущая строка
+        // с вопросом, сводка, когда вы вернулись. Всё — только в свёрнутой шторке; выключается настройкой. ---
+        public bool Attention = true;
+        public event EventHandler CollapsedResize;   // свёрнутой нужен другой размер (выдох, рост, место под вопрос)
+        public static double GrowAfterSeconds = 120, GlowFullSeconds = 300, CallEverySeconds = 24;   // тесты уменьшают
+        readonly Timer peekTimer = new Timer();
+        string peekText = "";
+        NotchItem peekItem;
+        int peekWidth;
+        readonly Dictionary<string, long> prevWait = new Dictionary<string, long>();
+        readonly Dictionary<string, string> prevState = new Dictionary<string, string>();
+        readonly HashSet<string> awayChanged = new HashSet<string>();
+        bool attentionPrimed, absent, grownShown, askShown;
+
+        static bool NeedsYou(NotchItem it) { return it != null && it.WaitSince > 0; }
+        static double WaitAge(NotchItem it) { return it == null || it.WaitSince <= 0 ? 0 : Math.Max(0, (DateTime.UtcNow.Ticks - it.WaitSince) / 1e7); }
+
+        public bool PeekActive { get { return peekText.Length > 0; } }
+        public string PeekText { get { return peekText; } }
+        public int PeekWidth { get { return peekWidth; } }
+        // Главный сеанс ждёт дольше GrowAfterSeconds — его маскот крупнее, шторка выше.
+        public bool Grown { get { NotchItem m = Main(); return Attention && NeedsYou(m) && WaitAge(m) >= GrowAfterSeconds; } }
+        float GrowK(NotchItem m) { return Attention && NeedsYou(m) ? (float)Math.Max(0, Math.Min(1, (WaitAge(m) - GrowAfterSeconds) / GrowAfterSeconds)) : 0f; }
+        // Есть вопрос для бегущей строки — посередине свёрнутой нужно место.
+        public bool HasAsk { get { if (!Attention) return false; foreach (NotchItem it in items) if (NeedsYou(it) && !string.IsNullOrEmpty(it.Ask)) return true; return false; } }
+        NotchItem GlowItem() {
+            NotchItem best = null; int rank = 0;
+            foreach (NotchItem it in items) {
+                if (!NeedsYou(it)) continue;
+                int r = it.State == "error" ? 3 : it.State == "permission" ? 2 : 1;
+                if (r > rank) { rank = r; best = it; }
+            }
+            return best;
+        }
+
+        void RaiseCollapsedResize() { EventHandler h = CollapsedResize; if (h != null) h(this, EventArgs.Empty); }
+
+        static string Lower(string s) { return string.IsNullOrEmpty(s) ? s : char.ToLower(s[0]) + s.Substring(1); }
+        static string Plural(int n, string one, string few, string many) {
+            int m10 = n % 10, m100 = n % 100;
+            if (m10 == 1 && m100 != 11) return one;
+            if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+            return many;
+        }
+
+        string PeekLine(NotchItem it) {
+            string what = it.State == "permission" ? "нужно разрешение" : it.State == "error" ? "ошибка" : "ждёт ответа";
+            string who = string.IsNullOrEmpty(it.Device) ? it.Title : it.Meta + " · " + it.Title;
+            return who + " — " + what;
+        }
+
+        // Новые «ждёт вас» → «выдох»; пока вас нет — запомнить для сводки. Первый вызов только запоминает.
+        void TrackAttention() {
+            NotchItem fresh = null;
+            HashSet<string> alive = new HashSet<string>();
+            foreach (NotchItem it in items) {
+                alive.Add(it.Id);
+                long pw; bool known = prevWait.TryGetValue(it.Id, out pw);
+                string ps; prevState.TryGetValue(it.Id, out ps);
+                bool isNew = NeedsYou(it) && (!known || pw != it.WaitSince);
+                bool done = ps == "working" && it.State == "waiting";
+                if (attentionPrimed && (isNew || done) && absent) awayChanged.Add(it.Id);
+                if (attentionPrimed && isNew && !absent && fresh == null) fresh = it;
+                prevWait[it.Id] = it.WaitSince; prevState[it.Id] = it.State;
+            }
+            foreach (string k in new List<string>(prevWait.Keys)) if (!alive.Contains(k)) { prevWait.Remove(k); prevState.Remove(k); }
+            attentionPrimed = true;
+            if (fresh != null && Attention && !Expanded) StartPeek(PeekLine(fresh), fresh, 2200);
+            bool ask = HasAsk;
+            if (ask != askShown) { askShown = ask; RaiseCollapsedResize(); }
+        }
+
+        public void StartPeek(string text, NotchItem item, int ms) {
+            if (string.IsNullOrEmpty(text)) return;
+            peekText = text; peekItem = item;
+            if (item != null && !Expanded) SelectedId = item.Id;   // щелчок по шторке — сразу этот сеанс
+            int fw = (int)Math.Round(Math.Min(theme.S(38) * 0.8f, theme.S(30)) * 1.3f);
+            peekWidth = theme.S(16) + fw + theme.S(14) + TextRenderer.MeasureText(text, fBold).Width + theme.S(22);
+            if (peekTimer.Enabled) peekTimer.Stop();
+            peekTimer.Interval = Math.Max(300, ms);
+            peekTimer.Start();
+            RaiseCollapsedResize();
+            Invalidate();
+        }
+
+        void EndPeek() {
+            peekTimer.Stop();
+            if (!PeekActive) return;
+            peekText = ""; peekItem = null;
+            RaiseCollapsedResize();
+            Invalidate();
+        }
+
+        // Вы вернулись — что произошло, пока вас не было: «2 готово, 1 ждёт разрешения».
+        void ShowAwaySummary() {
+            int done = 0, perm = 0, err = 0, ask = 0;
+            NotchItem first = null;
+            foreach (NotchItem it in items) {
+                if (!awayChanged.Contains(it.Id)) continue;
+                if (it.State == "permission") perm++;
+                else if (it.State == "error") err++;
+                else if (it.State == "waiting" && NeedsYou(it)) ask++;
+                else if (it.State == "waiting") done++;
+                else continue;
+                if (first == null && NeedsYou(it)) first = it;
+            }
+            awayChanged.Clear();
+            List<string> parts = new List<string>();
+            if (done > 0) parts.Add(done + " готово");
+            if (ask > 0) parts.Add(ask + " " + Plural(ask, "ждёт ответа", "ждут ответа", "ждут ответа"));
+            if (perm > 0) parts.Add(perm + " " + Plural(perm, "ждёт разрешения", "ждут разрешения", "ждут разрешения"));
+            if (err > 0) parts.Add(err + " " + Plural(err, "ошибка", "ошибки", "ошибок"));
+            if (parts.Count == 0 || !Attention || Expanded) return;
+            StartPeek("Пока вас не было: " + string.Join(", ", parts.ToArray()), first, 6000);
+        }
+
+        // Для тестов и трея: отметить уход / возвращение (обычно это делает таймер по простою и блокировке).
+        public void SetAbsent(bool value) {
+            if (value == absent) return;
+            absent = value;
+            if (value) awayChanged.Clear(); else ShowAwaySummary();
         }
 
         void Hit(Rectangle r, string id) { r.Offset(origin); hits.Add(new KeyValuePair<Rectangle, string>(r, id)); }
@@ -441,16 +599,41 @@ namespace ClaudeNotifier.Ui {
         void PaintCollapsed(Graphics g) {
             Hit(new Rectangle(0, 0, lay.Width, lay.Height), "expand");
             int h = lay.Height, pad = theme.S(16);
+            // «Выдох»: на пару секунд — маскот и строка «MacBook · проект — нужно разрешение» (или сводка), без остального.
+            if (PeekActive) {
+                NotchItem pm = peekItem ?? Main();
+                float ph = Math.Min(h * 0.8f, theme.S(30)), pw = ph * 1.3f;
+                PaintFace(g, new RectangleF(pad, (h - ph) / 2, pw, ph), pm, false);
+                int tx = pad + (int)pw + theme.S(12);
+                TextRenderer.DrawText(g, peekText, fBold, new Rectangle(tx, 0, Math.Max(0, lay.Width - tx - theme.S(14)), h), Color.White,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                PaintGlow(g, h);
+                return;
+            }
             NotchItem main = Main();
-            float fh = Math.Min(h * 0.8f, theme.S(30)), fw = fh * 1.3f;
+            // Маскот растёт, пока сеанс ждёт вас дольше GrowAfterSeconds: «выходит вперёд» (шторка при этом выше).
+            float grow = GrowK(main);
+            float fh = Math.Min(h * 0.86f, theme.S(30) * (1f + 0.35f * grow)), fw = fh * 1.3f;
             PaintFace(g, new RectangleF(pad, (h - fh) / 2, fw, fh), main, false);
             float sh = Math.Min(h * 0.6f, theme.S(23)), sw = sh * 1.3f, gap = theme.S(2);
+            // Посередине — загрузка ПК или бегущая строка с вопросом; маленькие персонажи справа на них не заходят (лишние — «+N»).
+            float statsRight = 0;
+            statsRect = Rectangle.Empty;
+            NotchItem asker = TickerItem();
+            Rectangle sr = Rectangle.Empty;
+            if (asker != null) sr = PaintTicker(g, h, pad + (int)fw + theme.S(12), asker);
+            else if (ShowStats) sr = PaintStats(g, h);
+            if (sr.Width > 0) {
+                statsRight = sr.Right + theme.S(10);
+                statsRect = new Rectangle(sr.X + origin.X, sr.Y + origin.Y, sr.Width, sr.Height);
+            }
+            bool middle = sr.Width > 0;
             float x = lay.Width - pad;
             int shown = 0, rest = 0;
             for (int i = items.Count - 1; i >= 0; i--) {
                 NotchItem it = items[i];
                 if (main != null && it.Id == main.Id) continue;
-                if (shown >= 5) { rest++; continue; }
+                if (shown >= 5 || (middle && x - sw < statsRight + theme.S(22))) { rest++; continue; }
                 x -= sw;
                 PaintFace(g, new RectangleF(x, (h - sh) / 2, sw, sh), it, false);
                 x -= gap; shown++;
@@ -460,6 +643,87 @@ namespace ClaudeNotifier.Ui {
                 int mw = TextRenderer.MeasureText(more, fSmall).Width;
                 TextRenderer.DrawText(g, more, fSmall, new Rectangle((int)x - mw, 0, mw, h), theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             }
+            PaintGlow(g, h);
+        }
+
+        // Бегущая строка: вместо загрузки ПК на 5 с из каждых 15 — вопрос Claude («Закоммитить и отправить?»).
+        // Без загрузки ПК — вопрос виден всё время.
+        NotchItem TickerItem() {
+            if (!Attention) return null;
+            NotchItem best = null;
+            foreach (NotchItem it in items) if (NeedsYou(it) && !string.IsNullOrEmpty(it.Ask)) { best = it; break; }
+            if (best == null) return null;
+            if (ShowStats && Animate && (T % 15f) >= 5f) return null;
+            return best;
+        }
+
+        Rectangle PaintTicker(Graphics g, int h, int left, NotchItem it) {
+            int right = lay.Width - theme.S(16) - theme.S(70);
+            int avail = Math.Max(theme.S(60), right - left);
+            int tw = Math.Min(avail, TextRenderer.MeasureText(it.Ask, fBold).Width);
+            int x = Math.Max(left, (lay.Width - tw) / 2);
+            if (x + tw > right) x = Math.Max(left, right - tw);
+            // Плавно проявляется и гаснет в начале и в конце показа.
+            float ph = T % 15f, fade = 1f;
+            if (ShowStats && Animate) fade = Math.Min(1f, Math.Min(ph / 0.35f, (5f - ph) / 0.35f));
+            Color c = Draw.Mix(Theme.Hex(0x1A1A1C), Color.White, Math.Max(0, Math.Min(1, fade)));
+            Rectangle r = new Rectangle(x, 0, tw, h);
+            TextRenderer.DrawText(g, it.Ask, fBold, r, c, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            return r;
+        }
+
+        // Свечение по краю свёрнутой шторки цвета статуса того, кто ждёт: янтарное — разрешение, красное — ошибка,
+        // голубое — вопрос. Пульсирует; первые минуты едва заметно, к GlowFullSeconds — в полную силу.
+        void PaintGlow(Graphics g, int h) {
+            if (!Attention) return;
+            NotchItem gi = GlowItem();
+            if (gi == null) return;
+            float amp = 0.3f + 0.7f * (float)Math.Max(0, Math.Min(1, WaitAge(gi) / GlowFullSeconds));
+            float pulse = Animate ? 0.5f + 0.5f * (float)Math.Sin(T * Math.PI * 2 / 1.8) : 0.6f;
+            Color c = gi.State == "error" ? Theme.Hex(0xFF453A) : gi.State == "permission" ? Theme.Hex(0xFF9F0A) : Theme.Hex(0x64D2FF);
+            int a = (int)(255 * amp * (0.25f + 0.75f * pulse));
+            float R = Math.Max(4, CornerRadius);
+            SmoothingMode sm = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            // Верх прямоугольника — над шторкой (у края экрана): видны только бока и низ со скруглениями.
+            using (GraphicsPath p = Draw.Round(new RectangleF(1.5f, -R - 2, lay.Width - 3, h + R + 0.5f), R)) {
+                using (Pen soft = new Pen(Color.FromArgb(Math.Max(0, Math.Min(255, a / 4)), c), theme.S(6))) g.DrawPath(soft, p);
+                using (Pen line = new Pen(Color.FromArgb(Math.Max(0, Math.Min(255, a)), c), Math.Max(1.5f, theme.S(2)))) g.DrawPath(line, p);
+            }
+            g.SmoothingMode = sm;
+        }
+
+        // Загрузка ПК по центру свёрнутой шторки: три колонки «значение / подпись» — ЦП, ГП, ОЗУ. Высокая загрузка —
+        // янтарным (от 70 %) или красным (от 90 %); нет данных — «—». Возвращает занятый прямоугольник.
+        Rectangle PaintStats(Graphics g, int h) {
+            float cpu = SysStats.Cpu, gpu = SysStats.Gpu, mem = SysStats.MemUsedGb, memTotal = SysStats.MemTotalGb;
+            string[] vals = {
+                cpu < 0 ? "—" : ((int)Math.Round(cpu)) + " %",
+                gpu < 0 ? "—" : ((int)Math.Round(gpu)) + " %",
+                mem < 0 ? "—" : mem.ToString(mem < 100 ? "0.0" : "0", System.Globalization.CultureInfo.GetCultureInfo("ru-RU")) + " ГБ"
+            };
+            string[] labels = { "ЦП", "ГП", "ОЗУ" };
+            float memPct = mem >= 0 && memTotal > 0 ? mem / memTotal * 100f : -1;
+            float[] load = { cpu, gpu, memPct };
+            int colGap = theme.S(14);
+            int[] w = new int[3];
+            int total = 0;
+            for (int i = 0; i < 3; i++) {
+                w[i] = Math.Max(TextRenderer.MeasureText(vals[i], fBold).Width, TextRenderer.MeasureText(labels[i], fSmall).Width);
+                total += w[i] + (i > 0 ? colGap : 0);
+            }
+            int x = (lay.Width - total) / 2;
+            int vh = theme.S(16), lh = theme.S(13);
+            int y = (h - vh - lh) / 2;
+            int x0 = x;
+            for (int i = 0; i < 3; i++) {
+                Color vc = load[i] >= 90 ? Theme.Hex(0xFF6961) : load[i] >= 70 ? Theme.Hex(0xFFB340) : Theme.Hex(0xE5E5EA);
+                if (load[i] < 0) vc = theme.Muted;
+                TextRenderer.DrawText(g, vals[i], fBold, new Rectangle(x, y, w[i], vh), vc, TextFormatFlags.HorizontalCenter | TextFormatFlags.Bottom | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                TextRenderer.DrawText(g, labels[i], fSmall, new Rectangle(x, y + vh, w[i], lh), theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                x += w[i] + colGap;
+            }
+            return new Rectangle(x0, y, total, vh + lh);
         }
 
         // Полоска лимита: «5 часов · сброс в 14:05» слева, «осталось 62 %» справа, под ними — полоса остатка.
@@ -1094,6 +1358,12 @@ namespace ClaudeNotifier.Ui {
                 try { Step(); } catch (Exception e) { NotchHost.Report(e); try { StopSpring(); } catch { running = false; } }
             };
             View.PageChanged += delegate { if (View.Expanded) SetTargetSize(SizeFor(), true); };
+            // Свёрнутой нужен другой размер (выдох, рост): пружиной, если окно видно; невидимому — сразу.
+            View.CollapsedResize += delegate {
+                if (View.Expanded) return;
+                View.LayoutCollapsed = CollapsedSize();
+                SetTargetSize(SizeFor(), Visible && Motion.Enabled);
+            };
             View.Local += delegate (object s, NotchEventArgs e) { SetExpanded(e.Kind == "expand", e.Kind == "expand" ? "home" : null); };
             // Щелчок мимо раскрытой шторки сворачивает её (окно шторки фокус не берёт — проверяем кнопки мыши).
             outside.Interval = 80;
@@ -1195,10 +1465,19 @@ namespace ClaudeNotifier.Ui {
             PaintSum += tPaint; MaskSum += tMask - tPaint; ComposeSum += tCompose - tMask; PushSum += ms - tCompose;
         }
 
+        // Свёрнутая полоска; с загрузкой ПК посередине — шире.
+        // «Выдох» — шире, по длине строки; главный маскот вырос (долго ждёт вас) — выше.
+        Size CollapsedSize() {
+            Theme t = View.Theme;
+            int w = t.S(View.ShowStats || View.HasAsk ? 400 : 240), h = t.S(View.Grown ? 48 : 38);
+            if (View.PeekActive) w = Math.Max(w, View.PeekWidth);
+            return new Size(Math.Min(w, Math.Max(t.S(240), ScreenBounds.Width - t.S(40))), h);
+        }
+
         // Размер по состоянию: свёрнута — полоска; «Главная» и «Ответ» — панель; остальные страницы — выше (до 600).
         public Size SizeFor() {
             Theme t = View.Theme;
-            if (!View.Expanded) return new Size(t.S(240), t.S(38));
+            if (!View.Expanded) return CollapsedSize();
             if (View.Page == "home") return new Size(t.S(760), t.S(232));
             int top = t.S(10) + t.S(34) + t.S(12) + t.S(14);
             int content = View.Page == "answer" ? View.AnswerContentHeight(t.S(760) - t.S(28)) : View.ContentHeight(View.Page, t.S(760) - t.S(28));
@@ -1217,7 +1496,7 @@ namespace ClaudeNotifier.Ui {
             if (expanded) { expandedAt = DateTime.UtcNow; if (!string.IsNullOrEmpty(page)) View.Page = page; }
             Size s = SizeFor();
             Theme t = View.Theme;
-            View.LayoutCollapsed = new Size(t.S(240), t.S(38));
+            View.LayoutCollapsed = CollapsedSize();
             if (expanded) View.LayoutExpanded = s;
             if (changed && Visible && Motion.Enabled) View.Morphing = true;
             if (expanded) RaiseToTop();
@@ -1440,6 +1719,23 @@ namespace ClaudeNotifier.Ui {
         }
 
         public static void SetItems(NotchItem[] items) { Post(delegate (NotchForm f) { f.View.SetItems(items); }); }
+        // Привлекать внимание (настройка «Привлекать внимание»): «выдох», свечение, зов, рост, бегущая строка, сводка.
+        public static void SetAttention(bool on) {
+            Post(delegate (NotchForm f) {
+                if (f.View.Attention == on) return;
+                f.View.Attention = on;
+                f.SetExpanded(f.View.Expanded, null);
+                f.View.Invalidate();
+            });
+        }
+        // Загрузка ПК посередине свёрнутой шторки (настройка «Загрузка ПК»): ширина свёрнутой меняется пружиной.
+        public static void SetShowStats(bool show) {
+            Post(delegate (NotchForm f) {
+                if (f.View.ShowStats == show) return;
+                f.View.ShowStats = show;
+                f.SetExpanded(f.View.Expanded, null);
+            });
+        }
         public static void SetRows(string page, NotchRow[] rows) { Post(delegate (NotchForm f) { f.View.SetRows(page, rows); f.Refit(); }); }
         public static void SetAnswer(string id, string text) { Post(delegate (NotchForm f) { f.View.SetAnswer(id, text); f.Refit(); }); }
         public static void SetLimits(float left5, string detail5, float leftWeek, string detailWeek, bool stale, bool soundOff) {

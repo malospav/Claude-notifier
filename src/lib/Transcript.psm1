@@ -426,6 +426,68 @@ function Get-NotifierLastAnswer {
     return ''
 }
 
+function Test-NotifierAnswerAsks {
+    <#
+    .SYNOPSIS
+    Ждёт ли ответ Claude ответа от вас: в последних двух непустых строках есть вопрос («…?»). Знак «?» в ссылках
+    и в `коде` не считается. Нужно, чтобы кнопки быстрого ответа («Продолжай», «Да», «Нет») не висели
+    под ответами, в которых Claude ничего не спрашивал.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    return ((Get-NotifierAnswerQuestion $Text) -ne '')
+}
+
+function Get-NotifierAnswerQuestion {
+    <#
+    .SYNOPSIS
+    Вопрос из конца ответа Claude — последняя из двух последних непустых строк, где есть «?» (без ссылок и `кода`),
+    не длиннее MaxLength. Нет вопроса — ''. По нему шторка показывает бегущую строку «Закоммитить и отправить?».
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text, [int]$MaxLength = 90)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $lines = @($Text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    $last = @($lines | Select-Object -Last 2)
+    for ($i = $last.Count - 1; $i -ge 0; $i--) {
+        $l = [string]$last[$i]
+        $clean = ($l -replace 'https?://\S+', '' -replace '`[^`]*`', '').Trim()
+        if ($clean -notmatch '\?') { continue }
+        $q = ($l -replace '^\s*[-*•>]\s+', '' -replace '\*\*', '').Trim()
+        if ($q.Length -gt $MaxLength) { $q = $q.Substring(0, $MaxLength - 1).TrimEnd() + [char]0x2026 }
+        return $q
+    }
+    return ''
+}
+
+$script:AskCache = @{}
+
+function Get-NotifierSessionQuestion {
+    <#
+    .SYNOPSIS
+    Вопрос в конце последнего ответа сеанса — по журналу (transcript); '' — Claude ничего не спросил. Кешируется
+    по размеру и времени изменения журнала. Журнала нет (сеанс Mac) — по Fallback (начало ответа из события).
+    #>
+    param([Parameter(Mandatory = $true)]$Session, [AllowEmptyString()][AllowNull()][string]$Fallback = '')
+    $tp = ''
+    if ($Session.PSObject.Properties['transcript']) { $tp = [string]$Session.transcript }
+    if ($tp -ne '' -and [IO.File]::Exists($tp)) {
+        $fi = New-Object IO.FileInfo $tp
+        $key = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+        $c = $script:AskCache[$tp]
+        if ($c -and $c.Key -eq $key) { return $c.Value }
+        $v = Get-NotifierAnswerQuestion (Get-NotifierLastAnswer -Path $tp -TailBytes 262144)
+        if ($script:AskCache.Count -gt 200) { $script:AskCache.Clear() }
+        $script:AskCache[$tp] = @{ Key = $key; Value = $v }
+        return $v
+    }
+    return (Get-NotifierAnswerQuestion $Fallback)
+}
+
+function Test-NotifierSessionAsks {
+    <# .SYNOPSIS Спрашивает ли Claude что-то в последнем ответе сеанса (см. Get-NotifierSessionQuestion). #>
+    param([Parameter(Mandatory = $true)]$Session, [AllowEmptyString()][AllowNull()][string]$Fallback = '')
+    return ((Get-NotifierSessionQuestion -Session $Session -Fallback $Fallback) -ne '')
+}
+
 function Format-NotifierApiError {
     <# .SYNOPSIS Текст ошибки API из журнала → понятная фраза. #>
     param([AllowEmptyString()][string]$Text)
@@ -437,4 +499,4 @@ function Format-NotifierApiError {
     return $Text
 }
 
-Export-ModuleMember -Function Get-NotifierLastAnswer, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError
+Export-ModuleMember -Function Get-NotifierLastAnswer, Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError

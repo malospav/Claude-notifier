@@ -51,7 +51,7 @@ function Get-NotifierDefaultConfig {
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
-        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{} }   # mascot — sphynx | flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'sphynx'; mascots = @{}; stats = $true; attention = $true }   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — sphynx | flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
     }
 }
@@ -269,6 +269,16 @@ function Get-NotifierConfig {
     if ($notch.found -and $notch.value -is [System.Management.Automation.PSCustomObject]) {
         $scr = Get-JsonProperty $notch.value 'screen'
         if ($scr.found -and $scr.value -is [string]) { $config.notch.screen = $scr.value }
+        $att = Get-JsonProperty $notch.value 'attention'
+        if ($att.found) {
+            if ($att.value -is [bool]) { $config.notch.attention = $att.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.attention' должно быть true/false" -DataRoot $DataRoot }
+        }
+        $stats = Get-JsonProperty $notch.value 'stats'
+        if ($stats.found) {
+            if ($stats.value -is [bool]) { $config.notch.stats = $stats.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.stats' должно быть true/false" -DataRoot $DataRoot }
+        }
         $pos = Get-JsonProperty $notch.value 'position'
         if ($pos.found) {
             if (@('left', 'center', 'right') -contains [string]$pos.value) { $config.notch.position = [string]$pos.value }

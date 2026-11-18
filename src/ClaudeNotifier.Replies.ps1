@@ -82,7 +82,8 @@ function Add-NotifierCardRequest {
         $Card.Tag = @{ Session = $Session; Request = $req }
         return
     }
-    if ($script:Pending.Replies.ContainsKey($sid) -and [string]$Session.state -eq 'waiting') {
+    # Быстрый ответ — только если Claude в конце ответа что-то спросил; иначе кнопки «Да / Нет» ни к чему.
+    if ($script:Pending.Replies.ContainsKey($sid) -and [string]$Session.state -eq 'waiting' -and (Test-NotifierSessionAsks -Session $Session -Fallback ([string]$Session.preview))) {
         $Card.RequestTitle = 'Быстрый ответ'
         $acts = @()
         $i = 0
@@ -187,7 +188,7 @@ function Get-NotifierToastButtons {
             }
         }
     }
-    if ([string]$Event.type -eq 'done' -and $Config.quickReplies.enabled) {
+    if ([string]$Event.type -eq 'done' -and $Config.quickReplies.enabled -and (Test-NotifierSessionAsks -Session $Event -Fallback ([string]$Event.preview))) {
         $out = @(); $i = 0
         foreach ($q in $script:QuickReplies) { $out += (& $mk $q '' "reply:$i"); $i++ }
         return $out

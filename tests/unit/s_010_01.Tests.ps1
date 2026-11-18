@@ -212,6 +212,15 @@ Describe 's_010_01 · трей: запросы в карточках' {
     It 'быстрый ответ: кнопки у сеанса, который ждёт; ответ записывается, сеанс работает' {
         [void](New-NotifierReplyWait -SessionId 'w' -Minutes 5 -DataRoot $script:TrayDataRoot)
         [void](Update-NotifierPending)
+        # Claude ничего не спросил — кнопок быстрого ответа нет (раньше «Да / Нет» висели под любым «Готово»)
+        $all = @(Get-NotifierSessions -DataRoot $script:TrayDataRoot)
+        $w = @($all | Where-Object { $_.session_id -eq 'w' })[0]
+        $w | Add-Member -NotePropertyName preview -NotePropertyValue 'Готово, всё закоммичено.' -Force
+        $card = ConvertTo-NotifierSessionCard -Session $w
+        @($card.Actions | Where-Object { $_ -like 'reply*' }).Count | Should Be 0
+        # Спросил — кнопки есть
+        $w.preview = 'Готово. Закоммитить и отправить?'
+        Save-NotifierSessions -Sessions $all -DataRoot $script:TrayDataRoot
         $card = ConvertTo-NotifierSessionCard -Session (@(Get-NotifierSessions -DataRoot $script:TrayDataRoot) | Where-Object { $_.session_id -eq 'w' })
         $card.RequestTitle | Should Be 'Быстрый ответ'
         ($card.Actions -join ';') | Should Be 'reply:0|Продолжай|secondary;reply:1|Да|secondary;reply:2|Нет|secondary;reply-custom|Ответить…|primary'
@@ -260,7 +269,7 @@ Describe 's_010_01 · веб-API ответов' {
         $now = [DateTime]::UtcNow.ToString('o')
         Save-NotifierSessions -DataRoot $root -Sessions @(
             [pscustomobject]@{ session_id = 'p'; project = 'proj'; origin = 'desktop'; device = ''; state = 'permission'; since = $now; updated = $now; preview = ''; window = $null },
-            [pscustomobject]@{ session_id = 'w'; project = 'web'; origin = 'cli'; device = ''; state = 'waiting'; since = $now; updated = $now; preview = ''; window = $null })
+            [pscustomobject]@{ session_id = 'w'; project = 'web'; origin = 'cli'; device = ''; state = 'waiting'; since = $now; updated = $now; preview = 'Продолжить?'; window = $null })
         $req = New-NotifierPermissionRequest -HookInput (ConvertFrom-Json (New-PermInput -Sid 'p')) -WaitSeconds 60 -DataRoot $root
         [void](New-NotifierReplyWait -SessionId 'w' -Minutes 5 -DataRoot $root)
         $req1 = @{ Method = 'GET'; Path = '/api/sessions'; Body = ''; Headers = $h; Query = @{}; TooLarge = $false; Remote = 'x' }

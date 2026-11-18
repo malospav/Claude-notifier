@@ -668,6 +668,63 @@ function Update-NotifierUsageViews {
     }
 }
 
+function Get-NotifierAppScreen {
+    <#
+    .SYNOPSIS
+    Монитор, где сейчас приложение: шторки (если она работает), иначе окна «Сеансы» (если открыто), иначе тот,
+    где курсор. Сюда открываются диалоги и окна приложения.
+    #>
+    try {
+        if (Test-NotifierNotchActive) { return (Get-NotifierNotchScreen -Config (Get-NotifierConfig -DataRoot $script:TrayDataRoot)) }
+    }
+    catch { }
+    if ($script:SessionsForm -and -not $script:SessionsForm.IsDisposed -and $script:SessionsForm.Visible) { return [System.Windows.Forms.Screen]::FromControl($script:SessionsForm) }
+    return [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
+}
+
+function Set-NotifierFormPlacement {
+    <#
+    .SYNOPSIS
+    Где открыть окно (при Load, размер уже известен): над видимым окном-владельцем, иначе по центру монитора
+    приложения (Get-NotifierAppScreen). Окно не выходит за рабочую область монитора.
+    #>
+    param([Parameter(Mandatory = $true)][System.Windows.Forms.Form]$Form, $Screen = $null)
+    $o = $Form.Owner
+    if ($o -and -not $o.IsDisposed -and $o.Visible -and $o.WindowState -ne [System.Windows.Forms.FormWindowState]::Minimized) {
+        $wa = [System.Windows.Forms.Screen]::FromControl($o).WorkingArea
+        $cx = $o.Left + ($o.Width - $Form.Width) / 2; $cy = $o.Top + ($o.Height - $Form.Height) / 2
+    }
+    else {
+        if ($null -eq $Screen) { $Screen = Get-NotifierAppScreen }
+        $wa = $Screen.WorkingArea
+        $cx = $wa.X + ($wa.Width - $Form.Width) / 2; $cy = $wa.Y + ($wa.Height - $Form.Height) / 3   # чуть выше центра, как системные диалоги
+    }
+    $x = [int][Math]::Max($wa.X, [Math]::Min($cx, $wa.Right - $Form.Width))
+    $y = [int][Math]::Max($wa.Y, [Math]::Min($cy, $wa.Bottom - $Form.Height))
+    $Form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $Form.Location = New-Object System.Drawing.Point($x, $y)
+}
+
+function Show-NotifierFileDialog {
+    <#
+    .SYNOPSIS
+    Окно выбора файла (Open/SaveFileDialog) на мониторе приложения. Без владельца Windows открывает его на основном
+    мониторе, поэтому владелец — невидимое окно по центру монитора приложения (или переданный Owner).
+    #>
+    param([Parameter(Mandatory = $true)][System.Windows.Forms.CommonDialog]$Dialog, [System.Windows.Forms.IWin32Window]$Owner)
+    if ($Owner) { return $Dialog.ShowDialog($Owner) }
+    $wa = (Get-NotifierAppScreen).WorkingArea
+    $anchor = New-Object System.Windows.Forms.Form
+    $anchor.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $anchor.ShowInTaskbar = $false
+    $anchor.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $anchor.Opacity = 0
+    $anchor.TopMost = $true   # выбор файла — поверх шторки
+    $anchor.Bounds = New-Object System.Drawing.Rectangle(($wa.X + [int]($wa.Width / 2) - 1), ($wa.Y + [int]($wa.Height / 3)), 2, 2)
+    try { $anchor.Show(); return $Dialog.ShowDialog($anchor) }
+    finally { $anchor.Dispose() }
+}
+
 function New-NotifierForm {
     <# .SYNOPSIS Окно в цветах темы: фон, заголовок Windows 11 в тон, иконка-точка. #>
     param([Parameter(Mandatory = $true)]$Theme, [AllowEmptyString()][string]$Title = '', [int]$Width = 520, [int]$Height = 600, [switch]$Chrome)
@@ -684,6 +741,8 @@ function New-NotifierForm {
     $f.Font = [ClaudeNotifier.Ui.Fonts]::Text(9.5)
     $f.ClientSize = New-Object System.Drawing.Size($Theme.S($Width), $Theme.S($Height))
     $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    # Окно — там же, где приложение (монитор шторки), а не на основном мониторе (так ставит Windows без видимого владельца).
+    $f.add_Load({ Set-NotifierFormPlacement -Form $this })
     $appIcon = Join-Path $PSScriptRoot 'assets\icon.ico'
     if (Test-Path -LiteralPath $appIcon) { $f.Icon = New-Object System.Drawing.Icon $appIcon }   # иконка приложения в заголовке и на панели задач
     $f.Tag = @{ Theme = $Theme }

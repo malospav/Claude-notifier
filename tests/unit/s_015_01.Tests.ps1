@@ -107,7 +107,7 @@ Describe 's_015_01 · шторка вверху экрана' {
             $f.View.SetItems($items)
             $f.View.SetRows('settings', [ClaudeNotifier.Ui.NotchRow[]]@(Get-NotifierNotchSettingsRows))
             foreach ($state in @(@($false, 'home'), @($true, 'home'), @($true, 'chat'), @($true, 'settings'))) {
-                $f.View.Expanded = $state[0]; $f.View.Page = $state[1]
+                $f.SetExpanded($state[0], $state[1]); $f.View.Page = $state[1]   # как в приложении: размер и фигура шторки — по SetExpanded
                 $sz = $f.SizeFor()
                 $f.ClientSize = $sz
                 $bmp = New-Object System.Drawing.Bitmap $sz.Width, $sz.Height
@@ -220,7 +220,13 @@ Describe 's_015_01 · шторка вверху экрана' {
         New-Item -ItemType Directory $script:TrayDataRoot -Force | Out-Null
         $keys = @(Get-NotifierNotchSettingsRows | ForEach-Object { $_.Key } | Where-Object { $_ })
         foreach ($k in @('event.done', 'sound.done', 'quiet', 'approvals', 'quickReplies', 'showPrompt', 'context', 'stalled', 'remind', 'longTasks', 'inactive', 'hotkey', 'notch.screen', 'notch.position', 'notch', 'autostart', 'data')) { ($keys -contains $k) | Should Be $true }
-        foreach ($k in @('export', 'import')) { ($keys -contains $k) | Should Be $true }
+        foreach ($k in @('export', 'import', 'notch.stats')) { ($keys -contains $k) | Should Be $true }
+        # Загрузка ПК в свёрнутой шторке: по умолчанию включена, тумблер выключает и включает
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.stats | Should Be $true
+        Invoke-NotifierNotchSetting -Key 'notch.stats' | Should Be $false
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.stats | Should Be $false
+        Invoke-NotifierNotchSetting -Key 'notch.stats' | Out-Null
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.stats | Should Be $true
         # Числа, звук, клавиша и расписание — селекты (kind choice)
         foreach ($k in @('sound.done', 'quiet', 'longTasks', 'remind', 'context', 'stalled', 'inactive', 'hotkey', 'notch.screen', 'notch.position', 'mascot:')) {
             @(Get-NotifierNotchSettingsRows | Where-Object { $_.Key -eq $k })[0].Kind | Should Be 'choice'
@@ -595,6 +601,40 @@ Describe 's_015_01 · шторка вверху экрана' {
         [ClaudeNotifier.Ui.Mascot]::Kind = 'whatever'; [ClaudeNotifier.Ui.Mascot]::Kind | Should Be 'sphynx'
     }
 
+    It 'окна и диалоги открываются на мониторе приложения (шторки) или над своим окном-владельцем' {
+        $screens = @([System.Windows.Forms.Screen]::AllScreens)
+        $target = $screens[-1]   # «монитор шторки» — последний (на одном мониторе — он же основной)
+        Mock Test-NotifierNotchActive { $true }
+        Mock Get-NotifierNotchScreen { $target }
+        (Get-NotifierAppScreen).DeviceName | Should Be $target.DeviceName
+        $f = New-Object System.Windows.Forms.Form
+        try {
+            $f.Size = New-Object System.Drawing.Size 300, 200
+            Set-NotifierFormPlacement -Form $f
+            $wa = $target.WorkingArea
+            $f.StartPosition | Should Be ([System.Windows.Forms.FormStartPosition]::Manual)
+            $wa.Contains((New-Object System.Drawing.Rectangle $f.Left, $f.Top, 300, 200)) | Should Be $true
+            [Math]::Abs(($f.Left + 150) - ($wa.X + $wa.Width / 2)) -le 1 | Should Be $true   # по центру по горизонтали
+            # Видимый владелец — окно над ним (по центру владельца)
+            $o = New-Object System.Windows.Forms.Form
+            $o.StartPosition = 'Manual'; $o.ShowInTaskbar = $false
+            $o.Bounds = New-Object System.Drawing.Rectangle ($wa.X + 40), ($wa.Y + 40), 600, 500
+            $o.Show()
+            try {
+                $f.Owner = $o
+                Set-NotifierFormPlacement -Form $f
+                $f.Left | Should Be ($o.Left + 150)
+                $f.Top | Should Be ($o.Top + 150)
+            }
+            finally { $f.Owner = $null; $o.Dispose() }
+        }
+        finally { $f.Dispose() }
+        # Окна приложения получают это при открытии (Load)
+        $d = New-NotifierForm -Theme (Get-NotifierTheme) -Width 200 -Height 100
+        try { $d.ShowInTaskbar = $false; $d.Opacity = 0; $d.Show(); $target.WorkingArea.Contains($d.Location) | Should Be $true }
+        finally { $d.Dispose() }
+    }
+
     It 'шторка не поднимается над своими окнами приложения (выпадающие списки, меню) — они остаются выше' {
         # «Шторка» и «список» — оба поверх всех, список выше и перекрывает шторку, оба окна этого процесса.
         $mk = {
@@ -614,6 +654,60 @@ Describe 's_015_01 · шторка вверху экрана' {
             [ClaudeNotifier.Ui.Native]::BringToTop([IntPtr]::Zero)   # без окна — без ошибки
         }
         finally { $list.Dispose(); $notch.Dispose() }
+    }
+
+    It 'внимание: «выдох» на новый запрос, сводка после отсутствия, рост и бегущая строка; выключается настройкой' {
+        $now = [DateTime]::UtcNow
+        $mk = { param($id, $state, $ago, $ask, $dev)
+            $it = New-Object ClaudeNotifier.Ui.NotchItem; $it.Id = $id; $it.State = $state; $it.Title = 'shop'; $it.Meta = 'MacBook'
+            if ($null -ne $ago) { $it.WaitSince = $now.AddSeconds(-$ago).Ticks }
+            if ($ask) { $it.Ask = $ask }
+            if ($dev) { $it.Device = $dev }
+            $it }
+        $v = New-Object ClaudeNotifier.Ui.NotchView
+        try {
+            # Первый показ — только запомнить: уже ждущие сеансы не «выдыхают» при запуске трея
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@((& $mk 'a' 'permission' 5 'Разрешить Bash?' $null)))
+            $v.PeekActive | Should Be $false
+            # Новый запрос — «выдох» с текстом; у сеанса с Mac — имя устройства впереди
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@((& $mk 'a' 'permission' 5 'Разрешить Bash?' $null), (& $mk 'b' 'permission' 0 '' 'mac1')))
+            $v.PeekActive | Should Be $true
+            $v.PeekText | Should Be 'MacBook · shop — нужно разрешение'
+            ($v.PeekWidth -gt 300) | Should Be $true
+            # Ушли: копим; вернулись — сводка
+            $v.SetAbsent($true)
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@((& $mk 'a' 'permission' 5 'Разрешить Bash?' $null), (& $mk 'b' 'working' $null $null 'mac1'), (& $mk 'c' 'working' $null $null $null)))
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@((& $mk 'a' 'permission' 5 'Разрешить Bash?' $null), (& $mk 'b' 'waiting' $null $null 'mac1'), (& $mk 'c' 'error' 0 $null $null), (& $mk 'd' 'permission' 0 'x' $null)))
+            $v.SetAbsent($false)
+            $v.PeekText | Should Be 'Пока вас не было: 1 готово, 1 ждёт разрешения, 1 ошибка'
+            # Вопрос для бегущей строки — нужно место посередине
+            $v.HasAsk | Should Be $true
+            # Долго ждёт — главный маскот вырос
+            [ClaudeNotifier.Ui.NotchView]::GrowAfterSeconds = 2
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@((& $mk 'a' 'permission' 60 'Разрешить Bash?' $null)))
+            $v.Grown | Should Be $true
+            # Выключено — ни роста, ни бегущей строки
+            $v.Attention = $false
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@((& $mk 'a' 'permission' 60 'Разрешить Bash?' $null), (& $mk 'z' 'error' 0 $null $null)))
+            $v.Grown | Should Be $false
+            $v.HasAsk | Should Be $false
+        }
+        finally { [ClaudeNotifier.Ui.NotchView]::GrowAfterSeconds = 120; $v.Dispose() }
+        # Трей: у сеанса, который ждёт вас, — с какого момента и что спрашивают; у обычного «Готово» — ничего
+        $script:TrayDataRoot = Join-Path $TestDrive 'att'
+        New-Item -ItemType Directory $script:TrayDataRoot -Force | Out-Null
+        $q = New-S 'q' 'waiting'; $q.preview = 'Сделал. Закоммитить?'
+        $d = New-S 'd' 'waiting'; $d.preview = 'Готово, всё работает.'
+        $items = Get-NotifierNotchItems -Sessions @($q, $d)   # уже массив (return , …) — без @(), иначе массив в массиве
+        $iq = @($items | Where-Object { $_.Id -eq 'q' })[0]; $idd = @($items | Where-Object { $_.Id -eq 'd' })[0]
+        $iq.Ask | Should Be 'Сделал. Закоммитить?'
+        ($iq.WaitSince -gt 0) | Should Be $true
+        ([Math]::Abs(([DateTime]::UtcNow.Ticks - $iq.WaitSince) / 1e7) -lt 60) | Should Be $true
+        $idd.WaitSince | Should Be 0
+        # Настройка «Привлекать внимание»: по умолчанию включена, переключается
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.attention | Should Be $true
+        Invoke-NotifierNotchSetting -Key 'notch.attention' | Out-Null
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.attention | Should Be $false
     }
 
     It 'плоские маскоты: список совпадает с настройками и config.json, каждый рисуется во всех состояниях' {

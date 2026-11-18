@@ -110,6 +110,8 @@ function Initialize-NotifierNotch {
         return
     }
     [ClaudeNotifier.Ui.NotchHost]::Start()
+    [ClaudeNotifier.Ui.NotchHost]::SetShowStats([bool]$config.notch.stats)
+    [ClaudeNotifier.Ui.NotchHost]::SetAttention([bool]$config.notch.attention)
     Set-NotifierNotchPlacement -Config $config -Force
 }
 
@@ -167,6 +169,25 @@ function ConvertTo-NotifierNotchItem {
     $it.RequestTitle = $Card.RequestTitle
     if ($it.RequestTitle -eq 'Быстрый ответ') { $it.RequestTitle = '' }   # для быстрого ответа — превью ответа Claude
     $it.Actions = [string[]]@($Card.Actions | Where-Object { ($_ -split '\|')[0] -match $script:NotchReplyActions } | ForEach-Object { $_ -replace '\|Свой ответ…\|', '|Свой…|' -replace '\|Разрешать всегда\|', '|Всегда|' })
+    # Ждёт вас (запрос, ошибка или вопрос в конце ответа) — с какого момента и что спрашивают: по этому шторка
+    # привлекает внимание («выдох», свечение, зов маскота, рост, бегущая строка).
+    $ask = ''
+    $needs = $false
+    if ($it.State -eq 'permission') { $needs = $true; $ask = ("$($Card.RequestTitle) $($Card.RequestDetail)").Trim() }
+    elseif ($it.State -eq 'error') { $needs = $true }
+    elseif ($it.State -eq 'waiting') {
+        $q = ''
+        try { $q = Get-NotifierSessionQuestion -Session $Session -Fallback ([string]$Session.preview) }
+        catch { Write-NotifierLog -Level WARN -Message "notch: вопрос сеанса $($Session.session_id) не прочитан: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+        if ($q) { $needs = $true; $ask = $q }
+    }
+    if ($needs) {
+        $since = [DateTimeOffset]::MinValue
+        if (-not ($Session.PSObject.Properties['since'] -and [DateTimeOffset]::TryParse([string]$Session.since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$since))) { $since = [DateTimeOffset]::UtcNow }
+        $it.WaitSince = $since.UtcDateTime.Ticks
+        if ($ask.Length -gt 90) { $ask = $ask.Substring(0, 89).TrimEnd() + [char]0x2026 }
+        $it.Ask = $ask
+    }
     $it.Tag = $Card
     return $it
 }
@@ -281,6 +302,8 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow header -Title 'Шторка'
     $rows += New-NotifierNotchRow choice 'notch.screen' 'Монитор' 'Экран для шторки' -Value (Get-NotifierSelectLabel 'notch.screen' -Config $c)
     $rows += New-NotifierNotchRow choice 'notch.position' 'Положение' 'У верхнего края' -Value (Get-NotifierSelectLabel 'notch.position' -Config $c)
+    $rows += New-NotifierNotchRow switch 'notch.stats' 'Загрузка ПК' 'ЦП, ГП и память в свёрнутой шторке' -On ([bool]$c.notch.stats)
+    $rows += New-NotifierNotchRow switch 'notch.attention' 'Привлекать внимание' 'Шторка зовёт, когда Claude ждёт вас' -On ([bool]$c.notch.attention)
     $rows += New-NotifierNotchRow choice 'hotkey' 'Горячая клавиша' (Format-NotifierHotKeySubtitle) -Value (Get-NotifierSelectLabel 'hotkey' -Config $c)
     $rows += New-NotifierNotchRow switch 'notch' 'Шторка вместо окна' 'Выключить — прежнее окно «Сеансы»' -On $true
     $rows += New-NotifierNotchRow header -Title 'Маскоты'
@@ -391,7 +414,7 @@ function Show-NotifierSoundMenuAt {
                 $dlg = New-Object System.Windows.Forms.OpenFileDialog
                 $dlg.Filter = 'Звук WAV (*.wav)|*.wav'; $dlg.Title = 'Звук уведомления'
                 [ClaudeNotifier.Ui.NotchHost]::SetHold($true)
-                try { if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Set-NotifierEventOption -Type $script:SoundMenuType -Sound $dlg.FileName } }
+                try { if ((Show-NotifierFileDialog -Dialog $dlg) -eq [System.Windows.Forms.DialogResult]::OK) { Set-NotifierEventOption -Type $script:SoundMenuType -Sound $dlg.FileName } }
                 finally { $dlg.Dispose(); [ClaudeNotifier.Ui.NotchHost]::SetHold($false) }
                 Push-NotifierNotchPage -Page settings
             }),
@@ -421,6 +444,16 @@ function Invoke-NotifierNotchSetting {
         '^event\.(done|permission|error|limit)$' { Set-NotifierEventOption -Type $Matches[1] -Enabled (-not [bool]$c.events[$Matches[1]].enabled) }
         '^(approvals|quickReplies|groups)$' { Set-NotifierOptionValue -Name $Key -Value (-not [bool]$c[$Key].enabled); $script:SessionsDirty = $true }
         '^showPrompt$' { Set-NotifierOptionValue -Name showPrompt -Value (-not [bool]$c.showPrompt) }
+        '^notch\.attention$' {
+            $on = -not [bool]$c.notch.attention
+            Set-NotifierOptionValue -Name notch -Field attention -Value $on
+            if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetAttention($on) }
+        }
+        '^notch\.stats$' {
+            $on = -not [bool]$c.notch.stats
+            Set-NotifierOptionValue -Name notch -Field stats -Value $on
+            if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetShowStats($on) }
+        }
         '^notch$' {
             # Шторку выключили — дальше работает прежнее окно (открываем его на настройках).
             Set-NotifierOptionValue -Name notch -Value $false
@@ -669,7 +702,7 @@ function Set-NotifierSelectValue {
                     $dlg = New-Object System.Windows.Forms.OpenFileDialog
                     $dlg.Filter = 'Звук WAV (*.wav)|*.wav'; $dlg.Title = 'Звук уведомления'
                     if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($true) }
-                    try { if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }; $file = $dlg.FileName }
+                    try { if ((Show-NotifierFileDialog -Dialog $dlg) -ne [System.Windows.Forms.DialogResult]::OK) { return }; $file = $dlg.FileName }
                     finally { $dlg.Dispose(); if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetHold($false) } }
                     Set-NotifierEventOption -Type $type -Sound $file
                 }
@@ -803,7 +836,7 @@ function Export-NotifierSettingsDialog {
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
     $dlg.Filter = 'Настройки claude-notifier (*.json)|*.json'; $dlg.FileName = 'claude-notifier-settings.json'; $dlg.Title = 'Экспорт настроек'
     try {
-        if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        if ((Show-NotifierFileDialog -Dialog $dlg) -ne [System.Windows.Forms.DialogResult]::OK) { return }
         Export-NotifierSettings -Path $dlg.FileName
     }
     catch { [void](Show-NotifierDialog -Owner $null -Title 'Не удалось сохранить настройки' -Message $_.Exception.Message -Primary 'Понятно') }
@@ -814,7 +847,7 @@ function Import-NotifierSettingsDialog {
     $dlg = New-Object System.Windows.Forms.OpenFileDialog
     $dlg.Filter = 'Настройки claude-notifier (*.json)|*.json'; $dlg.Title = 'Импорт настроек'
     try {
-        if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        if ((Show-NotifierFileDialog -Dialog $dlg) -ne [System.Windows.Forms.DialogResult]::OK) { return }
         $err = Import-NotifierSettings -Path $dlg.FileName
         if ($err) { [void](Show-NotifierDialog -Owner $null -Title 'Настройки не загружены' -Message $err -Primary 'Понятно'); return }
         # Применить сразу: маскоты, место шторки, горячая клавиша, списки сеансов.

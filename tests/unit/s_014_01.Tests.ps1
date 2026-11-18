@@ -204,7 +204,18 @@ Describe 's_014_01 · удобство: текст без разметки, та
         $cfg = Get-NotifierDefaultConfig
         $ev = [pscustomobject]@{ type = 'permission'; session_id = 'b'; request_id = '1b2c3d4e-0000-4000-8000-000000000001'; title = 'x'; preview = '' }
         (@(Get-NotifierToastButtons -Event $ev -Config $cfg -Request) | ForEach-Object { "$($_.Content)=$($_.Arguments)" }) -join ';' | Should Be 'Разрешить=cn|b|1b2c3d4e-0000-4000-8000-000000000001|allow;Всегда=cn|b|1b2c3d4e-0000-4000-8000-000000000001|always;Запретить=cn|b|1b2c3d4e-0000-4000-8000-000000000001|deny'
-        @(Get-NotifierToastButtons -Event ([pscustomobject]@{ type = 'done'; session_id = 'b' }) -Config $cfg).Count | Should Be 3
+        @(Get-NotifierToastButtons -Event ([pscustomobject]@{ type = 'done'; session_id = 'b'; preview = 'Сделал. Запустить тесты?' }) -Config $cfg).Count | Should Be 3
+        # Claude ничего не спросил — в уведомлении «Готово» кнопок быстрого ответа нет
+        @(Get-NotifierToastButtons -Event ([pscustomobject]@{ type = 'done'; session_id = 'b'; preview = 'Готово, всё работает.' }) -Config $cfg).Count | Should Be 0
+        # Вопрос определяется по концу ответа в журнале: начало без вопроса, конец — с вопросом
+        $tj = Join-Path $TestDrive 'ask.jsonl'
+        $txt = 'Сделал шторку.\n\nВсё проверил.\n\nЗакоммитить и отправить?'
+        [IO.File]::WriteAllText($tj, '{"type":"assistant","message":{"content":[{"type":"text","text":"' + $txt + '"}]}}' + "`n", (New-Object Text.UTF8Encoding $false))
+        @(Get-NotifierToastButtons -Event ([pscustomobject]@{ type = 'done'; session_id = 'b'; preview = 'Сделал шторку.'; transcript = $tj }) -Config $cfg).Count | Should Be 3
+        Test-NotifierAnswerAsks "Готово.`nСсылка: https://x.example/?a=1" | Should Be $false   # «?» в ссылке — не вопрос
+        Test-NotifierAnswerAsks "Готово.`nЗапустил ``ls -la ?``" | Should Be $false            # и в коде
+        Test-NotifierAnswerAsks "Какой вариант выбрать?`n`n" | Should Be $true
+        Test-NotifierAnswerAsks '' | Should Be $false
         @(Get-NotifierToastButtons -Event ([pscustomobject]@{ type = 'done'; session_id = 'b'; device = 'mac' }) -Config $cfg).Count | Should Be 0
         $cfg.quickReplies.enabled = $false
         @(Get-NotifierToastButtons -Event ([pscustomobject]@{ type = 'done'; session_id = 'b' }) -Config $cfg).Count | Should Be 0
