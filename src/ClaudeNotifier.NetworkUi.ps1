@@ -359,12 +359,12 @@ function Show-NotifierConnectDialog {
     $url = Get-NotifierServerBaseUrl $net
     $t = Get-NotifierTheme
     $w = 400
-    $f = New-NotifierForm -Theme $t -Title '' -Width $w -Height 520
-    $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-    $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.ShowIcon = $false
-    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $f = New-NotifierSheet -Theme $t -Width $w -Height 520 -Badge device
+    $f.ShowInTaskbar = $true   # окно немодальное: пока ждёт устройство, его можно найти на панели задач
+    $f.Text = 'Подключить устройство'
+    $f.TopMost = $false
     $pad = $t.S(28); $inner = $t.S($w) - 2 * $pad
-    $script:connectY = $t.S(6)
+    $script:connectY = $f.ContentTop
     function Add-Line($Control, [int]$After = 0, [switch]$Indent) {
         $x = $pad
         if ($Indent) { $x += $t.S(16) }
@@ -378,7 +378,7 @@ function Show-NotifierConnectDialog {
         return $l
     }
 
-    Add-Line (New-Centered 'Подключить устройство' ([ClaudeNotifier.Ui.Fonts]::Display(16))) $t.S(4)
+    Add-Line (New-Centered 'Подключить устройство' ([ClaudeNotifier.Ui.Fonts]::Display(15))) $t.S(4)
     Add-Line (New-Centered 'Mac или телефон должен быть в той же сети Wi-Fi.' ([ClaudeNotifier.Ui.Fonts]::Text(10)) -Muted -Wrap) $t.S(22)
 
     Add-Line (New-NotifierLabel -Theme $t -Text '1. Откройте в браузере' -Font ([ClaudeNotifier.Ui.Fonts]::Semibold(9)) -Muted -Width ($inner - $t.S(16))) $t.S(6) -Indent
@@ -424,7 +424,7 @@ function Show-NotifierConnectDialog {
     $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($newPin.Bottom + $t.S(16)))
     $f.AcceptButton = $done
     $f.CancelButton = $done
-    $f.Tag = @{ Theme = $t; Status = $status; Pin = $pin; NewPin = $newPin; Url = $urlLabel }
+    $f.Tag.Status = $status; $f.Tag.Pin = $pin; $f.Tag.NewPin = $newPin; $f.Tag.Url = $urlLabel
     $f.add_FormClosed({
             if ($script:Net) { $script:Net.Pairing = $null }   # закрыли окно — код больше не действует
             $script:ConnectForm = $null

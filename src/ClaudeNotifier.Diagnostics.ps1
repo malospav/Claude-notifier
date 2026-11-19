@@ -197,29 +197,46 @@ function Show-NotifierDiagnostics {
     $items = @(Get-NotifierDiagnostics)
     Write-NotifierLog -Level INFO -Message "tray: проверка работы $([char]0x2014) $(@($items | Where-Object { $_.Level -ne 'ok' }).Count) замечаний" -DataRoot $script:TrayDataRoot
     $t = Get-NotifierTheme
-    $w = 460
-    $f = New-NotifierForm -Theme $t -Title 'Проверка работы' -Width $w -Height 400
-    $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-    $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.ShowInTaskbar = $false; $f.ShowIcon = $false
-    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-    $f.TopMost = $true
-    $pad = $t.S(22); $inner = $t.S($w) - 2 * $pad; $y = $t.S(16)
+    $w = 480
     $bad = @($items | Where-Object { $_.Level -eq 'error' }).Count
     $warn = @($items | Where-Object { $_.Level -eq 'warn' }).Count
+    $badge = if ($bad -gt 0) { 'error' } elseif ($warn -gt 0) { 'warn' } else { 'ok' }
+    $f = New-NotifierSheet -Theme $t -Width $w -Height 400 -Badge $badge
+    $pad = $t.S(24); $inner = $t.S($w) - 2 * $pad; $y = $f.ContentTop
     $head = if ($bad -gt 0) { "Есть неполадки: $bad" } elseif ($warn -gt 0) { "Работает, обратите внимание: $warn" } else { 'Всё работает' }
-    $h = New-NotifierLabel -Theme $t -Text $head -Font ([ClaudeNotifier.Ui.Fonts]::Semibold(13)) -Width $inner -Wrap
-    $h.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($h); $y += $h.Height + $t.S(12)
+    $h = New-NotifierLabel -Theme $t -Text $head -Font ([ClaudeNotifier.Ui.Fonts]::Display(13.5)) -Width $inner -Wrap
+    $h.Center = $true
+    $h.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($h); $y += $h.Height + $t.S(4)
+    $sub = New-NotifierLabel -Theme $t -Text "Проверок: $($items.Count) $([char]0x00B7) $([DateTime]::Now.ToString('HH:mm'))" -Width $inner -Muted
+    $sub.Center = $true
+    $sub.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($sub); $y += $sub.Height + $t.S(16)
+    # Проверки — в скруглённой группе (как ячейки в Настройках): цветная точка, название, подробность.
+    $group = New-NotifierGroupPanel -Theme $t -Height 10
+    $group.Width = $inner
+    $gp = $t.S(14); $gy = $t.S(12); $gw = $inner - 2 * $gp
     $dot = @{ ok = 'waiting'; warn = 'permission'; error = 'error' }
+    $n = 0
     foreach ($i in $items) {
-        $title = New-NotifierLabel -Theme $t -Text ([string]$i.Title) -Font ([ClaudeNotifier.Ui.Fonts]::Semibold(10)) -Width $inner -Dot $dot[[string]$i.Level]
-        $title.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($title); $y += $title.Height
-        if ($i.Detail) {
-            $d = New-NotifierLabel -Theme $t -Text ([string]$i.Detail) -Width ($inner - $t.S(18)) -Muted -Wrap
-            $d.Location = New-Object System.Drawing.Point(($pad + $t.S(18)), $y); $f.Controls.Add($d); $y += $d.Height
+        if ($n -gt 0) {
+            $sep = New-Object System.Windows.Forms.Panel
+            $sep.BackColor = $t.Border
+            $sep.Size = New-Object System.Drawing.Size(($gw - $t.S(18)), 1)
+            $sep.Location = New-Object System.Drawing.Point(($gp + $t.S(18)), ($gy - $t.S(6)))
+            $group.Controls.Add($sep)
         }
-        $y += $t.S(8)
+        $title = New-NotifierLabel -Theme $t -Text ([string]$i.Title) -Font ([ClaudeNotifier.Ui.Fonts]::Semibold(10)) -Width $gw -Dot $dot[[string]$i.Level]
+        $title.BackColor = $t.Surface
+        $title.Location = New-Object System.Drawing.Point($gp, $gy); $group.Controls.Add($title); $gy += $title.Height
+        if ($i.Detail) {
+            $d = New-NotifierLabel -Theme $t -Text ([string]$i.Detail) -Width ($gw - $t.S(18)) -Muted -Wrap
+            $d.BackColor = $t.Surface
+            $d.Location = New-Object System.Drawing.Point(($gp + $t.S(18)), $gy); $group.Controls.Add($d); $gy += $d.Height
+        }
+        $gy += $t.S(12)
+        $n++
     }
-    $y += $t.S(10)
+    $group.Height = $gy
+    $group.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($group); $y += $group.Height + $t.S(20)
     $gap = $t.S(8)
     $copy = New-NotifierButton -Theme $t -Text 'Скопировать отчёт'
     $log = New-NotifierButton -Theme $t -Text 'Журнал'
@@ -229,8 +246,8 @@ function Show-NotifierDiagnostics {
     foreach ($b in @($copy, $log)) { $b.Location = New-Object System.Drawing.Point($x, $y); $f.Controls.Add($b); $x += $b.Width + $gap }
     $close.Location = New-Object System.Drawing.Point(($pad + $inner - $close.Width), $y); $f.Controls.Add($close)
     $f.CancelButton = $close; $f.AcceptButton = $close
-    $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($y + $close.Height + $t.S(18)))
-    $f.Tag = @{ Items = $items }
+    $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($y + $close.Height + $t.S(22)))
+    $f.Tag.Items = $items
     $copy.add_Click({
             $form = $this.FindForm()
             try { [System.Windows.Forms.Clipboard]::SetText((Get-NotifierDiagReport -Items $form.Tag.Items)); $this.Text = 'Скопировано ' + [char]0x2713 }

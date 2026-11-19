@@ -257,11 +257,23 @@ Describe 's_005_01 · трей как процесс' {
             $psi.EnvironmentVariables['USERNAME'] = $user
             return [System.Diagnostics.Process]::Start($psi)
         }
+        # Журнал читается, пока трей в него пишет: с общим доступом и повтором (иначе «файл занят» роняет тест).
+        function Read-LogLines {
+            for ($i = 0; $i -lt 20; $i++) {
+                try {
+                    $fs = New-Object System.IO.FileStream($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+                    try { $r = New-Object System.IO.StreamReader($fs, [Text.Encoding]::UTF8); return @($r.ReadToEnd() -split '\r?\n' | Where-Object { $_ -ne '' }) }
+                    finally { $fs.Dispose() }
+                }
+                catch [System.IO.IOException] { Start-Sleep -Milliseconds 25 }
+            }
+            return @()
+        }
         function Wait-Log([string]$Pattern, [int]$Count = 1, [int]$TimeoutMs = 15000) {
             $sw = [Diagnostics.Stopwatch]::StartNew()
             while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
                 if (Test-Path $log) {
-                    $n = @([IO.File]::ReadAllLines($log) | Where-Object { $_ -match $Pattern }).Count
+                    $n = @(Read-LogLines | Where-Object { $_ -match $Pattern }).Count
                     if ($n -ge $Count) { return $true }
                 }
                 Start-Sleep -Milliseconds 50
@@ -301,7 +313,7 @@ Describe 's_005_01 · трей как процесс' {
                 $sent | Should -Be $true
             }
             Wait-Log 'tray: показано' 20 | Should -Be $true
-            $lat = @([IO.File]::ReadAllLines($log) | ForEach-Object { if ($_ -match 'задержка (\d+) мс') { [int]$Matches[1] } } | Sort-Object)
+            $lat = @(Read-LogLines | ForEach-Object { if ($_ -match 'задержка (\d+) мс') { [int]$Matches[1] } } | Sort-Object)
             $p95 = $lat[[Math]::Ceiling(0.95 * $lat.Count) - 1]
             Write-Host "      latency ms: min $($lat[0]), p95 $p95, max $($lat[-1])"
             $p95 | Should -BeLessThan 1001

@@ -760,12 +760,46 @@ function New-NotifierForm {
     return $f
 }
 
+function New-NotifierSheet {
+    <#
+    .SYNOPSIS
+    Окно-лист для диалогов (ClaudeNotifier.Ui.SheetForm): без системной полосы заголовка, скругление и тень
+    Windows 11, значок сверху (-Badge: info | ok | warn | error | edit | device | question | phone | update | none),
+    тихий крестик, перетаскивание за пустое место, Esc закрывает. Содержимое начинается с $f.ContentTop.
+    #>
+    param([Parameter(Mandatory = $true)]$Theme, [int]$Width = 380, [int]$Height = 220, [string]$Badge = 'none')
+    $f = New-Object ClaudeNotifier.Ui.SheetForm
+    $f.Theme = $Theme
+    $f.Badge = $Badge
+    $f.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+    $f.Font = [ClaudeNotifier.Ui.Fonts]::Text(9.5)
+    $f.ClientSize = New-Object System.Drawing.Size($Theme.S($Width), $Theme.S($Height))
+    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $f.add_Load({ Set-NotifierFormPlacement -Form $this })   # на мониторе шторки, а не на основном
+    $f.TopMost = $true
+    $f.Tag = @{ Theme = $Theme }
+    [ClaudeNotifier.Ui.Native]::FadeIn($f, 160)
+    return $f
+}
+
+function Get-NotifierDialogBadge {
+    <# .SYNOPSIS Значок диалога по смыслу: удаление — предупреждение, поле ввода — карандаш, «Готово» — галочка, ошибки — крестик. #>
+    param([string]$Title, [switch]$Destructive, [switch]$HasInput)
+    if ($Destructive) { return 'warn' }
+    if ($HasInput) { return 'edit' }
+    if ($Title -match '^(Готово|Сохранено|Скопировано|Подключено)') { return 'ok' }
+    if ($Title -match '(^Не |^Нет |[Оо]шибк|не удалось|не загружен|не подходит|не отправлен)') { return 'error' }
+    if ($Title -match '\?\s*$') { return 'question' }
+    return 'info'
+}
+
 function Show-NotifierDialog {
     <#
     .SYNOPSIS
-    Диалог в стиле алерта Apple: заголовок и текст по центру, необязательное поле ввода,
-    кнопки одинаковой ширины (отмена слева, действие справа). -Destructive — действие красным.
-    Возвращает @{ Ok = $true/$false; Value = <текст поля> }.
+    Диалог в стиле шторки: окно-лист со значком сверху, заголовок и текст по центру, необязательное поле ввода,
+    кнопки одинаковой ширины (отмена слева, действие справа). -Destructive — действие красным; -Icon — свой значок
+    (иначе — по смыслу: Get-NotifierDialogBadge).
+    Возвращает @{ Ok = $true/$false; Value = <текст поля>; Extra = <нажата третья кнопка> }.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Title,
@@ -775,48 +809,52 @@ function Show-NotifierDialog {
         $InputValue = $null,   # без типа: [string] превратил бы $null в '' и показал бы поле ввода
         [switch]$Destructive,
         [System.Windows.Forms.IWin32Window]$Owner,
-        [string]$Extra = ''    # третья кнопка во всю ширину под остальными (результат — Extra = $true)
+        [string]$Extra = '',   # третья кнопка во всю ширину под остальными (результат — Extra = $true)
+        [string]$Icon = ''
     )
     $t = Get-NotifierTheme
-    $w = 360
-    $f = New-NotifierForm -Theme $t -Title '' -Width $w -Height 200
-    $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-    $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.ShowInTaskbar = $false; $f.ShowIcon = $false
-    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
-    $pad = $t.S(24); $inner = $t.S($w) - 2 * $pad
-    $y = $t.S(8)
-    $head = New-NotifierLabel -Theme $t -Text $Title -Font ([ClaudeNotifier.Ui.Fonts]::Semibold(12)) -Width $inner -Wrap
+    $w = 380
+    if (-not $Icon) { $Icon = Get-NotifierDialogBadge -Title $Title -Destructive:$Destructive -HasInput:($null -ne $InputValue) }
+    $f = New-NotifierSheet -Theme $t -Width $w -Height 220 -Badge $Icon
+    if ($Owner) { $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent }
+    $pad = $t.S(28); $inner = $t.S($w) - 2 * $pad
+    $y = $f.ContentTop
+    $head = New-NotifierLabel -Theme $t -Text $Title -Font ([ClaudeNotifier.Ui.Fonts]::Display(13.5)) -Width $inner -Wrap
     $head.Center = $true
-    $head.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($head); $y += $head.Height + $t.S(6)
+    $head.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($head); $y += $head.Height + $t.S(8)
     if ($Message) {
-        $msg = New-NotifierLabel -Theme $t -Text $Message -Width $inner -Wrap -Muted
+        $msg = New-NotifierLabel -Theme $t -Text $Message -Font ([ClaudeNotifier.Ui.Fonts]::Text(10)) -Width $inner -Wrap -Muted
         $msg.Center = $true
-        $msg.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($msg); $y += $msg.Height + $t.S(4)
+        $msg.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($msg); $y += $msg.Height
     }
     $box = $null
     if ($null -ne $InputValue) {
-        $y += $t.S(10)
+        $y += $t.S(18)
         $box = New-Object System.Windows.Forms.TextBox
         $box.Text = [string]$InputValue
         $box.Font = [ClaudeNotifier.Ui.Fonts]::Text(11)
         $box.BorderStyle = [System.Windows.Forms.BorderStyle]::None
         $box.BackColor = $t.Surface; $box.ForeColor = $t.Text
-        # Поле в скруглённой «капсуле»: TextBox без рамки внутри панели, которая рисует фон.
+        # Поле в скруглённой «капсуле»: TextBox без рамки внутри панели, которая рисует фон и кольцо фокуса.
         $field = New-Object System.Windows.Forms.Panel
-        $field.Size = New-Object System.Drawing.Size($inner, $t.S(38))
+        $field.Size = New-Object System.Drawing.Size($inner, $t.S(42))
         $field.BackColor = $t.Window
-        $field.Tag = $t
+        $field.Tag = @{ Theme = $t; Box = $box }
         $field.add_Paint({
                 param($sender, $e)
+                $th = $sender.Tag.Theme
                 $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-                [ClaudeNotifier.Ui.Draw]::Card($e.Graphics, (New-Object System.Drawing.RectangleF(0.5, 0.5, ($sender.Width - 1), ($sender.Height - 1))), $sender.Tag.S(9), $sender.Tag.Surface, $sender.Tag.Border)
+                $ring = if ($sender.Tag.Box.Focused) { $th.Accent } else { $th.Border }
+                [ClaudeNotifier.Ui.Draw]::Card($e.Graphics, (New-Object System.Drawing.RectangleF(1, 1, ($sender.Width - 2), ($sender.Height - 2))), $th.S(11), $th.Surface, $ring)
             })
-        $box.Width = $inner - $t.S(24)
-        $box.Location = New-Object System.Drawing.Point($t.S(12), [int](($field.Height - $box.PreferredHeight) / 2))
+        $box.add_GotFocus({ $this.Parent.Invalidate() })
+        $box.add_LostFocus({ $this.Parent.Invalidate() })
+        $box.Width = $inner - $t.S(28)
+        $box.Location = New-Object System.Drawing.Point($t.S(14), [int](($field.Height - $box.PreferredHeight) / 2))
         $field.Controls.Add($box)
         $field.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($field); $y += $field.Height
     }
-    $y += $t.S(20)
+    $y += $t.S(24)
     $gap = $t.S(10)
     $btnW = $inner
     if ($Secondary) { $btnW = [int](($inner - $gap) / 2) }
@@ -835,13 +873,12 @@ function Show-NotifierDialog {
     $f.AcceptButton = $ok
     if ($Extra) {
         $y += $ok.Height + $gap
-        $more = New-NotifierButton -Theme $t -Text $Extra -Width $inner
+        $more = New-NotifierButton -Theme $t -Text $Extra -Plain -Width $inner
         $more.DialogResult = [System.Windows.Forms.DialogResult]::Retry
         $more.Location = New-Object System.Drawing.Point($pad, $y)
         $f.Controls.Add($more)
     }
-    $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($y + $ok.Height + $t.S(20)))
-    $f.TopMost = $true   # поверх мини-окна у трея
+    $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($y + $ok.Height + $t.S(24)))
     $f.Tag.Box = $box
     if ($box) { $f.add_Shown({ $this.Tag.Box.SelectAll(); [void]$this.Tag.Box.Focus() }) }
     try {
