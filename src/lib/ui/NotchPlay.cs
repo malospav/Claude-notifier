@@ -93,9 +93,14 @@ namespace ClaudeNotifier.Ui {
         }
 
         // Настроение главного маскота от взаимодействия (поверх «Ага!» и взгляда из MoodFor).
+        // Настроение дня (трей считает по истории): cheer — много «Готово» к вечеру, tea — много ошибок.
+        public static volatile string DayMood = "";
+
         void PlayMood(NotchItem it, CatMood md, RectangleF face) {
             md.Play = true;
             md.Pet = pet;
+            md.Friend = (float)Affection;
+            md.DayMood = DayMood;
             double poke = Since(pokeAt);
             if (poke < 3.4) md.PokeAge = (float)poke;
             double wake = Since(wakeAt);

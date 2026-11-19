@@ -368,11 +368,11 @@ Describe 's_015_01 · шторка вверху экрана' {
         [ClaudeNotifier.Ui.Mascot]::For('dev-mac') | Should -Be 'flatsphynx'
         # Разделы настроек — заголовки строк; на странице — боковое меню, раздел по щелчку.
         $titles = @(Get-NotifierNotchSettingsRows | Where-Object { $_.Kind -eq 'header' } | ForEach-Object { $_.Title })
-        ($titles -join ',') | Should -Be 'Уведомления,Телефон,Ответы,Сеансы,Шторка,Маскоты,Система'
+        ($titles -join ',') | Should -Be 'Уведомления,Тишина и голос,Телефон,Ответы,Сеансы,Шторка,Маскоты,Система'
         $v = New-Object ClaudeNotifier.Ui.NotchView
         $v.SetRows('settings', [ClaudeNotifier.Ui.NotchRow[]]@(Get-NotifierNotchSettingsRows))
-        $v.ClickArea('section:4', [System.Drawing.Point]::Empty)
-        $v.SettingsSection | Should -Be 4
+        $v.ClickArea('section:5', [System.Drawing.Point]::Empty)
+        $v.SettingsSection | Should -Be 5
         ($v.ContentHeight('settings', 872) -lt 440) | Should -Be $true   # самый большой раздел — без прокрутки (настройки шириной 900)
         $v.Dispose()
         Set-NotifierSelectValue -Key 'notch.position' -Value 'right'
@@ -398,7 +398,8 @@ Describe 's_015_01 · шторка вверху экрана' {
         [void](Update-NotifierActivity -ProjectsDir (Join-Path $TestDrive 'projects') -StateDir $sd)
         $script:ActivitySummary = Get-NotifierActivitySummary -StateDir $sd
         $rows = @(Get-NotifierNotchStatsRows)
-        ($rows | Where-Object { $_.Kind -eq 'chart' }).Values.Length | Should -Be 7
+        @($rows | Where-Object { $_.Kind -eq 'chart' })[0].Values.Length | Should -Be 7   # токены по дням; дальше — время, задачи
+        @($rows | Where-Object { $_.Kind -eq 'header' -and $_.Title -eq 'Самые долгие задачи' }).Count | Should -Be 1
         ($rows | Where-Object { $_.Title -eq 'shop' }).Count | Should -Be 2   # сегодня и за неделю
         ($rows | Where-Object { $_.Title -eq 'Расход за сегодня' }).Value | Should -Match '^≈ \$'
         # Порог расходов: выключен — молчит; дошли до суммы — одно уведомление в день
@@ -534,9 +535,9 @@ Describe 's_015_01 · шторка вверху экрана' {
     It 'фон: таймер трея в покое реже (250 мс), при событиях и открытой шторке — 100 мс; в шторке без 3D' {
         $now = [datetime]::UtcNow
         Get-NotifierTickInterval -LastActivity $now.AddSeconds(-1) -Now $now -Expanded $false -IdleSeconds 0 | Should -Be 100
-        Get-NotifierTickInterval -LastActivity $now.AddSeconds(-30) -Now $now -Expanded $false -IdleSeconds 0 | Should -Be 250
+        Get-NotifierTickInterval -LastActivity $now.AddSeconds(-30) -Now $now -Expanded $false -IdleSeconds 0 | Should -Be 500   # в покое события будят трей сами (TrayWaker)
         Get-NotifierTickInterval -LastActivity $now.AddSeconds(-30) -Now $now -Expanded $true -IdleSeconds 0 | Should -Be 100
-        Get-NotifierTickInterval -LastActivity $now.AddSeconds(-30) -Now $now -Expanded $false -IdleSeconds 300 | Should -Be 1000   # вас нет
+        Get-NotifierTickInterval -LastActivity $now.AddSeconds(-30) -Now $now -Expanded $false -IdleSeconds 300 | Should -Be 2000   # вас нет
         Get-NotifierTickInterval -LastActivity $now.AddSeconds(-1) -Now $now -Expanded $false -IdleSeconds 300 | Should -Be 100      # но событие — быстро
         ([ClaudeNotifier.Ui.Native]::InputIdleSeconds() -ge 0) | Should -Be $true
         [ClaudeNotifier.Ui.NotchView]::Paused | Should -Be $false

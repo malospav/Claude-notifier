@@ -250,6 +250,30 @@ namespace ClaudeNotifier {
             try { using (Process p = Process.GetProcessById(pid)) { return p.ProcessName + ".exe"; } }
             catch { return null; }
         }
+        [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
+        // Можно ли беспокоить: 1 — нет экрана (заблокирован), 2 — полноэкранное приложение, 3 — Direct3D на весь экран,
+        // 4 — презентация, 5 — можно, 6 — приложение из Магазина на весь экран, 7 — не беспокоить. -1 — неизвестно.
+        public static int UserNotificationState() { int s; return SHQueryUserNotificationState(out s) == 0 ? s : -1; }
+        [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public int dwFlags; }
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+        // Активное окно закрывает весь монитор (вместе с панелью задач) — игра, видео, презентация на весь экран.
+        // Рабочий стол и панель задач не считаются.
+        public static bool ForegroundFullscreen() {
+            IntPtr h = GetForegroundWindow();
+            if (h == IntPtr.Zero) return false;
+            StringBuilder cls = new StringBuilder(64); GetClassName(h, cls, 64);
+            string c = cls.ToString();
+            if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") return false;
+            RECT r; if (!GetWindowRect(h, out r)) return false;
+            MONITORINFO mi = new MONITORINFO(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+            if (!GetMonitorInfo(MonitorFromWindow(h, 2), ref mi)) return false;
+            return r.L <= mi.rcMonitor.L && r.T <= mi.rcMonitor.T && r.R >= mi.rcMonitor.R && r.B >= mi.rcMonitor.B;
+        }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageNameW(IntPtr h, int flags, [Out] char[] name, ref int size);
         // Полный путь образа процесса или null — один быстрый системный вызов (Process.Path читает список модулей).
         public static string GetImagePath(int pid) {

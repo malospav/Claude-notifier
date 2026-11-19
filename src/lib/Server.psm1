@@ -55,6 +55,7 @@ $script:AcceptLoop = {
         }
         catch { try { $ctx.Response.Abort() } catch { }; continue }
         $Queue.Enqueue([pscustomobject]$item)
+        try { if ('ClaudeNotifier.Ui.NotchHost' -as [type]) { [ClaudeNotifier.Ui.NotchHost]::Wake() } } catch { }   # трей — сразу
     }
 }
 $script:BodyTimeoutMs = 3000

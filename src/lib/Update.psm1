@@ -62,13 +62,19 @@ function ConvertFrom-NotifierCompare {
     $c = ConvertFrom-Json $Json -ErrorAction Stop
     $status = [string]$c.status
     $commits = @($c.commits)
-    if ($status -ne 'ahead' -or $commits.Count -eq 0) { return @{ Available = $false; Sha = ''; Count = 0; Message = '' } }
+    if ($status -ne 'ahead' -or $commits.Count -eq 0) { return @{ Available = $false; Sha = ''; Count = 0; Message = ''; Notes = @() } }
     $last = $commits[-1]
     $msg = (([string]$last.commit.message) -split "`n")[0].Trim()
     if ($msg.Length -gt 90) { $msg = $msg.Substring(0, 89) + [char]0x2026 }
     $sha = [string]$last.sha
-    if ($sha -notmatch '^[0-9a-f]{40}$') { return @{ Available = $false; Sha = ''; Count = 0; Message = '' } }
-    return @{ Available = $true; Sha = $sha; Count = [int]$c.ahead_by; Message = $msg }
+    if ($sha -notmatch '^[0-9a-f]{40}$') { return @{ Available = $false; Sha = ''; Count = 0; Message = ''; Notes = @() } }
+    # Что нового: первые строки сообщений коммитов, новые сверху (до 12).
+    $notes = @(for ($i = $commits.Count - 1; $i -ge 0 -and $i -ge $commits.Count - 12; $i--) {
+            $t = (([string]$commits[$i].commit.message) -split "`n")[0].Trim()
+            if ($t.Length -gt 140) { $t = $t.Substring(0, 139) + [char]0x2026 }
+            if ($t) { $t }
+        })
+    return @{ Available = $true; Sha = $sha; Count = [int]$c.ahead_by; Message = $msg; Notes = $notes }
 }
 
 function Start-NotifierReleaseCheck {
@@ -99,7 +105,10 @@ function ConvertFrom-NotifierRelease {
     }
     if ($zip -eq '' -or $hash -eq '') { return $null }
     $title = ([string]$r.name).Trim(); if ($title -eq '') { $title = $tag }
-    return @{ Tag = $tag; Sha = $sha; ZipUrl = $zip; HashUrl = $hash; Title = $title }
+    # Что нового — строки описания выпуска (без служебной «commit:»), до 12.
+    $notes = @(([string]$r.body -split "`r?`n") | ForEach-Object { ($_ -replace '^\s*[-*]\s+', '').Trim() } |
+        Where-Object { $_ -and $_ -notmatch '^commit:' -and $_ -notmatch '^#+\s*$' } | ForEach-Object { $_ -replace '^#+\s*', '' } | Select-Object -First 12)
+    return @{ Tag = $tag; Sha = $sha; ZipUrl = $zip; HashUrl = $hash; Title = $title; Notes = $notes }
 }
 
 function Receive-NotifierReleaseCheck {

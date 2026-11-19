@@ -88,7 +88,8 @@ try {
     # 3. Хуки и строка статуса. Прежний statusLine пользователя сохраняется в config.json
     #    (chainStatusLine) до записи settings.json: если config.json записать нельзя, settings не меняется.
     [void](Remove-NotifierHooks -Settings $settings)
-    Add-NotifierHooks -Settings $settings -AppRoot $app -Port (Get-NotifierHookPort) -Secret (Get-NotifierHookSecret -DataRoot $DataRoot -Create)
+    $hookExe = New-NotifierHookExe -AppRoot $app   # быстрый мост (SessionStart, PermissionRequest); не собрался — PowerShell
+    Add-NotifierHooks -Settings $settings -AppRoot $app -Port (Get-NotifierHookPort) -Secret (Get-NotifierHookSecret -DataRoot $DataRoot -Create) -HookExe $hookExe
     $previousStatusLine = Set-NotifierStatusLine -Settings $settings -AppRoot $app
     if ($null -ne $previousStatusLine) {
         Set-NotifierConfigValue -Name chainStatusLine -Value $previousStatusLine -DataRoot $DataRoot

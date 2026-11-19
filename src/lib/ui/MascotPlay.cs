@@ -63,8 +63,11 @@ namespace ClaudeNotifier.Ui {
                     g.Transform = HeadAnchor.Transform;
                     h = new Head(HeadAnchor.Top.X, HeadAnchor.Top.Y, HeadAnchor.HalfW, HeadAnchor.FaceY, u);
                 } else h = new Head(cx, r.Bottom - r.Height * 0.07f - u * 0.86f, u * 0.27f, r.Bottom - r.Height * 0.07f - u * 0.55f, u);
-                if (m.Play && m.Outfit != null) Season(g, new string[] { m.Outfit }, t, h);
-                else if (m.Play && Seasonal) Season(g, Outfits(Now()), t, h);
+                string[] outs = m.Outfit != null ? new string[] { m.Outfit } : Seasonal ? Outfits(Now()) : new string[0];
+                if (m.Play) Season(g, outs, t, h);
+                // Дружба и настроение дня: бантик, корона, праздничный колпачок, чай. Шапка уже есть — на макушку не надеваем.
+                bool top = Array.IndexOf(outs, "night") >= 0 || Array.IndexOf(outs, "newyear") >= 0;
+                if (m.Play) MascotStyle.Paint(g, h.X, h.Top, h.W, h.Face, h.U, m, t, top);
                 if (m.Pet > 0.02f) Petting(g, kind, m.Pet, t, h);
                 if (m.Startle > 0.02f) Bang(g, new PointF(h.X + h.W + h.U * 0.06f, h.Top - h.U * 0.02f), h.U, m.Startle);
                 if (m.Grumpy) Anger(g, new PointF(h.X + h.W * 0.85f, h.Top + h.U * 0.06f), h.U, t);

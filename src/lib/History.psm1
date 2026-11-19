@@ -5,7 +5,7 @@ Import-Module (Join-Path $PSScriptRoot 'Config.psm1')
 
 # history.json — JSON-массив событий v1 (старые первыми) с необязательным полем status.
 # Пишут два процесса (трей добавляет, focus-handler меняет status); запись атомарная (temp + replace).
-$script:MaxItems = 100
+$script:MaxItems = 300   # неделя событий: «Самые долгие задачи» и графики
 
 function Get-HistoryPath([string]$DataRoot) { return (Join-Path $DataRoot 'history.json') }
 

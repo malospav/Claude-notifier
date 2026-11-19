@@ -14,6 +14,7 @@ $script:ActivityJob = $null
 $script:ActivitySummary = $null
 $script:ActivityNextAt = [datetime]::MinValue
 $script:ActivityIntervalMin = 10
+$script:DigestCheckAt = [datetime]::MinValue
 $script:ActivityProjectsDir = $null   # журналы Claude Code; $null — ~/.claude/projects (тесты задают свою папку)
 
 function Start-NotifierActivityScan {
@@ -67,7 +68,11 @@ function Invoke-NotifierActivityTick {
     $budget = $false
     try { $budget = [bool](Get-NotifierConfig -DataRoot $script:TrayDataRoot).budget.enabled } catch { }
     if (((Test-NotifierStatsVisible) -or $budget) -and $Now -ge $script:ActivityNextAt) { [void](Start-NotifierActivityScan -Now $Now) }
-    try { [void](Invoke-NotifierDigest -Now $Now.ToLocalTime()) } catch { Write-NotifierLog -Level WARN -Message "notch: сводка дня: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+    # Сводка дня — раз в день: проверять, не пора ли, достаточно раз в 30 с.
+    if ($Now -ge $script:DigestCheckAt) {
+        $script:DigestCheckAt = $Now.AddSeconds(30)
+        try { [void](Invoke-NotifierDigest -Now $Now.ToLocalTime()) } catch { Write-NotifierLog -Level WARN -Message "notch: сводка дня: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+    }
 }
 
 function Get-NotifierTodayCost {

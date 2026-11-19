@@ -113,6 +113,22 @@ function Test-NotifierQuickTask {
     return (($end - $start).TotalMinutes -lt [int]$Config.longTasks.minutes)
 }
 
+function Get-NotifierTaskSeconds {
+    <# .SYNOPSIS Сколько секунд Claude работал над задачей до этого «Готово» (по началу работы сеанса); 0 — неизвестно. #>
+    param($Session, [Parameter(Mandatory = $true)]$Event, [datetime]$Now = [DateTime]::UtcNow)
+    if ($null -eq $Session) { return 0 }
+    $busy = ''
+    if ($Session.PSObject.Properties['busySince']) { $busy = [string]$Session.busySince }
+    if ($busy -eq '' -and [string]$Session.state -eq 'working') { $busy = [string]$Session.since }
+    $start = ConvertTo-NotifierUtc $busy
+    if ($null -eq $start) { return 0 }
+    $end = $Now
+    if ($Event.PSObject.Properties['ts']) { $e = ConvertTo-NotifierUtc ([string]$Event.ts); if ($null -ne $e) { $end = $e } }
+    $sec = [int][Math]::Round(($end - $start).TotalSeconds)
+    if ($sec -lt 0 -or $sec -gt 7 * 86400) { return 0 }
+    return $sec
+}
+
 # --- Агенты сеанса ---
 
 function Get-NotifierSessionAgents {
@@ -830,6 +846,7 @@ function New-NotifierSessionMenu {
         @('Переименовать…', { Invoke-NotifierMenuAction rename }),
         @('Закрепить сверху', { Invoke-NotifierMenuAction pin }),
         @('Без уведомлений', { Invoke-NotifierMenuAction mute }),
+        @('Уведомления проекта', $null),
         '-',
         @('Убрать из списка', { Invoke-NotifierMenuAction remove })
     )
@@ -838,6 +855,15 @@ function New-NotifierSessionMenu {
     [void]$files.DropDownItems.Add('(пусто)')   # чтобы у пункта была стрелка подменю
     $files.DropDown.Renderer = $menu.Renderer
     $files.DropDown.Font = $menu.Font
+    # Правило уведомлений для всего проекта сеанса: все / только важные / выключены.
+    $proj = $menu.Items[7]
+    foreach ($pair in @(@('all', 'Все'), @('important', "Только важные (без «Готово»)"), @('off', 'Выключены'))) {
+        $mi = $proj.DropDownItems.Add($pair[1])
+        $mi.Tag = $pair[0]
+        $mi.add_Click({ Invoke-NotifierMenuAction ('project:' + [string]$this.Tag) })
+    }
+    $proj.DropDown.Renderer = $menu.Renderer
+    $proj.DropDown.Font = $menu.Font
     $menu.Tag = $Theme
     $menu.add_Opening({
             $item = $script:MenuItem
@@ -858,6 +884,12 @@ function New-NotifierSessionMenu {
             Add-NotifierFileItems -Items $this.Items[1].DropDownItems -Session $session -Theme $this.Tag
             $this.Items[1].Enabled = $local -and @(Get-NotifierSessionFiles $session).Count -gt 0
             $this.Items[2].Enabled = $local -and (Get-NotifierSessionFolder $session) -ne ''
+            $project = ''
+            if ($session -and $session.PSObject.Properties['project']) { $project = [string]$session.project }
+            $this.Items[7].Enabled = $project -ne ''
+            $this.Items[7].Text = if ($project) { "Уведомления проекта «$project»" } else { 'Уведомления проекта' }
+            $rule = Get-NotifierProjectRule -Config (Get-NotifierConfig -DataRoot $script:TrayDataRoot) -Project $project
+            foreach ($mi in $this.Items[7].DropDownItems) { $mi.Checked = ([string]$mi.Tag -eq $rule) }
         })
     return $menu
 }
@@ -895,6 +927,15 @@ function Invoke-NotifierMenuAction {
         'remove' {
             $s = $item.Tag; if ($s -is [hashtable]) { $s = $s.Session }
             Remove-NotifierSession -SessionId ([string]$s.session_id)
+        }
+        { $_ -like 'project:*' } {
+            $s = Get-NotifierCardSession $item
+            $project = if ($s -and $s.PSObject.Properties['project']) { [string]$s.project } else { '' }
+            $rule = $Action.Substring(8)
+            if ($project) {
+                Set-NotifierProjectRule -Project $project -Rule $rule
+                $notice = switch ($rule) { 'off' { "«$project»: уведомления выключены" } 'important' { "«$project»: только важные уведомления" } default { "«$project»: все уведомления" } }
+            }
         }
     }
     if ($fromPopover) {

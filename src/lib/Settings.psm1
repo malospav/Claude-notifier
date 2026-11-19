@@ -9,11 +9,11 @@ $script:HookSpecs = @(
     @{ Event = 'Notification'; Matcher = 'permission_prompt|elicitation_dialog|agent_needs_input'; Kind = 'notification'; Via = 'curl' },
     @{ Event = 'StopFailure'; Matcher = $null; Kind = 'stopfailure'; Via = 'curl' },
     # Окно «Сеансы»: начало, новый запрос (статус «Работает»), завершение сеанса.
-    @{ Event = 'SessionStart'; Matcher = $null; Kind = 'sessionstart' },
+    @{ Event = 'SessionStart'; Matcher = $null; Kind = 'sessionstart'; Fast = $true },
     @{ Event = 'UserPromptSubmit'; Matcher = $null; Kind = 'prompt'; Via = 'curl' },
     @{ Event = 'SessionEnd'; Matcher = $null; Kind = 'sessionend'; Via = 'curl' },
     # Ответы из приложения (ADR-008): синхронный PermissionRequest ждёт решения; Stop с asyncRewake — быстрого ответа.
-    @{ Event = 'PermissionRequest'; Matcher = $null; Kind = 'permreq'; Mode = 'sync'; Timeout = 3700 },
+    @{ Event = 'PermissionRequest'; Matcher = $null; Kind = 'permreq'; Mode = 'sync'; Timeout = 3700; Fast = $true },
     @{ Event = 'Stop'; Matcher = $null; Kind = 'replywait'; Mode = 'rewake'; Timeout = 14700 }
 )
 $script:Marker = 'claude-notifier\app\hook-bridge.ps1'
@@ -152,7 +152,8 @@ function Add-NotifierHooks {
         [Parameter(Mandatory = $true)][string]$AppRoot,
         [int]$Port = 47611,
         [string]$Curl = (Join-Path $env:SystemRoot 'System32\curl.exe'),
-        [string]$Secret = 'hook'   # значение X-Claude-Notifier (Get-NotifierHookSecret); трей сверяет его
+        [string]$Secret = 'hook',  # значение X-Claude-Notifier (Get-NotifierHookSecret); трей сверяет его
+        [string]$HookExe = ''      # claude-notifier-hook.exe (New-NotifierHookExe): быстрый мост для SessionStart и PermissionRequest
     )
     if ($Secret -notmatch '^[A-Za-z0-9_-]+$') { throw 'Add-NotifierHooks: недопустимый секрет хуков' }
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -174,6 +175,11 @@ function Add-NotifierHooks {
                 '--variable', '%CLAUDE_CODE_ENTRYPOINT=', '--variable', '%CLAUDE_CODE_HOST_SESSION_ID=',
                 '--expand-header', 'X-Claude-Entry: {{CLAUDE_CODE_ENTRYPOINT}}', '--expand-header', 'X-Claude-Host: {{CLAUDE_CODE_HOST_SESSION_ID}}',
                 '--data-binary', '@-', "http://127.0.0.1:$Port$($script:CurlMarker)$($spec.Kind)")
+        }
+        elseif ($HookExe -and $spec.ContainsKey('Fast') -and $spec.Fast -and (Test-Path -LiteralPath $HookExe -PathType Leaf)) {
+            # Маленький .exe вместо PowerShell: SessionStart — сразу трею по HTTP, PermissionRequest без ожидания — мгновенно.
+            $hook.command = $HookExe
+            $hook.args = @($spec.Kind, '--bridge', $bridge, '--port', [string]$Port, '--secret', $Secret)
         }
         $mode = ''
         if ($spec.ContainsKey('Mode')) { $mode = [string]$spec.Mode }
@@ -266,4 +272,41 @@ function Save-ClaudeSettings {
     return $backup
 }
 
-Export-ModuleMember -Function Test-NotifierStatusLine, Set-NotifierStatusLine, Restore-NotifierStatusLine, Read-ClaudeSettings, Test-NotifierHook, Remove-NotifierHooks, Add-NotifierHooks, ConvertTo-PrettyJson, Save-ClaudeSettings
+function Get-NotifierSmartAppControlState {
+    <# .SYNOPSIS Smart App Control Windows 11: 0 — выключен, 1 — включён, 2 — проверяет (оценка); -1 — нет такой функции. #>
+    try { return [int](Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name VerifiedAndReputablePolicyState -ErrorAction Stop).VerifiedAndReputablePolicyState }
+    catch { return -1 }
+}
+
+function New-NotifierHookExe {
+    <#
+    .SYNOPSIS
+    Собирает быстрый мост хуков <AppRoot>\claude-notifier-hook.exe из <AppRoot>\hookexe\HookExe.cs (компилятор C#
+    из .NET Framework). Возвращает путь или '' — тогда хуки работают через PowerShell, как раньше.
+    #>
+    param([Parameter(Mandatory = $true)][string]$AppRoot, [int]$SmartAppControl = (Get-NotifierSmartAppControlState))
+    $src = Join-Path $AppRoot 'hookexe\HookExe.cs'
+    $exe = Join-Path $AppRoot 'claude-notifier-hook.exe'
+    if (Test-Path -LiteralPath $exe) { Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue }
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { return '' }
+    # Smart App Control (включён или проверяет) не даёт запускать свежесобранные неподписанные программы:
+    # хук упал бы с ошибкой. Тогда — PowerShell, как раньше.
+    if ($SmartAppControl -eq 1 -or $SmartAppControl -eq 2) {
+        Write-Host "Быстрый мост хуков не используется: включён Smart App Control (хуки работают через PowerShell)"
+        return ''
+    }
+    try {
+        Add-Type -TypeDefinition ([IO.File]::ReadAllText($src, [Text.Encoding]::UTF8)) -OutputAssembly $exe -OutputType ConsoleApplication -ReferencedAssemblies 'System.Web.Extensions' -ErrorAction Stop
+        # Самопроверка: Windows разрешает запуск (иначе хук падал бы при каждом событии).
+        $p = Start-Process -FilePath $exe -ArgumentList '--selftest' -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop
+        if ($p.ExitCode -eq 7) { return $exe }
+        throw "самопроверка: код $($p.ExitCode)"
+    }
+    catch {
+        Write-Warning "Быстрый мост хуков не используется ($($_.Exception.Message)) $([char]0x2014) хуки работают через PowerShell"
+        if (Test-Path -LiteralPath $exe) { Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue }
+    }
+    return ''
+}
+
+Export-ModuleMember -Function Get-NotifierSmartAppControlState, New-NotifierHookExe, Test-NotifierStatusLine, Set-NotifierStatusLine, Restore-NotifierStatusLine, Read-ClaudeSettings, Test-NotifierHook, Remove-NotifierHooks, Add-NotifierHooks, ConvertTo-PrettyJson, Save-ClaudeSettings

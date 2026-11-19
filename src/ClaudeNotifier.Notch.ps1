@@ -309,8 +309,61 @@ function ConvertTo-NotifierNotchItem {
         $it.Ask = $ask
     }
     $it.Hint = Get-NotifierNotchHint -Session $Session -State $it.State -Title ([string]$Card.Title)
+    $it.Pinned = [bool]$Card.Pinned
+    $it.Project = if ($Session.PSObject.Properties['project']) { [string]$Session.project } else { '' }
+    $it.Feed = [string[]]@(Get-NotifierNotchFeed -Session $Session)
     $it.Tag = $Card
     return $it
+}
+
+function Get-NotifierDayMood {
+    <#
+    .SYNOPSIS
+    Настроение маскота по сегодняшнему дню (история уведомлений): tea — ошибок 3 и больше и их не меньше, чем «Готово»
+    (сочувствует, рядом чашка чая); cheer — с 17:00, «Готово» 5 и больше (празднует); иначе ''. Считается раз в минуту.
+    #>
+    param([datetime]$Now = [DateTime]::Now, [string]$DataRoot = $script:TrayDataRoot, [switch]$Force)
+    if (-not $Force -and $script:DayMoodAt -and ([DateTime]::UtcNow - $script:DayMoodAt).TotalSeconds -lt 60) { return $script:DayMood }
+    $done = 0; $errors = 0
+    foreach ($e in @(Get-NotifierHistory -DataRoot $DataRoot)) {
+        if ($null -eq $e) { continue }
+        $ts = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse([string]$e.ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$ts)) { continue }
+        if ($ts.ToLocalTime().Date -ne $Now.Date) { continue }
+        switch ([string]$e.type) { 'done' { $done++ } 'error' { $errors++ } }
+    }
+    $mood = ''
+    if ($errors -ge 3 -and $errors -ge $done) { $mood = 'tea' }
+    elseif ($Now.Hour -ge 17 -and $done -ge 5) { $mood = 'cheer' }
+    $script:DayMood = $mood; $script:DayMoodAt = [DateTime]::UtcNow
+    return $mood
+}
+
+function Get-NotifierNotchFeed {
+    <#
+    .SYNOPSIS
+    Лента сеанса для страницы ответа: последние 5 событий журнала — «вид|ЧЧ:мм|текст» (вид: you, claude, tool).
+    #>
+    param($Session, [int]$Max = 5)
+    if ($null -eq $Session -or -not $Session.PSObject.Properties['stats'] -or $null -eq $Session.stats -or -not $Session.stats.PSObject.Properties['feed']) { return @() }
+    $out = @()
+    foreach ($f in @(@($Session.stats.feed) | Where-Object { $_ } | Select-Object -Last $Max)) {
+        $k = [string]$f.k
+        if (@('you', 'claude', 'tool') -notcontains $k) { continue }
+        $text = (([string]$f.text) -replace '[\r\n|]+', ' ').Trim()
+        if ($text -eq '') { continue }
+        if ($k -eq 'tool' -and $f.PSObject.Properties['ms'] -and [int64]$f.ms -ge 1000) {
+            $sec = [int][Math]::Round([int64]$f.ms / 1000.0)
+            $text += " $([char]0x00B7) " + $(if ($sec -lt 60) { "$sec с" } else { "$([int][Math]::Floor($sec / 60)) мин $($sec % 60) с" })
+        }
+        $when = ''
+        $ts = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse([string]$f.ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$ts)) {
+            $when = $ts.ToLocalTime().ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        $out += "$k|$when|$text"
+    }
+    return $out
 }
 
 function Get-NotifierNotchHint {
@@ -372,7 +425,8 @@ function Get-NotifierNotchItems {
     foreach ($dev in $order) {
         $grp = @($list | Where-Object { $_.Device -eq $dev })
         $i = 0
-        $keyed = foreach ($it in $grp) { $u = [Array]::IndexOf($user, [string]$it.Id); [pscustomobject]@{ It = $it; K = $(if ($u -ge 0) { $u } else { 100000 + $i }) }; $i++ }
+        # Закреплённые — всегда первыми (между собой — как перетащили); затем остальные.
+        $keyed = foreach ($it in $grp) { $u = [Array]::IndexOf($user, [string]$it.Id); [pscustomobject]@{ It = $it; K = $(if ($it.Pinned) { 0 } else { 1000000 }) + $(if ($u -ge 0) { $u } else { 100000 + $i }) }; $i++ }
         foreach ($k in @($keyed | Sort-Object K)) { $out.Add($k.It) }
     }
     $script:NotchLastIds = @($out | ForEach-Object { $_.Id })
@@ -415,6 +469,7 @@ function Update-NotifierMascotFlags {
     [ClaudeNotifier.Ui.MascotSound]::Enabled = [bool]$Config.notch.sounds
     [ClaudeNotifier.Ui.MascotSound]::Muted = [bool](Test-NotifierQuietTime -Config $Config)
     [ClaudeNotifier.Ui.MascotPlay]::Seasonal = [bool]$Config.notch.seasonal
+    if ('ClaudeNotifier.Ui.MascotColor' -as [type]) { [ClaudeNotifier.Ui.MascotColor]::Mode = [string]$Config.notch.color }
     if ('ClaudeNotifier.Ui.NotchHost' -as [type]) {
         $scale = @{ compact = 0.85; normal = 1.0; large = 1.2 }[[string]$Config.notch.size]
         if (-not $scale) { $scale = 1.0 }
@@ -549,6 +604,8 @@ function Update-NotifierNotch {
     Set-NotifierNotchPlacement -Config $config   # монитор отключили или сменили разрешение — переставить
     [ClaudeNotifier.Ui.NotchHost]::SetItems((Get-NotifierNotchItems -Sessions $Sessions -Config $config))
     Push-NotifierNotchLimits -SoundOff ([bool]$config.quiet.enabled)
+    try { [ClaudeNotifier.Ui.NotchView]::DayMood = Get-NotifierDayMood } catch { }
+    [ClaudeNotifier.Ui.NotchHost]::SetUpdate([bool]$script:UpdateInfo)   # значок «Обновление» в верхней панели
     $script:NotchSessions = $Sessions
     if ($script:NotchExpanded -and $script:NotchPage -eq 'devices') { Push-NotifierNotchPage -Page devices }
     if ($script:NotchExpanded -and $script:NotchPage -eq 'history') { Push-NotifierNotchPage -Page history }
@@ -593,6 +650,10 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow choice 'quiet' 'Без звука' 'Всегда или по часам' -Value (Get-NotifierSelectLabel 'quiet' -Config $c)
     $rows += New-NotifierNotchRow choice 'longTasks' 'Звук «Готово»' 'Только после долгих задач' -Value (Get-NotifierSelectLabel 'longTasks' -Config $c)
     $rows += New-NotifierNotchRow choice 'budget' 'Расход за день' 'Предупредить о сумме' -Value (Get-NotifierSelectLabel 'budget' -Config $c)
+    $rows += New-NotifierNotchRow header -Title 'Тишина и голос'
+    $rows += New-NotifierNotchRow switch 'smartQuiet' 'Умная тишина' 'Игра, презентация или звонок — уведомления придут сводкой' -On ([bool]$c.smartQuiet.enabled)
+    $rows += New-NotifierNotchRow choice 'voice' 'Голосом' 'Когда вас нет за ПК' -Value (Get-NotifierSelectLabel 'voice' -Config $c)
+    $rows += New-NotifierNotchRow note -Title 'Свои правила для проекта (все, только важные, без уведомлений) — в меню сеанса: правый щелчок по нему.'
     $rows += New-NotifierNotchRow header -Title 'Телефон'
     $rows += New-NotifierNotchRow button 'push' 'На телефон вне сети' (Format-NotifierPushTarget ([string]$c.push.url)) -Value 'Настроить'
     $rows += New-NotifierNotchRow choice 'push.away' 'Отправлять' 'Через ntfy или Telegram' -Value (Get-NotifierSelectLabel 'push.away' -Config $c)
@@ -625,6 +686,7 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow header -Title 'Маскоты'
     $rows += New-NotifierNotchRow choice 'mascot:' 'Этот ПК' 'Сеансы Claude на этом компьютере' -Value (Get-NotifierSelectLabel 'mascot:' -Config $c)
     $rows += New-NotifierNotchRow button 'mascotPreview' 'Анимации' 'Все движения маскота этого ПК по очереди' -Value 'Показать'
+    $rows += New-NotifierNotchRow choice 'notch.color' 'Цвет маскота' 'Свой оттенок маскота этого ПК' -Value (Get-NotifierSelectLabel 'notch.color' -Config $c)
     $rows += New-NotifierNotchRow switch 'notch.sounds' 'Звуки маскота' "Мурлычет, ойкает, зевает $([char]0x2014) тихо" -On ([bool]$c.notch.sounds)
     $rows += New-NotifierNotchRow switch 'notch.seasonal' 'Наряды' 'Ночной колпак, Новый год, Хэллоуин' -On ([bool]$c.notch.seasonal)
     $devices = @()
@@ -702,6 +764,25 @@ function Get-NotifierNotchStatsRows {
     $chart = New-NotifierNotchRow chart
     $chart.Values = [double[]]$c.Values; $chart.Labels = [string[]]$c.Labels; $chart.ValueLabels = [string[]]$c.ValueLabels; $chart.Highlight = [int]$c.Highlight
     $rows += $chart
+    # Неделя в графиках: время работы Claude, расход и задачи по дням.
+    $days = @($s.Days)
+    $ru = [Globalization.CultureInfo]::GetCultureInfo('ru-RU')
+    $hours = [double[]]@($days | ForEach-Object { [Math]::Round([double]$_.seconds / 3600, 1) })
+    $rows += New-NotifierNotchRow header -Title 'Время работы Claude'
+    $rows += New-NotifierWeekChart -Values $hours -Labels $c.Labels -Format { param($v) if ($v -le 0) { '' } elseif ($v -lt 1) { "$([int][Math]::Round($v * 60)) м" } else { "$v ч" } }
+    if (@($days | Where-Object { [double]$_.cost -gt 0 }).Count -gt 0) {
+        $rows += New-NotifierNotchRow header -Title 'Расход по дням'
+        $rows += New-NotifierWeekChart -Values ([double[]]@($days | ForEach-Object { [double]$_.cost })) -Labels $c.Labels -Format { param($v) if ($v -le 0) { '' } else { Format-NotifierCost $v } }
+    }
+    $tasks = Get-NotifierWeekTasks -Dates @($days | ForEach-Object { [string]$_.date })
+    $rows += New-NotifierNotchRow header -Title 'Задачи по дням'
+    $rows += New-NotifierWeekChart -Values $tasks.Counts -Labels $c.Labels -Format { param($v) if ($v -le 0) { '' } else { [string][int]$v } }
+    $rows += New-NotifierNotchRow header -Title 'Самые долгие задачи'
+    if ($tasks.Longest.Count -eq 0) { $rows += New-NotifierNotchRow note -Title 'Здесь появятся задачи, над которыми Claude работал дольше всего за неделю.' }
+    foreach ($t in $tasks.Longest) {
+        $r = New-NotifierNotchRow link "hist:$($t.Sid)" $t.Title $t.Sub -Value (Format-NotifierDuration ([int64]$t.Seconds))
+        $rows += $r
+    }
     foreach ($section in @(@{ Name = 'Сегодня'; Items = @($s.Today) }, @{ Name = 'За 7 дней'; Items = @($s.Week) })) {
         $rows += New-NotifierNotchRow header -Title $section.Name
         if (@($section.Items | Where-Object { $_ }).Count -eq 0) { $rows += New-NotifierNotchRow note -Title 'Пока нет данных.' }
@@ -714,6 +795,65 @@ function Get-NotifierNotchStatsRows {
     }
     $rows += New-NotifierNotchRow note -Title 'Из журналов Claude Code на этом ПК. Время — пока сеанс активен; стоимость — примерная, по ценам API.'
     return $rows   # строки по одной в конвейер: вызывающие оборачивают в @()
+}
+
+function Get-NotifierNotchUpdateRows {
+    <# .SYNOPSIS Страница «Обновление»: что нового (сообщения изменений или описание выпуска) и кнопка «Обновить сейчас». #>
+    param($Info = $script:UpdateInfo)
+    if ($null -eq $Info) { return (New-NotifierNotchRow note -Title 'Установлена последняя версия. Обновления проверяются раз в 6 часов.') }
+    $rows = @()
+    $title = if ($Info.ContainsKey('Tag') -and $Info.Tag) { "Выпуск $($Info.Tag)" } else { "Новых изменений: $($Info.Count)" }
+    $rows += New-NotifierNotchRow header -Title 'Доступно обновление'
+    $rows += New-NotifierNotchRow button 'update-now' $title "Трей закроется на несколько секунд и запустится с новой версией" -Value 'Обновить сейчас'
+    $rows += New-NotifierNotchRow header -Title 'Что нового'
+    $notes = @()
+    if ($Info.ContainsKey('Notes')) { $notes = @($Info.Notes | Where-Object { $_ }) }
+    if ($notes.Count -eq 0 -and $Info.Message) { $notes = @([string]$Info.Message) }
+    foreach ($n in $notes) { $rows += New-NotifierNotchRow info -Title ([string]$n) }
+    if ($notes.Count -eq 0) { $rows += New-NotifierNotchRow note -Title 'Описание изменений недоступно.' }
+    return $rows
+}
+
+function New-NotifierWeekChart {
+    <# .SYNOPSIS Строка-график по 7 дням: значения, подписи дней, подписи над столбцами (Format), сегодня выделено. #>
+    param([double[]]$Values, [string[]]$Labels, [scriptblock]$Format)
+    $row = New-NotifierNotchRow chart
+    $row.Values = [double[]]$Values
+    $row.Labels = [string[]]$Labels
+    $row.ValueLabels = [string[]]@($Values | ForEach-Object { [string](& $Format $_) })
+    $row.Highlight = $Values.Count - 1
+    return $row
+}
+
+function Get-NotifierWeekTasks {
+    <#
+    .SYNOPSIS
+    Из истории уведомлений за неделю: Counts — сколько задач закончено в каждый день (Dates — yyyy-MM-dd, местное время);
+    Longest — до Max самых долгих задач (Title, Sub, Seconds, Sid) — у «Готово» есть taskSeconds.
+    #>
+    param([string[]]$Dates, [string]$DataRoot = $script:TrayDataRoot, [int]$Max = 5)
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $counts = New-Object 'double[]' $Dates.Count
+    $long = @()
+    foreach ($e in @(Get-NotifierHistory -DataRoot $DataRoot)) {
+        if ($null -eq $e -or [string]$e.type -ne 'done') { continue }
+        $ts = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse([string]$e.ts, $inv, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$ts)) { continue }
+        $local = $ts.ToLocalTime()
+        $i = [Array]::IndexOf($Dates, $local.ToString('yyyy-MM-dd', $inv))
+        if ($i -lt 0) { continue }
+        $counts[$i]++
+        if ($e.PSObject.Properties['taskSeconds'] -and [int64]$e.taskSeconds -ge 60) {
+            $title = ([string]$e.title -replace "^Готово\s*$([char]0x00B7)\s*", '').Trim()
+            if ($title -eq '') { $title = 'Задача' }
+            $prev = (([string]$e.preview).Trim() -replace '\s+', ' ')
+            if ($prev.Length -gt 90) { $prev = $prev.Substring(0, 89) + [char]0x2026 }
+            $sub = $local.ToString('ddd HH:mm', [Globalization.CultureInfo]::GetCultureInfo('ru-RU'))
+            if ($prev) { $sub += " $([char]0x00B7) $prev" }
+            $long += [pscustomobject]@{ Title = $title; Sub = $sub; Seconds = [int64]$e.taskSeconds; Sid = $(if ($e.PSObject.Properties['session_id']) { [string]$e.session_id } else { '' }) }
+        }
+    }
+    return @{ Counts = $counts; Longest = @($long | Sort-Object Seconds -Descending | Select-Object -First $Max) }
 }
 
 function Get-NotifierNotchHistoryRows {
@@ -789,6 +929,7 @@ function Push-NotifierNotchPage {
         'settings' { $rows = @(Get-NotifierNotchSettingsRows) }
         'devices' { $rows = @(Get-NotifierNotchDevicesRows -Sessions @($script:NotchSessions)) }
         'history' { $rows = @(Get-NotifierNotchHistoryRows) }
+        'update' { $rows = @(Get-NotifierNotchUpdateRows) }
         'stats' {
             $rows = @(Get-NotifierNotchStatsRows)
             # Пересчёт — если итога ещё нет или он старше 10 минут (иначе готовый итог снова запускал бы пересчёт).
@@ -844,7 +985,7 @@ function Invoke-NotifierNotchSetting {
     $c = Get-NotifierConfig -DataRoot $script:TrayDataRoot
     $null = switch -Regex ($Key) {
         '^event\.(done|permission|error|limit)$' { Set-NotifierEventOption -Type $Matches[1] -Enabled (-not [bool]$c.events[$Matches[1]].enabled) }
-        '^(approvals|quickReplies|groups)$' { Set-NotifierOptionValue -Name $Key -Value (-not [bool]$c[$Key].enabled); $script:SessionsDirty = $true }
+        '^(approvals|quickReplies|groups|smartQuiet)$' { Set-NotifierOptionValue -Name $Key -Value (-not [bool]$c[$Key].enabled); $script:SessionsDirty = $true }
         '^showPrompt$' { Set-NotifierOptionValue -Name showPrompt -Value (-not [bool]$c.showPrompt) }
         '^update\.enabled$' { Set-NotifierOptionValue -Name update -Value (-not [bool]$c.update.enabled) }
         '^push\.preview$' { Set-NotifierOptionValue -Name push -Field preview -Value (-not [bool]$c.push.preview) }
@@ -1009,6 +1150,10 @@ function Get-NotifierSelectOptions {
             New-SelectOption 'light' 'Светлая' ([string]$c.notch.theme -eq 'light')
             New-SelectOption 'auto' 'Как в Windows' ([string]$c.notch.theme -eq 'auto')
         }
+        '^notch\.color$' {
+            $names = [ordered]@{ none = 'Как есть'; h60 = 'Оттенок +60°'; h120 = 'Оттенок +120°'; h180 = 'Оттенок 180°'; h240 = 'Оттенок −120°'; h300 = 'Оттенок −60°'; pastel = 'Пастель'; mono = 'Чёрно-белый' }
+            foreach ($k in $names.Keys) { New-SelectOption $k $names[$k] ([string]$c.notch.color -eq $k) }
+        }
         '^notch\.size$' {
             New-SelectOption 'compact' 'Компактная' ([string]$c.notch.size -eq 'compact')
             New-SelectOption 'normal' 'Обычная' ([string]$c.notch.size -eq 'normal')
@@ -1033,6 +1178,10 @@ function Get-NotifierSelectOptions {
         '^inactive$' {
             $cur = if ($c.inactive.enabled) { [string][int]$c.inactive.hours } else { 'off' }
             Get-NumberSelectOptions -Values 1, 2, 4, 8, 24 -Current $cur -Off 'off' -Format { "$($args[0]) ч" }
+        }
+        '^voice$' {
+            $cur = if ($c.voice.enabled) { [string][int]$c.voice.idle } else { 'off' }
+            Get-NumberSelectOptions -Values 1, 3, 5, 10, 30 -Current $cur -Off 'off' -Format { "Нет за ПК $($args[0]) мин" }
         }
         '^push\.away$' {
             $cur = if ($c.push.enabled) { [string][int]$c.push.away } else { 'off' }
@@ -1126,7 +1275,7 @@ function Set-NotifierSelectValue {
             if ($Value -eq 'off') { Set-NotifierOptionValue -Name notch -Field digest -Value $false }
             else { Set-NotifierOptionValue -Name notch -Field digest -Value $true; Set-NotifierOptionValue -Name notch -Field digestHour -Value ([int]$Value) }
         }
-        '^notch\.(theme|size)$' {
+        '^notch\.(theme|size|color)$' {
             Set-NotifierOptionValue -Name notch -Field $Matches[1] -Value $Value
             Update-NotifierMascotFlags
             Set-NotifierNotchPlacement -Force
@@ -1140,9 +1289,9 @@ function Set-NotifierSelectValue {
             elseif ($null -eq (Get-NotifierPushTarget ([string]$config.push.url))) { Edit-NotifierPushSettings -Away ([int]$Value) }
             else { $section = $config.push; $section.enabled = $true; $section.away = [int]$Value; Set-NotifierConfigValue -Name push -Value ([pscustomobject]$section) -DataRoot $script:TrayDataRoot }
         }
-        '^(longTasks|context|stalled|inactive|budget)$' {
+        '^(longTasks|context|stalled|inactive|budget|voice)$' {
             $name = $Matches[1]
-            $field = @{ longTasks = 'minutes'; context = 'warnPercent'; stalled = 'minutes'; inactive = 'hours'; budget = 'daily' }[$name]
+            $field = @{ longTasks = 'minutes'; context = 'warnPercent'; stalled = 'minutes'; inactive = 'hours'; budget = 'daily'; voice = 'idle' }[$name]
             if ($Value -eq 'off') { Set-NotifierOptionValue -Name $name -Value $false }
             else {
                 $section = $config[$name]
@@ -1403,6 +1552,38 @@ function Invoke-NotifierNotchCommand {
                 [void](Invoke-NotifierCardAction -Item $card -ActionId $kind -Text ([string]$Event.Action))
                 [void](Invoke-NotifierSessionsRefresh)
             }
+            'allowall' {
+                # «Разрешить все»: каждый запрос разрешения этого проекта — как кнопка «Разрешить» у него.
+                $project = [string]$Event.Action
+                if ($project -eq '') { return }
+                $n = 0
+                foreach ($c in @($script:NotchCards.Values)) {
+                    if ([string]$c.State -ne 'permission') { continue }
+                    if (@($c.Actions | ForEach-Object { ($_ -split '\|')[0] }) -notcontains 'allow') { continue }
+                    $s = Get-NotifierCardSession $c
+                    if ($null -eq $s -or -not $s.PSObject.Properties['project'] -or [string]$s.project -ne $project) { continue }
+                    try { [void](Invoke-NotifierCardAction -Item $c -ActionId 'allow'); $n++ }
+                    catch { Write-NotifierLog -Level WARN -Message "notch: разрешить все: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+                }
+                Write-NotifierLog -Level INFO -Message "notch: разрешить все в проекте — запросов: $n" -DataRoot $script:TrayDataRoot
+                [void](Invoke-NotifierSessionsRefresh)
+            }
+            'files' {
+                # Файлы, перетащенные на сеанс: Claude ждёт ответа — пути уходят ответом; иначе — в буфер обмена.
+                if ($null -eq $card) { return }
+                $paths = [string]$Event.Action
+                $acts = @($card.Actions | ForEach-Object { ($_ -split '\|')[0] })
+                $kind = if ($acts -contains 'answer-custom') { 'answer-text' } elseif ($acts -contains 'reply-custom') { 'reply-text' } else { '' }
+                if ($kind) {
+                    [void](Invoke-NotifierCardAction -Item $card -ActionId $kind -Text $paths)
+                    [ClaudeNotifier.Ui.NotchHost]::Notice("Отправлено Claude: $paths", 3500)
+                    [void](Invoke-NotifierSessionsRefresh)
+                }
+                else {
+                    try { [System.Windows.Forms.Clipboard]::SetText($paths) } catch { }
+                    [ClaudeNotifier.Ui.NotchHost]::Notice("Claude сейчас не ждёт ответа $([char]0x2014) пути скопированы, вставьте их (Ctrl+V)", 4500)
+                }
+            }
             'action' {
                 if ($null -eq $card) { return }
                 $script:DialogOpen = $true
@@ -1443,6 +1624,10 @@ function Invoke-NotifierNotchCommand {
                 elseif ($id -eq 'replyTexts') { Edit-NotifierQuickReplyTexts }
                 elseif ($id -eq 'push') { Edit-NotifierPushSettings }
                 elseif ($id -eq 'update') { [void](Invoke-NotifierUpdateNow) }
+                elseif ($id -eq 'update-now') {
+                    $msg = Invoke-NotifierUpdateNow -NoConfirm
+                    if ($msg) { [ClaudeNotifier.Ui.NotchHost]::Notice($msg, 4000) }
+                }
                 elseif ($id -eq 'diag') { Show-NotifierDiagnostics }
                 elseif ($id -eq 'mascotPreview') { Show-NotifierMascotPreview }
                 elseif ($id -like 'sound.*') { $keepHold = $true; Show-NotifierSoundMenuAt -Type $id.Substring(6) -Location $Event.Location }

@@ -196,8 +196,25 @@ namespace ClaudeNotifier.Ui {
         }
 
         // Рисует маскота; сразу после смены статуса — плавный переход: старый вид тает, новый проявляется.
+        bool tinting;
+
         void DrawMascot(Graphics g, RectangleF r, NotchItem it, string state, int seed, CatMood md, FaceMotion fm) {
             string dev = it != null ? it.Device : null;
+            // Свой цвет маскота этого ПК: рисуем в картинку и переносим через матрицу цвета.
+            if (!tinting && MascotColor.Active && string.IsNullOrEmpty(dev) && r.Width >= 4) {
+                RectangleF tb = RectangleF.Inflate(r, r.Width * 0.6f, r.Height * 0.8f);
+                int tx0 = (int)Math.Floor(tb.X), ty0 = (int)Math.Floor(tb.Y), tw0 = (int)Math.Ceiling(tb.Width) + 2, th0 = (int)Math.Ceiling(tb.Height) + 2;
+                using (Bitmap tbmp = new Bitmap(tw0, th0, PixelFormat.Format32bppPArgb)) {
+                    using (Graphics tg = Graphics.FromImage(tbmp)) {
+                        tg.SmoothingMode = SmoothingMode.AntiAlias;
+                        tg.TranslateTransform(-tx0, -ty0);
+                        tinting = true;
+                        try { DrawMascot(tg, r, it, state, seed, md, fm); } finally { tinting = false; }
+                    }
+                    MascotColor.Blit(g, tbmp, tx0, ty0);
+                }
+                return;
+            }
             double since = fm != null && fm.OldState != null ? Since(fm.StateAt) : double.MaxValue;
             if (!Animate || since >= BlendSeconds || fm.OldState == state || r.Width < 4) { Mascot.Paint(g, r, state, T, seed, Animate, md, dev); return; }
             float k = MascotMotion.Smooth((float)(since / BlendSeconds));

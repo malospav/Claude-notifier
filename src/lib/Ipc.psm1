@@ -102,6 +102,7 @@ function Receive-NotifierFrame {
         return 'invalid'
     }
     $Queue.Enqueue($obj)
+    try { if ('ClaudeNotifier.Ui.NotchHost' -as [type]) { [ClaudeNotifier.Ui.NotchHost]::Wake() } } catch { }   # трей — сразу
     return 'ok'
 }
 

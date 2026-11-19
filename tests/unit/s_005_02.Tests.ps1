@@ -37,15 +37,15 @@ Describe 's_005_02 · History.psm1' {
         $h[1].title | Should -Be 't2'
     }
 
-    It '101 событие → в файле 100, самое старое вытеснено' {
+    It '301 событие → в файле 300 (неделя для статистики), самое старое вытеснено' {
         $root = Join-Path $TestDrive 'cap'
-        $seed = @(1..100 | ForEach-Object { New-Ev $_ })
+        $seed = @(1..300 | ForEach-Object { New-Ev $_ })
         Save-NotifierHistory -Items $seed -DataRoot $root
-        Add-NotifierHistory -Event (New-Ev 101) -DataRoot $root | Should -Be 100
+        Add-NotifierHistory -Event (New-Ev 301) -DataRoot $root | Should -Be 300
         $h = @(Get-NotifierHistory -DataRoot $root)
-        $h.Count | Should -Be 100
+        $h.Count | Should -Be 300
         $h[0].title | Should -Be 't2'
-        $h[-1].title | Should -Be 't101'
+        $h[-1].title | Should -Be 't301'
     }
 
     It 'запись атомарная: временных файлов не остаётся' {

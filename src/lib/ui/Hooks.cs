@@ -164,6 +164,7 @@ namespace ClaudeNotifier.Ui {
                     } catch { }
                     Calls.Enqueue(call);
                     Interlocked.Increment(ref Accepted);
+                    NotchHost.Wake();   // трей забирает событие сразу, а не на следующем такте таймера
                     Reply(s, "204 No Content");
                 } catch { }
             }

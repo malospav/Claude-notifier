@@ -54,8 +54,11 @@ function Get-NotifierDefaultConfig {
         update          = @{ enabled = $true; channel = 'release' }   # раз в 6 ч проверять обновление на GitHub (app\version.json); channel — release (последний выпуск, иначе main) | main
         budget          = @{ enabled = $false; daily = 20 }        # расход за сегодня (примерно, по ценам API) дошёл до суммы, $ — одно уведомление в день
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
-        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'flatsphynx'; mascots = @{}; stats = $true; attention = $true; sounds = $true; seasonal = $true; digest = $true; digestHour = 18; inline = $true; theme = 'dark'; size = 'normal' }   # theme — dark | light | auto (как в Windows); size — compact | normal | large   # inline — пока вы за ПК, уведомления показывает шторка (без всплывающих окон Windows)   # sounds — звуки маскота; seasonal — наряды (ночной колпак, праздники); digest — сводка дня во «выдохе» шторки после digestHour   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'flatsphynx'; mascots = @{}; stats = $true; attention = $true; sounds = $true; seasonal = $true; digest = $true; digestHour = 18; inline = $true; theme = 'dark'; size = 'normal'; color = 'none' }   # theme — dark | light | auto (как в Windows); size — compact | normal | large   # inline — пока вы за ПК, уведомления показывает шторка (без всплывающих окон Windows)   # sounds — звуки маскота; seasonal — наряды (ночной колпак, праздники); digest — сводка дня во «выдохе» шторки после digestHour   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
+        smartQuiet      = @{ enabled = $true }                     # игра на весь экран, презентация, звонок — уведомления копятся и приходят сводкой
+        voice           = @{ enabled = $false; idle = 5 }          # вас нет за ПК дольше idle минут — ещё и голосом Windows
+        projects        = @{}                                      # правила проектов: { имя проекта: important (без «Готово») | off }
     }
 }
 
@@ -110,6 +113,7 @@ function Set-NotifierConfigValue {
     $tmp = "$path.tmp-$PID"
     [IO.File]::WriteAllText($tmp, ($obj | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding $false))
     Move-Item -LiteralPath $tmp -Destination $path -Force
+    $script:ConfigMem = @{ Stamp = ''; Json = '' }   # записали — следующий вызов перечитает
 }
 
 function Get-NotifierEventTitle {
@@ -164,6 +168,7 @@ function Merge-EventsSection($Config, $UserEvents, [string]$DataRoot) {
 }
 
 $script:ConfigCodeStamp = ''
+$script:ConfigMem = @{ Stamp = ''; Json = '' }   # итог настроек в памяти (Get-NotifierConfig)
 try { $script:ConfigCodeStamp = [string][IO.File]::GetLastWriteTimeUtc($PSCommandPath).Ticks } catch { }
 
 function Get-NotifierConfig {
@@ -175,21 +180,31 @@ function Get-NotifierConfig {
     Итог запоминается в <DataRoot>\cache\config.merged.json вместе с полным текстом config.json и отметкой версии
     этого модуля: мост хуков запускается на каждое событие, а первая проверка всех настроек в новом процессе
     PowerShell стоит ~60 мс. Кэш используется, только если текст config.json совпадает символ в символ.
+    В долгоживущем трее итог ещё и в памяти (по размеру и времени изменения файла): настройки читаются много раз
+    в секунду, а проверка времени файла дешевле чтения и разбора. Каждый вызов получает свою копию.
     #>
     [CmdletBinding()]
     param(
         [string]$DataRoot = (Get-NotifierDataRoot)
     )
-    $path = Join-Path $DataRoot 'config.json'
-    if (-not [IO.File]::Exists($path)) { return (Get-NotifierDefaultConfig) }
+    $path = [IO.Path]::Combine($DataRoot, 'config.json')   # не Join-Path: вызывается много раз в секунду
+    $fi = New-Object System.IO.FileInfo $path
+    if (-not $fi.Exists) { return (Get-NotifierDefaultConfig) }
+    $fast = [bool]('ClaudeNotifier.JsonLite' -as [type])
+    $stamp = "$DataRoot|$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+    if ($fast -and $script:ConfigMem.Stamp -ceq $stamp) {
+        try { return [ClaudeNotifier.JsonLite]::Parse($script:ConfigMem.Json, $true) } catch { }
+    }
     $text = $null
     try { $text = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8) } catch { }
-    $fast = [bool]('ClaudeNotifier.JsonLite' -as [type])
     $cache = Join-Path $DataRoot 'cache\config.merged.json'
     if ($fast -and $null -ne $text -and [IO.File]::Exists($cache)) {
         try {
             $c = [ClaudeNotifier.JsonLite]::Parse([IO.File]::ReadAllText($cache, [Text.Encoding]::UTF8), $true)
-            if ($c -is [hashtable] -and [string]$c['ver'] -ceq $script:ConfigCodeStamp -and [string]$c['src'] -ceq $text -and $c['cfg'] -is [hashtable]) { return $c['cfg'] }
+            if ($c -is [hashtable] -and [string]$c['ver'] -ceq $script:ConfigCodeStamp -and [string]$c['src'] -ceq $text -and $c['cfg'] -is [hashtable]) {
+                $script:ConfigMem = @{ Stamp = $stamp; Json = [ClaudeNotifier.JsonLite]::Write($c['cfg']) }
+                return $c['cfg']
+            }
         }
         catch { }
     }
@@ -202,6 +217,7 @@ function Get-NotifierConfig {
             Move-Item -LiteralPath $tmp -Destination $cache -Force
         }
         catch { }
+        try { $script:ConfigMem = @{ Stamp = $stamp; Json = [ClaudeNotifier.JsonLite]::Write($config) } } catch { }
     }
     return $config
 }
@@ -354,7 +370,7 @@ function Get-NotifierConfigUncached {
             if ($stats.value -is [bool]) { $config.notch.stats = $stats.value }
             else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.stats' должно быть true/false" -DataRoot $DataRoot }
         }
-        foreach ($pair in @(@('theme', @('dark', 'light', 'auto')), @('size', @('compact', 'normal', 'large')))) {
+        foreach ($pair in @(@('theme', @('dark', 'light', 'auto')), @('size', @('compact', 'normal', 'large')), @('color', @('none', 'h60', 'h120', 'h180', 'h240', 'h300', 'pastel', 'mono')))) {
             $pv = Get-JsonProperty $notch.value $pair[0]
             if (-not $pv.found) { continue }
             if ($pair[1] -contains [string]$pv.value) { $config.notch[$pair[0]] = [string]$pv.value }
@@ -379,6 +395,16 @@ function Get-NotifierConfigUncached {
             }
         }
     }
+    Merge-OptionSection $config $user 'smartQuiet' @{} $DataRoot
+    Merge-OptionSection $config $user 'voice' @{ idle = @(1, 120) } $DataRoot
+    $pr = Get-JsonProperty $user 'projects'
+    if ($pr.found -and $pr.value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($p in $pr.value.PSObject.Properties) {
+            $name = [string]$p.Name
+            if ($name.Length -gt 0 -and $name.Length -le 200 -and @('important', 'off') -contains [string]$p.Value) { $config.projects[$name] = [string]$p.Value }
+        }
+    }
+    elseif ($pr.found -and $null -ne $pr.value) { Write-NotifierLog -Level WARN -Message "config.json: 'projects' должно быть объектом { проект: important | off }" -DataRoot $DataRoot }
     Merge-OptionSection $config $user 'quickReplies' @{ minutes = @(1, 240) } $DataRoot
     # Свои тексты быстрых ответов: непустые строки до 40 знаков, не больше 5; иначе — по умолчанию.
     $qr = Get-JsonProperty $user 'quickReplies'

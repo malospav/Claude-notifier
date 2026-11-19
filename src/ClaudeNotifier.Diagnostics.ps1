@@ -90,6 +90,27 @@ function Get-NotifierDiagReport {
     return ($lines -join "`r`n")
 }
 
+$script:StartupCheckAt = [datetime]::UtcNow.AddSeconds(45)   # через 45 с после запуска трея — проверить себя
+$script:StartupCheckDone = $false
+
+function Invoke-NotifierStartupCheck {
+    <#
+    .SYNOPSIS
+    Один раз после запуска трея: все проверки «Проверить работу»; есть неполадки (ошибки, не замечания) — шторка
+    показывает, что не так и где подробности; без шторки — уведомление Windows.
+    #>
+    param([datetime]$Now = [DateTime]::UtcNow)
+    if ($script:StartupCheckDone -or $Now -lt $script:StartupCheckAt) { return }
+    $script:StartupCheckDone = $true
+    $bad = @(Get-NotifierDiagnostics | Where-Object { $_.Level -eq 'error' -and $_.Title -ne 'Журнал' })
+    if ($bad.Count -eq 0) { return }
+    $text = "Проверка: $(($bad | ForEach-Object { $_.Title }) -join ', ') $([char]0x2014) подробности: Настройки → Система → «Проверить работу»"
+    Write-NotifierLog -Level WARN -Message "tray: самопроверка: $(($bad | ForEach-Object { "$($_.Title): $($_.Detail)" }) -join '; ')" -DataRoot $script:TrayDataRoot
+    if ($script:TrayNoOutput) { return }
+    if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::Peek($text, 9000) }
+    else { [void](Show-NotifierToast -Event ([pscustomobject]@{ type = 'error'; title = 'Claude Notifier: есть неполадки'; preview = $text }) -DataRoot $script:TrayDataRoot) }
+}
+
 function Get-NotifierDiagnostics {
     <# .SYNOPSIS Все проверки: массив @{ Level = ok | warn | error; Title; Detail }. #>
     param([string]$DataRoot = $script:TrayDataRoot, [string]$SettingsPath = (Join-Path $env:USERPROFILE '.claude\settings.json'), [datetime]$Now = [DateTime]::UtcNow)

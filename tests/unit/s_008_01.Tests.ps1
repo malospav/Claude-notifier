@@ -57,7 +57,7 @@ Describe 's_008_01 · окно сеансов: карточки' {
             $f.Text | Should -Be 'Claude Notifier'
             $f.Tag.Title.Text | Should -Be 'Сеансы'
             $f.Tag.Cards.EmptyTitle | Should -Be 'Активных сеансов нет'
-            (@($f.Tag.Menu.Items | ForEach-Object { $_.Text }) -join ',') | Should -Be 'Перейти к окну,Изменённые файлы,Открыть папку проекта,,Переименовать…,Закрепить сверху,Без уведомлений,,Убрать из списка'
+            (@($f.Tag.Menu.Items | ForEach-Object { $_.Text }) -join ',') | Should -Be 'Перейти к окну,Изменённые файлы,Открыть папку проекта,,Переименовать…,Закрепить сверху,Без уведомлений,Уведомления проекта,,Убрать из списка'
         }
         finally { $f.Dispose() }
     }
