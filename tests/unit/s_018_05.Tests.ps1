@@ -92,6 +92,28 @@ Describe 's_018_05 · сеансы в шторке: ждёт, закреплён
         @(Get-NotifierNotchFeed -Session ([pscustomobject]@{ session_id = 'x' })).Count | Should -Be 0
     }
 
+    It 'сеанс другого устройства: лента и полный ответ — из событий его хуков' {
+        $root = New-Root 'remote'
+        $long = ('Первая строка ответа' + "`n`n") + ('x' * 900)
+        Add-NotifierRemoteFeed -SessionId 'mac-1' -Kind prompt -Json '{"session_id":"mac-1","prompt":"Почини сборку на маке"}' -Ts '2026-11-19T10:00:00Z' -DataRoot $root
+        Add-NotifierRemoteFeed -SessionId 'mac-1' -Kind stop -Json (ConvertTo-Json @{ session_id = 'mac-1'; last_assistant_message = $long } -Compress) -Ts '2026-11-19T10:05:00Z' -DataRoot $root
+        Add-NotifierRemoteFeed -SessionId 'mac-1' -Kind prompt -Json '{"session_id":"mac-1","prompt":"Below is a conversation log from a Claude Code coding session"}' -DataRoot $root
+        Add-NotifierRemoteFeed -SessionId 'mac-1' -Kind notification -Json '{"message":"x"}' -DataRoot $root
+        $r = Get-NotifierRemoteFeed -SessionId 'mac-1' -DataRoot $root
+        $r.answer | Should -Be $long
+        @($r.feed).Count | Should -Be 2
+        $s = [pscustomobject]@{ session_id = 'mac-1'; device = 'dev-mac'; stats = [pscustomobject]@{ feed = @() } }
+        $f = @(Get-NotifierNotchFeed -Session $s -DataRoot $root)
+        $f.Count | Should -Be 2
+        $f[0] | Should -Match '^you\|\d\d:\d\d\|Почини сборку на маке$'
+        $f[1] | Should -Match '^claude\|\d\d:\d\d\|Первая строка ответа$'
+        Add-NotifierRemoteFeed -SessionId 'mac-1' -Kind sessionend -Json '{}' -DataRoot $root
+        (Get-NotifierRemoteFeed -SessionId 'mac-1' -DataRoot $root).answer | Should -Be ''
+        Add-NotifierRemoteFeed -SessionId '../evil' -Kind stop -Json '{"last_assistant_message":"x"}' -DataRoot $root
+        Test-Path (Join-Path $root 'evil.json') | Should -Be $false   # из id остаются только безопасные символы
+        Test-Path (Join-Path (Join-Path $root 'remote') 'evil.json') | Should -Be $true
+    }
+
     It 'файлы на сеанс: пути (с пробелами — в кавычках) уходят командой files' {
         $f = New-Object ClaudeNotifier.Ui.NotchForm
         try {

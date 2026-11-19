@@ -660,6 +660,10 @@ function Invoke-NotifierHttpRequest {
         if ($owner -and $ownerDevice -ne [string]$device.id) { return (New-JsonResponse 403 @{ error = 'foreign session' }) }
         $event | Add-Member -NotePropertyName device -NotePropertyValue ([string]$device.id) -Force
         $event.title = "$($event.title) $([char]0x00B7) $($device.name)"
+        # Лента и полный ответ — журнал сеанса на устройстве, ПК его не читает: запоминаем из событий.
+        if (-not ($event.PSObject.Properties['helper'] -and $event.helper)) {
+            try { Add-NotifierRemoteFeed -SessionId ([string]$event.session_id) -Kind $kind -Json $Request.Body -Ts ([string]$event.ts) -DataRoot $Ctx.DataRoot } catch { }
+        }
         [void]$Ctx.Events.Add($event)
         return (New-JsonResponse 200 @{ ok = $true })
     }

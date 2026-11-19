@@ -394,4 +394,72 @@ function Restore-NotifierRemovedSessions {
     return $n
 }
 
-Export-ModuleMember -Function Move-NotifierDeviceSessions, Save-NotifierRemovedSessions, Restore-NotifierRemovedSessions, Get-NotifierAgentsStateText, Get-NotifierSessionPrefs, Set-NotifierSessionPref, Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText
+# --- Лента и полный ответ сеансов с других устройств ---
+# Журнал Claude у сеанса Mac лежит на Mac — ПК его не читает. Зато каждое событие хука приходит с полным JSON:
+# ваш запрос (prompt) и полный ответ Claude (Stop). Трей запоминает их сам: <DataRoot>\remote\<сеанс>.json —
+# { answer: полный последний ответ; feed: последние 8 событий { ts; k: you | claude; text: первая строка до 120 } }.
+
+function Get-NotifierRemoteFeedPath([string]$DataRoot, [string]$SessionId) {
+    $safe = ($SessionId -replace '[^A-Za-z0-9_-]', '')
+    if ($safe -eq '' -or $safe.Length -gt 100) { return $null }
+    return (Join-Path (Join-Path $DataRoot 'remote') "$safe.json")
+}
+
+function Get-NotifierRemoteFeed {
+    <# .SYNOPSIS Лента и полный ответ сеанса с другого устройства: @{ answer; feed }; нет — пустые. #>
+    param([Parameter(Mandatory = $true)][string]$SessionId, [string]$DataRoot = (Get-NotifierDataRoot))
+    $empty = @{ answer = ''; feed = @() }
+    $p = Get-NotifierRemoteFeedPath $DataRoot $SessionId
+    if ($null -eq $p -or -not (Test-Path -LiteralPath $p -PathType Leaf)) { return $empty }
+    try {
+        $o = ConvertFrom-NotifierJson -InputObject ([IO.File]::ReadAllText($p, [Text.Encoding]::UTF8))
+        $feed = @()
+        if ($o.PSObject.Properties['feed']) { $feed = @(@($o.feed) | Where-Object { $_ -and $_.PSObject.Properties['k'] }) }
+        return @{ answer = $(if ($o.PSObject.Properties['answer']) { [string]$o.answer } else { '' }); feed = $feed }
+    }
+    catch { return $empty }
+}
+
+function Add-NotifierRemoteFeed {
+    <#
+    .SYNOPSIS
+    Событие хука с другого устройства → его лента: prompt — «вы», stop — «Claude» и полный ответ; sessionend — забыть.
+    Служебные запросы (сводка через «claude -p») не записываются.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [AllowEmptyString()][string]$Json,
+        [string]$Ts = ([DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)),
+        [string]$DataRoot = (Get-NotifierDataRoot),
+        [int]$Keep = 8
+    )
+    $p = Get-NotifierRemoteFeedPath $DataRoot $SessionId
+    if ($null -eq $p) { return }
+    if ($Kind -eq 'sessionend') { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue; return }
+    if (@('prompt', 'stop') -notcontains $Kind) { return }
+    try { $hook = ConvertFrom-NotifierJson -InputObject $Json } catch { return }
+    if ($hook -isnot [System.Management.Automation.PSCustomObject]) { return }
+    $field = if ($Kind -eq 'prompt') { 'prompt' } else { 'last_assistant_message' }
+    $text = ''
+    if ($hook.PSObject.Properties[$field] -and $hook.$field -is [string]) { $text = [string]$hook.$field }
+    if ($text.Trim() -eq '') { return }
+    if ($Kind -eq 'prompt' -and $text.TrimStart() -match '^(<(agent-message|task-notification|system-reminder|command-|local-command)|Below is a conversation log from a Claude Code coding session)') { return }
+    $cur = Get-NotifierRemoteFeed -SessionId $SessionId -DataRoot $DataRoot
+    $line = (@(($text -replace "`r", '') -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) + '')[0]
+    if ($line.Length -gt 120) { $line = $line.Substring(0, 119) + [char]0x2026 }
+    $k = if ($Kind -eq 'prompt') { 'you' } else { 'claude' }
+    $feed = @(@($cur.feed) + [pscustomobject][ordered]@{ ts = $Ts; k = $k; text = $line; ms = -1 })
+    if ($feed.Count -gt $Keep) { $feed = $feed[($feed.Count - $Keep)..($feed.Count - 1)] }
+    $answer = [string]$cur.answer
+    if ($Kind -eq 'stop') { $answer = if ($text.Length -gt 30000) { $text.Substring(0, 30000) + [char]0x2026 } else { $text } }
+    try {
+        [void][IO.Directory]::CreateDirectory((Split-Path $p))
+        $tmp = "$p.tmp-$PID"
+        [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject ([ordered]@{ answer = $answer; feed = @($feed) }) -Depth 4 -Compress), (New-Object System.Text.UTF8Encoding $false))
+        Move-Item -LiteralPath $tmp -Destination $p -Force
+    }
+    catch { Write-NotifierLog -Level WARN -Message "network: лента сеанса устройства не сохранена: $($_.Exception.Message)" -DataRoot $DataRoot }
+}
+
+Export-ModuleMember -Function Get-NotifierRemoteFeed, Add-NotifierRemoteFeed, Move-NotifierDeviceSessions, Save-NotifierRemovedSessions, Restore-NotifierRemovedSessions, Get-NotifierAgentsStateText, Get-NotifierSessionPrefs, Set-NotifierSessionPref, Get-NotifierSessions, Save-NotifierSessions, Update-NotifierSessionList, Test-NotifierSessionAlive, Select-NotifierLiveSessions, Get-NotifierSortedSessions, Format-NotifierElapsed, Get-NotifierSessionStateText

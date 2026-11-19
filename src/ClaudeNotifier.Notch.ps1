@@ -344,10 +344,16 @@ function Get-NotifierNotchFeed {
     .SYNOPSIS
     Лента сеанса для страницы ответа: последние 5 событий журнала — «вид|ЧЧ:мм|текст» (вид: you, claude, tool).
     #>
-    param($Session, [int]$Max = 5)
-    if ($null -eq $Session -or -not $Session.PSObject.Properties['stats'] -or $null -eq $Session.stats -or -not $Session.stats.PSObject.Properties['feed']) { return @() }
+    param($Session, [int]$Max = 5, [string]$DataRoot = $script:TrayDataRoot)
+    if ($null -eq $Session) { return @() }
+    $src = @()
+    if ($Session.PSObject.Properties['stats'] -and $Session.stats -and $Session.stats.PSObject.Properties['feed']) { $src = @(@($Session.stats.feed) | Where-Object { $_ }) }
+    # Сеанс другого устройства: журнал там — лента из событий его хуков (Add-NotifierRemoteFeed).
+    if ($src.Count -eq 0 -and $Session.PSObject.Properties['device'] -and [string]$Session.device -ne '' -and $DataRoot) {
+        try { $src = @((Get-NotifierRemoteFeed -SessionId ([string]$Session.session_id) -DataRoot $DataRoot).feed) } catch { }
+    }
     $out = @()
-    foreach ($f in @(@($Session.stats.feed) | Where-Object { $_ } | Select-Object -Last $Max)) {
+    foreach ($f in @($src | Select-Object -Last $Max)) {
         $k = [string]$f.k
         if (@('you', 'claude', 'tool') -notcontains $k) { continue }
         $text = (([string]$f.text) -replace '[\r\n|]+', ' ').Trim()
@@ -619,6 +625,10 @@ function Push-NotifierNotchAnswer {
     $session = Get-NotifierCardSession $script:NotchCards[$Id]
     $text = ''
     if ($session -and $session.PSObject.Properties['transcript']) { try { $text = Get-NotifierLastAnswer -Path ([string]$session.transcript) } catch { } }
+    # Сеанс другого устройства: полный ответ — из того, что прислали его хуки (журнал на устройстве).
+    if ($text -eq '' -and $session -and $session.PSObject.Properties['device'] -and [string]$session.device -ne '') {
+        try { $text = ConvertTo-NotifierPlainText ([string](Get-NotifierRemoteFeed -SessionId $Id -DataRoot $script:TrayDataRoot).answer) } catch { }
+    }
     if ($text -eq '' -and $session) { $text = ConvertTo-NotifierPlainText ([string]$session.preview) }
     [ClaudeNotifier.Ui.NotchHost]::SetAnswer($Id, $text)
 }
