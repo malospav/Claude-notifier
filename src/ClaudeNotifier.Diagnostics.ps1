@@ -167,19 +167,60 @@ function Format-NotifierDiagnostics {
 }
 
 function Show-NotifierDiagnostics {
-    <# .SYNOPSIS «Проверить работу»: окно с итогами; «Открыть журнал» — log.txt в Блокноте. #>
+    <#
+    .SYNOPSIS
+    «Проверить работу»: окно-список — у каждой проверки цветная точка (зелёная, янтарная, красная), название и
+    подробность; сверху итог. Кнопки: «Скопировать отчёт», «Открыть журнал», «Закрыть».
+    #>
+    param([switch]$NoShow)
     $items = @(Get-NotifierDiagnostics)
     Write-NotifierLog -Level INFO -Message "tray: проверка работы $([char]0x2014) $(@($items | Where-Object { $_.Level -ne 'ok' }).Count) замечаний" -DataRoot $script:TrayDataRoot
+    $t = Get-NotifierTheme
+    $w = 460
+    $f = New-NotifierForm -Theme $t -Title 'Проверка работы' -Width $w -Height 400
+    $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.ShowInTaskbar = $false; $f.ShowIcon = $false
+    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $f.TopMost = $true
+    $pad = $t.S(22); $inner = $t.S($w) - 2 * $pad; $y = $t.S(16)
+    $bad = @($items | Where-Object { $_.Level -eq 'error' }).Count
+    $warn = @($items | Where-Object { $_.Level -eq 'warn' }).Count
+    $head = if ($bad -gt 0) { "Есть неполадки: $bad" } elseif ($warn -gt 0) { "Работает, обратите внимание: $warn" } else { 'Всё работает' }
+    $h = New-NotifierLabel -Theme $t -Text $head -Font ([ClaudeNotifier.Ui.Fonts]::Semibold(13)) -Width $inner -Wrap
+    $h.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($h); $y += $h.Height + $t.S(12)
+    $dot = @{ ok = 'waiting'; warn = 'permission'; error = 'error' }
+    foreach ($i in $items) {
+        $title = New-NotifierLabel -Theme $t -Text ([string]$i.Title) -Font ([ClaudeNotifier.Ui.Fonts]::Semibold(10)) -Width $inner -Dot $dot[[string]$i.Level]
+        $title.Location = New-Object System.Drawing.Point($pad, $y); $f.Controls.Add($title); $y += $title.Height
+        if ($i.Detail) {
+            $d = New-NotifierLabel -Theme $t -Text ([string]$i.Detail) -Width ($inner - $t.S(18)) -Muted -Wrap
+            $d.Location = New-Object System.Drawing.Point(($pad + $t.S(18)), $y); $f.Controls.Add($d); $y += $d.Height
+        }
+        $y += $t.S(8)
+    }
+    $y += $t.S(10)
+    $gap = $t.S(8)
+    $copy = New-NotifierButton -Theme $t -Text 'Скопировать отчёт'
+    $log = New-NotifierButton -Theme $t -Text 'Журнал'
+    $close = New-NotifierButton -Theme $t -Text 'Закрыть' -Primary
+    $close.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $x = $pad
+    foreach ($b in @($copy, $log)) { $b.Location = New-Object System.Drawing.Point($x, $y); $f.Controls.Add($b); $x += $b.Width + $gap }
+    $close.Location = New-Object System.Drawing.Point(($pad + $inner - $close.Width), $y); $f.Controls.Add($close)
+    $f.CancelButton = $close; $f.AcceptButton = $close
+    $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($y + $close.Height + $t.S(18)))
+    $f.Tag = @{ Items = $items }
+    $copy.add_Click({
+            $form = $this.FindForm()
+            try { [System.Windows.Forms.Clipboard]::SetText((Get-NotifierDiagReport -Items $form.Tag.Items)); $this.Text = 'Скопировано ' + [char]0x2713 }
+            catch { Write-NotifierLog -Level WARN -Message "tray: отчёт не скопирован: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+        })
+    $log.add_Click({
+            $p = Join-Path $script:TrayDataRoot 'log.txt'
+            if (Test-Path -LiteralPath $p) { Start-Process notepad.exe -ArgumentList "`"$p`"" }
+        })
+    if ($NoShow) { return $f }
     $script:DialogOpen = $true
-    try { $r = Show-NotifierDialog -Owner $null -Title 'Проверка работы' -Message (Format-NotifierDiagnostics -Items $items) -Primary 'Открыть журнал' -Secondary 'Закрыть' -Extra 'Скопировать отчёт' }
-    finally { $script:DialogOpen = $false }
-    if ($r.Extra) {
-        try { [System.Windows.Forms.Clipboard]::SetText((Get-NotifierDiagReport -Items $items)); Show-NotifierActionNotice 'Отчёт скопирован' }
-        catch { Write-NotifierLog -Level WARN -Message "tray: отчёт не скопирован: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
-        return
-    }
-    if ($r.Ok) {
-        $log = Join-Path $script:TrayDataRoot 'log.txt'
-        if (Test-Path -LiteralPath $log) { Start-Process notepad.exe -ArgumentList "`"$log`"" }
-    }
+    try { [void]$f.ShowDialog() }
+    finally { $script:DialogOpen = $false; $f.Dispose() }
 }

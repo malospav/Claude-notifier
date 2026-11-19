@@ -373,7 +373,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         $v.SetRows('settings', [ClaudeNotifier.Ui.NotchRow[]]@(Get-NotifierNotchSettingsRows))
         $v.ClickArea('section:4', [System.Drawing.Point]::Empty)
         $v.SettingsSection | Should -Be 4
-        ($v.ContentHeight('settings', 732) -lt 420) | Should -Be $true   # самый большой раздел — без прокрутки
+        ($v.ContentHeight('settings', 872) -lt 440) | Should -Be $true   # самый большой раздел — без прокрутки (настройки шириной 900)
         $v.Dispose()
         Set-NotifierSelectValue -Key 'notch.position' -Value 'right'
         (Get-NotifierConfig -DataRoot $script:TrayDataRoot).notch.position | Should -Be 'right'

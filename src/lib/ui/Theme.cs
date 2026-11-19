@@ -309,6 +309,36 @@ namespace ClaudeNotifier.Ui {
             try { int small = 3; DwmSetWindowAttribute(hwnd, 33, ref small, 4); } catch { }
         }
 
+        [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+
+        // Выпадающий список / меню, открытое из трея, само не закрывается по щелчку в другом окне (у потока трея
+        // нет активного окна — Windows не шлёт ему «щелчок снаружи»). Пока меню открыто, раз в 40 мс смотрим кнопки
+        // мыши: нажата вне меню и его подменю — закрыть, как обычное меню.
+        public static void CloseOnOutsideClick(ToolStripDropDown menu) {
+            if (menu == null) return;
+            Timer t = new Timer();
+            t.Interval = 40;
+            bool wasDown = true;   // кнопка, которой меню открыли, ещё может быть нажата
+            t.Tick += delegate {
+                if (menu.IsDisposed || !menu.Visible) { t.Stop(); t.Dispose(); return; }
+                bool down = (GetAsyncKeyState(0x01) & 0x8000) != 0 || (GetAsyncKeyState(0x02) & 0x8000) != 0 || (GetAsyncKeyState(0x04) & 0x8000) != 0;
+                if (down && !wasDown && !InsideMenu(menu, Cursor.Position)) menu.Close(ToolStripDropDownCloseReason.AppClicked);
+                wasDown = down;
+            };
+            menu.Closed += delegate { t.Stop(); };
+            t.Start();
+        }
+
+        public static bool InsideMenu(ToolStripDropDown menu, Point p) {
+            if (menu == null || !menu.Visible) return false;
+            if (menu.Bounds.Contains(p)) return true;
+            foreach (ToolStripItem it in menu.Items) {
+                ToolStripDropDownItem dd = it as ToolStripDropDownItem;
+                if (dd != null && dd.HasDropDownItems && dd.DropDown.Visible && InsideMenu(dd.DropDown, p)) return true;
+            }
+            return false;
+        }
+
         // Плавное появление окна (редкое действие — анимация уместна): прозрачность 0 → 1 за ms, ease-out.
         public static void FadeIn(Form form, int ms) {
             if (!Motion.Enabled) return;

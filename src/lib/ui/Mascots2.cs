@@ -1,4 +1,4 @@
-// claude-notifier: ещё восемь плоских маскотов шторки — динозаврик, лягушка с чашкой, жнец, онигири,
+﻿// claude-notifier: ещё восемь плоских маскотов шторки — динозаврик, лягушка с чашкой, жнец, онигири,
 // котик в чашке, лисёнок, листик и пчёлка (по картинкам пользователя).
 // Каждый — одна цельная фигура: покачивание, наклон и подъём применяются ко всему телу сразу (Rigid), а части
 // заходят друг на друга, поэтому в движении ничего не отрывается. Отдельно двигается только то, что крепится
@@ -130,8 +130,7 @@ namespace ClaudeNotifier.Ui {
 
         static SmoothingMode Begin(Graphics g, FlatState s, PointF glow, Color glowColor, float shadowW) {
             SmoothingMode sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (SolidBrush sh = new SolidBrush(Color.FromArgb(s.Sleep ? 50 : 85, 0, 0, 0)))
-                g.FillEllipse(sh, s.Cx - shadowW * s.U, s.By - 0.035f * s.U, shadowW * 2 * s.U, 0.07f * s.U);
+            FlatFx.GroundShadow(g, s.Cx, s.By, shadowW * s.U, 0.035f * s.U, s.Sleep ? 50 : 85);
             if (!s.Sleep && s.U >= 16) FlatFx.Glow(g, glow, 0.6f * s.U, glowColor, (int)((s.Perm ? 55 : 28) + 45 * s.Aha));
             return sm;
         }
@@ -180,11 +179,35 @@ namespace ClaudeNotifier.Ui {
             }
             FillOval(g, P(0, -0.30f), 0.30f * u, 0.28f * u, body, bodyBot);
             FillOval(g, P(0.02f, -0.66f), 0.26f * u, 0.23f * u, body, Draw.Mix(body, bodyBot, 0.45f));
-            FillOval(g, P(0.06f, -0.27f), 0.18f * u, 0.19f * u, belly, Draw.Mix(belly, bodyBot, 0.15f));
+            HeadAnchor.Set(g, P(0.03f, -0.87f), 0.22f * u, P(0, -0.68f).Y);   // украшения и эффекты — к голове
+            // Пятнышки на макушке и боку — чуть темнее тела.
+            if (u >= 22) using (SolidBrush spot = new SolidBrush(Color.FromArgb(110, spike))) {
+                float[][] sp2 = { new float[] { -0.12f, -0.80f, 0.045f }, new float[] { -0.02f, -0.85f, 0.03f }, new float[] { -0.20f, -0.40f, 0.05f }, new float[] { -0.22f, -0.24f, 0.035f } };
+                foreach (float[] d in sp2) { PointF c0 = P(d[0], d[1]); float rr = d[2] * u; g.FillEllipse(spot, c0.X - rr, c0.Y - rr * 0.8f, rr * 2, rr * 1.6f); }
+            }
+            using (GraphicsPath bp = Oval(P(0.06f, -0.27f), 0.18f * u, 0.19f * u)) {
+                FillFlat(g, bp, belly, Draw.Mix(belly, bodyBot, 0.15f));
+                // Полоски на пузике.
+                if (u >= 22) {
+                    GraphicsState bs = g.Save(); g.SetClip(bp, CombineMode.Intersect);
+                    using (Pen bl = new Pen(Color.FromArgb(70, Draw.Mix(belly, bodyBot, 0.6f)), Math.Max(1f, u * 0.018f)))
+                        for (int i = 0; i < 4; i++) { PointF a = P(-0.14f, -0.40f + i * 0.08f), b = P(0.26f, -0.40f + i * 0.08f); g.DrawBezier(bl, a, new PointF(a.X + u * 0.1f, a.Y + u * 0.03f), new PointF(b.X - u * 0.1f, b.Y + u * 0.03f), b); }
+                    g.Restore(bs);
+                }
+            }
             FillOval(g, P(0.22f, -0.40f), 0.06f * u, 0.08f * u, body, bodyBot);
-            FillOval(g, P(-0.12f, -0.04f - 0.09f * stompL), 0.10f * u, 0.05f * u, body, bodyBot);
-            FillOval(g, P(0.16f, -0.04f - 0.09f * stompR), 0.10f * u, 0.05f * u, body, bodyBot);
+            foreach (float[] ft in new float[][] { new float[] { -0.12f, stompL }, new float[] { 0.16f, stompR } }) {
+                PointF fc = P(ft[0], -0.04f - 0.09f * ft[1]);
+                FillOval(g, fc, 0.10f * u, 0.05f * u, body, bodyBot);
+                // Коготки: три светлые точки спереди лапки.
+                if (u >= 24) using (SolidBrush cl = new SolidBrush(Theme.Hex(0xF5F0E4)))
+                    for (int i = 0; i < 3; i++) { float cr = Math.Max(0.8f, u * 0.013f); float x = fc.X + (0.03f + i * 0.03f) * u, y = fc.Y + 0.025f * u; g.FillEllipse(cl, x - cr, y - cr, cr * 2, cr * 2); }
+            }
             Color ink = Theme.Hex(0x2E2640);
+            // Ноздри на мордочке.
+            if (u >= 26) using (SolidBrush nb = new SolidBrush(Color.FromArgb(150, ink))) {
+                for (int i = 0; i < 2; i++) { PointF n = P(0.17f + i * 0.05f, -0.665f); float nr = Math.Max(0.7f, u * 0.011f); g.FillEllipse(nb, n.X - nr, n.Y - nr, nr * 2, nr * 2); }
+            }
             float fx = s.Gx * 0.05f, fy = -s.Gy * 0.035f;
             if (rk > 0.3f) FlatFx.Eyes(g, P(-0.05f + fx, -0.68f + fy), P(0.12f + fx, -0.68f + fy), cx + (0.035f + fx) * u, u, "happy", ink, 0.9f);
             else FaceEyes(g, s, P(-0.05f + fx, -0.68f + fy), P(0.12f + fx, -0.68f + fy), u, ink, 0.9f, false);
@@ -237,8 +260,19 @@ namespace ClaudeNotifier.Ui {
             GraphicsState st = Rigid(g, cx, by, Tilt(s, 2.5f), Hop(s) * u);
             FillOval(g, P(-0.21f, -0.58f), 0.13f * u, 0.12f * u, skin, Draw.Mix(skin, skinBot, 0.3f));
             FillOval(g, P(0.21f, -0.58f), 0.13f * u, 0.12f * u, skin, Draw.Mix(skin, skinBot, 0.3f));
-            FillOval(g, P(0, -0.31f), 0.44f * u, 0.31f * u, skin, skinBot);
+            using (GraphicsPath fb = Oval(P(0, -0.31f), 0.44f * u, 0.31f * u)) {
+                Fill(g, fb, skin, skinBot);
+                HeadAnchor.Set(g, P(0, -0.64f), 0.33f * u, P(0, -0.59f).Y);
+                GraphicsState bs = g.Save(); g.SetClip(fb, CombineMode.Intersect);
+                // Пузико светлее; пятнышки по бокам.
+                using (SolidBrush lb = new SolidBrush(Color.FromArgb(150, Draw.Mix(skin, Theme.Hex(0xF4F8E4), 0.6f)))) { PointF c0 = P(0, -0.10f); g.FillEllipse(lb, c0.X - 0.30f * u, c0.Y - 0.16f * u, 0.60f * u, 0.30f * u); }
+                if (u >= 22) using (SolidBrush sp = new SolidBrush(Color.FromArgb(90, Draw.Mix(skinBot, Color.Black, 0.2f)))) {
+                    foreach (float[] d in new float[][] { new float[] { -0.34f, -0.36f, 0.04f }, new float[] { -0.28f, -0.24f, 0.025f }, new float[] { 0.33f, -0.33f, 0.035f }, new float[] { 0.36f, -0.21f, 0.025f } }) { PointF c0 = P(d[0], d[1]); float rr = d[2] * u; g.FillEllipse(sp, c0.X - rr, c0.Y - rr, rr * 2, rr * 2); }
+                }
+                g.Restore(bs);
+            }
             Color ink = Theme.Hex(0x23301F);
+            if (u >= 26) using (SolidBrush nb = new SolidBrush(Color.FromArgb(140, ink))) for (int i = -1; i <= 1; i += 2) { PointF n = P(i * 0.035f, -0.515f); float nr = Math.Max(0.7f, u * 0.01f); g.FillEllipse(nb, n.X - nr, n.Y - nr, nr * 2, nr * 2); }
             float fx = s.Gx * 0.035f, fy = -s.Gy * 0.025f;
             if (mk > 0.4f) FlatFx.Eyes(g, P(-0.21f + fx, -0.59f + fy), P(0.21f + fx, -0.59f + fy), cx + fx * u, u, "closed", ink, 0.85f);
             else FaceEyes(g, s, P(-0.21f + fx, -0.59f + fy), P(0.21f + fx, -0.59f + fy), u, ink, 0.85f, false);
@@ -259,6 +293,11 @@ namespace ClaudeNotifier.Ui {
             RectangleF mr = new RectangleF(m0.X, m0.Y, m1.X - m0.X, m1.Y - m0.Y);
             using (Pen hp = new Pen(mugBot, Math.Max(1.6f, u * 0.045f))) g.DrawArc(hp, mr.Right - 0.06f * u, mr.Y + 0.07f * u, 0.15f * u, 0.15f * u, -75, 150);
             using (GraphicsPath mp = Draw.Round(mr, u * 0.05f)) Fill(g, mp, mug, mugBot);
+            if (u >= 18) {
+                // Чай в кружке и блик на её боку.
+                using (SolidBrush tea = new SolidBrush(s.Tint(Theme.Hex(0xA9774A), 0.3f))) g.FillEllipse(tea, mr.X + mr.Width * 0.1f, mr.Y + mr.Height * 0.03f, mr.Width * 0.8f, mr.Height * 0.12f);
+                using (SolidBrush hl = new SolidBrush(Color.FromArgb(170, 255, 255, 255))) g.FillRectangle(hl, mr.X + mr.Width * 0.12f, mr.Y + mr.Height * 0.25f, Math.Max(1f, mr.Width * 0.08f), mr.Height * 0.5f);
+            }
             if (u >= 18) using (SolidBrush hb = new SolidBrush(Theme.Hex(0x2B2B30))) {
                 PointF h = new PointF(mr.X + mr.Width / 2, mr.Y + mr.Height * 0.48f);
                 float hs = u * 0.042f;
@@ -348,18 +387,39 @@ namespace ClaudeNotifier.Ui {
                 blade.AddBezier(P(0.78f, -0.70f + drop), P(0.66f, -0.86f + drop), P(0.54f, -0.92f + drop), P(0.39f, -0.92f + drop));
                 blade.CloseFigure();
                 Fill(g, blade, s.Tint(Theme.Hex(0xE6E4F2), 0.3f), s.Tint(Theme.Hex(0xA7A3C2), 0.3f));
+                // Острая кромка лезвия блестит.
+                if (u >= 20) using (Pen ed = new Pen(Color.FromArgb(220, 255, 255, 255), Math.Max(1f, u * 0.014f))) { ed.StartCap = ed.EndCap = LineCap.Round; g.DrawBezier(ed, P(0.42f, -0.93f + drop), P(0.55f, -0.91f + drop), P(0.67f, -0.85f + drop), P(0.76f, -0.72f + drop)); }
             }
             g.Restore(ss);
             float w = 0.018f * s.Sin(2.6, 1) * s.A;
             using (GraphicsPath p = new GraphicsPath()) {
                 p.AddBezier(P(-0.33f, -0.02f), P(-0.36f, -0.44f), P(-0.30f, -0.90f), P(0f, -0.90f));
                 p.AddBezier(P(0f, -0.90f), P(0.30f, -0.90f), P(0.36f, -0.44f), P(0.33f, -0.02f));
-                p.AddBezier(P(0.33f, -0.02f), P(0.16f, 0.015f + w), P(-0.16f, 0.015f - w), P(-0.33f, -0.02f));
+                // Подол рваный: три зубца.
+                p.AddLine(P(0.33f, -0.02f), P(0.22f, 0.02f + w));
+                p.AddLine(P(0.22f, 0.02f + w), P(0.15f, -0.04f));
+                p.AddLine(P(0.15f, -0.04f), P(0.05f, 0.02f - w));
+                p.AddLine(P(0.05f, 0.02f - w), P(-0.05f, -0.04f));
+                p.AddLine(P(-0.05f, -0.04f), P(-0.16f, 0.02f + w));
+                p.AddLine(P(-0.16f, 0.02f + w), P(-0.24f, -0.03f));
+                p.AddLine(P(-0.24f, -0.03f), P(-0.33f, -0.02f));
                 p.CloseFigure();
                 Fill(g, p, cloak, cloakBot);
+                // Складки плаща.
+                if (u >= 22) {
+                    GraphicsState fs = g.Save(); g.SetClip(p, CombineMode.Intersect);
+                    using (Pen fp = new Pen(Color.FromArgb(90, Draw.Mix(cloakBot, Color.Black, 0.4f)), Math.Max(1f, u * 0.02f))) {
+                        fp.StartCap = fp.EndCap = LineCap.Round;
+                        g.DrawBezier(fp, P(-0.14f, -0.38f), P(-0.17f, -0.25f), P(-0.15f, -0.12f), P(-0.18f, -0.02f));
+                        g.DrawBezier(fp, P(0.10f, -0.36f), P(0.12f, -0.24f), P(0.09f, -0.12f), P(0.12f, -0.02f));
+                    }
+                    g.Restore(fs);
+                }
             }
             using (SolidBrush hood = new SolidBrush(Draw.Mix(cloakBot, Color.Black, 0.4f))) { PointF h = P(0, -0.60f); g.FillEllipse(hood, h.X - 0.21f * u, h.Y - 0.19f * u, 0.42f * u, 0.38f * u); }
+            if (u >= 20) using (Pen rimP = new Pen(Color.FromArgb(150, Draw.Mix(cloak, Color.White, 0.25f)), Math.Max(1.2f, u * 0.025f))) { PointF h = P(0, -0.60f); g.DrawEllipse(rimP, h.X - 0.215f * u, h.Y - 0.195f * u, 0.43f * u, 0.39f * u); }
             FillOval(g, P(0, -0.58f), 0.16f * u, 0.145f * u, bone, Draw.Mix(bone, cloakBot, 0.12f));
+            HeadAnchor.Set(g, P(0, -0.88f), 0.24f * u, P(0, -0.585f).Y);   // украшения и эффекты — к голове
             Color ink = Theme.Hex(0x1B1722);
             float fx = s.Gx * 0.03f, fy = -s.Gy * 0.02f;
             if (s.Eyes == "open" || s.Eyes == "round") {
@@ -423,12 +483,32 @@ namespace ClaudeNotifier.Ui {
                 p.AddBezier(P(0.42f, -0.10f), P(0.40f, -0.01f), P(-0.40f, -0.01f), P(-0.42f, -0.10f));
                 p.CloseFigure();
                 Fill(g, p, rice, riceBot);
+                HeadAnchor.Set(g, P(0, -0.82f), 0.15f * u, P(0, -0.48f).Y);
                 GraphicsState cs = g.Save();
                 g.SetClip(p, CombineMode.Intersect);   // нори — по форме низа
                 PointF n0 = P(-0.16f, -0.31f), n1 = P(0.16f, 0.02f);
                 using (GraphicsPath n = Draw.Round(new RectangleF(n0.X, n0.Y, n1.X - n0.X, n1.Y - n0.Y), u * 0.03f))
                     Fill(g, n, Theme.Hex(0x2C3431), Theme.Hex(0x1A1F1D));
+                if (u >= 26) using (Pen np = new Pen(Color.FromArgb(50, 140, 170, 150), Math.Max(1f, u * 0.01f)))
+                    for (int i = 1; i <= 3; i++) { PointF a = P(-0.16f, -0.31f + i * 0.08f), b = P(0.16f, -0.31f + i * 0.08f); g.DrawLine(np, a, b); }
                 g.Restore(cs);
+                // Рисинки: светлые и чуть тёмные зёрнышки по всему треугольнику.
+                if (u >= 34) {
+                    GraphicsState rs = g.Save(); g.SetClip(p, CombineMode.Intersect);
+                    using (SolidBrush lt = new SolidBrush(Color.FromArgb(200, 255, 255, 255)))
+                    using (SolidBrush dk = new SolidBrush(Color.FromArgb(40, 120, 110, 90))) {
+                        for (int i = 0; i < 18; i++) {
+                            float gx = -0.32f + 0.64f * (float)((i * 0.618) % 1.0), gy = -0.18f - 0.55f * (float)((i * 0.377 + 0.13) % 1.0);
+                            if (Math.Abs(gx) > 0.42f + gy * 0.45f) continue;   // за краем
+                            if (gy > -0.33f && Math.Abs(gx) < 0.18f) continue;   // на нори
+                            PointF gp0 = P(gx, gy); float gw = u * 0.028f, gh = u * 0.016f;
+                            GraphicsState gs2 = g.Save(); g.TranslateTransform(gp0.X, gp0.Y); g.RotateTransform(i * 47);
+                            g.FillEllipse(i % 3 == 0 ? (Brush)dk : lt, -gw / 2, -gh / 2, gw, gh);
+                            g.Restore(gs2);
+                        }
+                    }
+                    g.Restore(rs);
+                }
             }
             if (u >= 30) using (Pen gp = new Pen(Color.FromArgb(70, 160, 150, 135), Math.Max(1f, u * 0.014f))) {
                 gp.StartCap = gp.EndCap = LineCap.Round;
@@ -438,7 +518,7 @@ namespace ClaudeNotifier.Ui {
             }
             Color ink = Theme.Hex(0x2A2A2E);
             float fx = s.Gx * 0.045f, fy = -s.Gy * 0.03f;
-            if (air > 0.2f) FlatFx.Eyes(g, P(-0.13f + fx, -0.48f + fy), P(0.13f + fx, -0.48f + fy), cx + fx * u, u, "happy", ink, 0.95f);
+            if (air > 0.2f) FlatFx.Eyes(g, P(-0.13f + fx, -0.48f + fy), P(0.13f + fx, -0.48f + fy), cx + fx * u, u, "smile", ink, 0.95f);
             else if (s.Waiting && animate && ((t + s.Ph) % 5.0) < 0.45) {
                 // Подмигивает: левый глаз «^», правый открыт.
                 HappyArcs(g, P(-0.13f + fx, -0.48f + fy), P(-0.13f + fx, -0.48f + fy), u, ink, 0.95f);
@@ -453,7 +533,7 @@ namespace ClaudeNotifier.Ui {
                 float[] xs = { -0.22f, 0.18f, -0.02f }, ys = { -0.45f, -0.52f, -0.70f };
                 Sparkle(g, P(xs[i], ys[i]), u * 0.07f * MascotSig.Bell(k), Color.FromArgb(240, 0xFF, 0xD7, 0x5E));
             }
-            Marks(g, P(0.30f, -0.98f), u, Theme.Hex(0xFFC93D), Math.Max(s.Spark, s.Waiting && jump < 0 ? 0.75f : 0f), -0.55f);
+            Marks(g, P(0.30f, -0.98f), u, Theme.Hex(0xFFC93D), s.Spark, -0.55f);   // чёрточки — только сигнал (запрос, «Ага!»)
             g.Restore(st);
             // Рисинки разлетаются в прыжке и падают.
             if (jump > 0.2f && u >= 20) {
@@ -509,6 +589,7 @@ namespace ClaudeNotifier.Ui {
                 if (u >= 22) Spike(g, P(side * 0.11f, hcy - 0.12f), P(side * (0.205f + earBack), hcy - 0.27f + earBack), P(side * 0.22f, hcy - 0.08f), furIn, u);
             }
             FillOval(g, P(0, hcy), 0.27f * u, 0.21f * u, fur, furBot);
+            HeadAnchor.Set(g, P(0, hcy - 0.19f), 0.22f * u, P(0, hcy).Y);   // украшения и эффекты — к голове
             Color eyeInk = Theme.Hex(0xDAD2EC);
             float fx = s.Gx * 0.04f, fy = -s.Gy * 0.025f;
             string eyes = s.Eyes == "open" && !s.Working ? "closed" : s.Eyes;   // сонный котик: глаза прикрыты
@@ -527,6 +608,8 @@ namespace ClaudeNotifier.Ui {
                 PointF sIn = P(0.27f + 0.04f * (float)Math.Cos(sa), rim + 0.06f);
                 using (Pen spn = new Pen(Theme.Hex(0xC9CCD6), Math.Max(1.4f, u * 0.035f))) { spn.StartCap = spn.EndCap = LineCap.Round; g.DrawLine(spn, sIn, sTop); }
             }
+            // Блюдце.
+            using (GraphicsPath sau = Oval(P(0, -0.02f), 0.52f * u, 0.06f * u)) Fill(g, sau, Draw.Mix(cup, Color.White, 0.2f), cupBot);
             using (Pen hp = new Pen(cupBot, Math.Max(2f, u * 0.055f))) g.DrawArc(hp, cx - 0.53f * u, by - 0.40f * u, 0.22f * u, 0.22f * u, 90, 180);
             using (GraphicsPath cp = new GraphicsPath()) {
                 cp.AddLine(P(-0.41f, rim), P(0.41f, rim));
@@ -536,8 +619,10 @@ namespace ClaudeNotifier.Ui {
                 cp.CloseFigure();
                 Fill(g, cp, cup, cupBot);
             }
+            if (u >= 18) using (Pen lip = new Pen(Color.FromArgb(200, 255, 255, 255), Math.Max(1f, u * 0.02f))) g.DrawLine(lip, P(-0.40f, rim + 0.012f), P(0.40f, rim + 0.012f));
             FillOval(g, P(-0.13f, rim + 0.005f), 0.07f * u, 0.042f * u, fur, furBot);
             FillOval(g, P(0.13f, rim + 0.005f), 0.07f * u, 0.042f * u, fur, furBot);
+            if (u >= 26) { Sparkle(g, P(0.16f, -0.32f), u * 0.025f, Theme.Hex(0xB3AACB)); Sparkle(g, P(-0.14f, -0.16f), u * 0.02f, Theme.Hex(0xB3AACB)); }
             if (u >= 20) using (GraphicsPath moon = new GraphicsPath()) {
                 PointF m = P(0.02f, -0.25f); float mr = 0.07f * u;
                 moon.AddEllipse(m.X - mr, m.Y - mr, mr * 2, mr * 2);
@@ -586,7 +671,20 @@ namespace ClaudeNotifier.Ui {
                 Spike(g, P(side * 0.205f, -0.86f + spread * 0.7f), tip, P(side * (0.25f + spread * 0.7f), -0.84f + spread * 0.7f), dark, u);
                 if (u >= 22) Spike(g, P(side * 0.12f, -0.74f), P(side * (0.215f + spread), -0.88f + spread), P(side * 0.225f, -0.70f), cream, u);
             }
+            // Белая грудка-жабо (под головой, поверх тела): три мягких зубчика.
+            if (u >= 16) using (GraphicsPath ch = new GraphicsPath()) {
+                ch.AddBezier(P(-0.15f, -0.44f), P(-0.14f, -0.30f), P(-0.08f, -0.22f), P(-0.05f, -0.18f));
+                ch.AddBezier(P(-0.05f, -0.18f), P(-0.03f, -0.23f), P(0.03f, -0.23f), P(0.05f, -0.18f));
+                ch.AddBezier(P(0.05f, -0.18f), P(0.08f, -0.22f), P(0.14f, -0.30f), P(0.15f, -0.44f));
+                ch.CloseFigure();
+                FillFlat(g, ch, cream, Draw.Mix(cream, fur, 0.15f));
+            }
+            // Пушистые щёчки: по два зубчика с каждой стороны головы.
+            if (u >= 18) for (int side = -1; side <= 1; side += 2)
+                using (GraphicsPath tf = Poly(P(side * 0.24f, -0.66f), P(side * 0.35f, -0.56f), P(side * 0.27f, -0.56f), P(side * 0.33f, -0.48f), P(side * 0.20f, -0.50f)))
+                    using (SolidBrush tb = new SolidBrush(fur)) g.FillPath(tb, tf);
             FillOval(g, P(0, -0.60f), 0.29f * u, 0.23f * u, fur, Draw.Mix(fur, furBot, 0.5f));
+            HeadAnchor.Set(g, P(0, -0.81f), 0.24f * u, P(0, -0.62f).Y);   // украшения и эффекты — к голове
             using (GraphicsPath muzzle = new GraphicsPath()) {
                 muzzle.AddBezier(P(-0.26f, -0.56f), P(-0.20f, -0.44f), P(-0.08f, -0.40f), P(0f, -0.42f));
                 muzzle.AddBezier(P(0f, -0.42f), P(0.08f, -0.40f), P(0.20f, -0.44f), P(0.26f, -0.56f));
@@ -622,7 +720,7 @@ namespace ClaudeNotifier.Ui {
                 g.Restore(cs);
             }
             g.Restore(tsx);
-            Marks(g, P(0.30f, -1.02f), u, Theme.Hex(0xFFC93D), Math.Max(s.Spark, s.Waiting && pounce < 0 ? 0.7f : 0f), -0.55f);
+            Marks(g, P(0.30f, -1.02f), u, Theme.Hex(0xFFC93D), s.Spark, -0.55f);   // чёрточки — только сигнал (запрос, «Ага!»)
             g.Restore(st);
             // Бабочка: два крыла хлопают, сердцевина тёмная.
             if (hasFly && u >= 18) {
@@ -727,6 +825,7 @@ namespace ClaudeNotifier.Ui {
             // Мордочка: щёки надуваются на затяжке.
             float cheek = 1f + 0.13f * puff;
             FillOval(g, P(0, -0.50f), 0.17f * u * cheek, 0.15f * u * (1f + 0.04f * puff), leaf, Draw.Mix(leaf, leafBot, 0.35f));
+            HeadAnchor.Set(g, P(0, -0.64f), 0.15f * u, P(0, -0.525f).Y);   // украшения и эффекты — к голове
             Color ink = Theme.Hex(0x2C3322);
             float fx = s.Gx * 0.035f, fy = -s.Gy * 0.025f;
             PointF eL = P(-0.075f + fx, -0.525f + fy), eR = P(0.075f + fx, -0.525f + fy);
@@ -850,7 +949,7 @@ namespace ClaudeNotifier.Ui {
             Func<float, float, PointF> P = delegate (float x, float y) { return new PointF(cx + x * u, by + y * u); };
             Color yel = s.Tint(Theme.Hex(0xF8D274), 0.5f), yelBot = s.Tint(Theme.Hex(0xE7B24A), 0.5f), brown = s.Tint(Theme.Hex(0x4B3428), 0.4f);
             SmoothingMode sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (SolidBrush sh = new SolidBrush(Color.FromArgb(s.Sleep ? 50 : 65, 0, 0, 0))) g.FillEllipse(sh, cx - 0.30f * u, by - 0.03f * u, 0.60f * u, 0.06f * u);
+            FlatFx.GroundShadow(g, cx, by, 0.30f * u, 0.03f * u, s.Sleep ? 50 : 65);
             if (!s.Sleep && u >= 16) FlatFx.Glow(g, P(0, -0.42f), 0.6f * u, Theme.Hex(0xF9DD93), (int)((s.Perm ? 55 : 28) + 45 * s.Aha));
             float lift = s.Sleep ? 0.02f * u : (0.06f + (s.Working || s.Perm ? 0.03f : 0.018f) * s.Sin(s.Perm ? 4.2 : 2.0, 1) * s.A) * u;
             if (s.Aha > 0.05f && u >= 22) using (Pen dp = new Pen(Color.FromArgb(190, 245, 240, 232), Math.Max(1.2f, u * 0.024f))) {
@@ -891,6 +990,14 @@ namespace ClaudeNotifier.Ui {
                     g.RotateTransform(-18f + i * 26f - 22f * flap);
                     RectangleF wr = new RectangleF(-0.095f * u, -0.30f * u, 0.19f * u, 0.32f * u);
                     g.FillEllipse(wb, wr); g.DrawEllipse(wp, wr);
+                    if (u >= 24) {
+                        using (Pen vn = new Pen(Color.FromArgb(110, 170, 180, 205), Math.Max(0.8f, u * 0.01f))) {
+                            g.DrawLine(vn, 0, 0, 0, -0.26f * u);
+                            g.DrawLine(vn, 0, -0.10f * u, -0.06f * u, -0.20f * u);
+                            g.DrawLine(vn, 0, -0.14f * u, 0.06f * u, -0.23f * u);
+                        }
+                        using (SolidBrush hl = new SolidBrush(Color.FromArgb(150, 255, 255, 255))) g.FillEllipse(hl, -0.06f * u, -0.26f * u, 0.05f * u, 0.10f * u);
+                    }
                     g.Restore(ws);
                 }
             }
@@ -907,6 +1014,7 @@ namespace ClaudeNotifier.Ui {
             }
             using (GraphicsPath body = Oval(P(0, -0.40f), 0.36f * u, 0.26f * u)) {
                 Fill(g, body, yel, yelBot);
+                HeadAnchor.Set(g, P(-0.17f, -0.63f), 0.17f * u, P(0, -0.44f).Y);
                 GraphicsState cs = g.Save();
                 g.SetClip(body, CombineMode.Intersect);
                 using (SolidBrush sb = new SolidBrush(brown)) {
@@ -921,6 +1029,12 @@ namespace ClaudeNotifier.Ui {
                     }
                 }
                 g.Restore(cs);
+                FlatFx.Volume(g, body, yelBot);   // объём поверх полосок
+                // Пушок на макушке.
+                if (u >= 24) using (Pen fz = new Pen(Color.FromArgb(160, Draw.Mix(yel, Color.White, 0.3f)), Math.Max(1f, u * 0.014f))) {
+                    fz.StartCap = fz.EndCap = LineCap.Round;
+                    for (int i = 0; i < 4; i++) { PointF a = P(-0.20f + i * 0.05f, -0.655f + Math.Abs(i - 1.5f) * 0.012f); g.DrawLine(fz, a, new PointF(a.X - u * 0.008f, a.Y - u * 0.03f)); }
+                }
             }
             Color ink = Theme.Hex(0x2E2018);
             float fx = s.Gx * 0.035f, fy = -s.Gy * 0.025f;

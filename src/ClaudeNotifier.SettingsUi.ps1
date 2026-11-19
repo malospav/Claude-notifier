@@ -13,7 +13,7 @@ $script:SettingRowHeight = 60
 function Get-NotifierEventLabel([string]$Type) {
     switch ($Type) {
         'done' { return @('Готово', 'Claude закончил ответ') }
-        'permission' { return @('Нужно разрешение', 'Claude ждёт разрешения или ответа на вопрос') }
+        'permission' { return @('Нужно разрешение', 'Claude ждёт вашего решения') }
         'error' { return @('Ошибка', 'Ответ прервался ошибкой') }
         'limit' { return @('Лимит', 'Использовано 80 % и 90 % лимита Claude') }
     }

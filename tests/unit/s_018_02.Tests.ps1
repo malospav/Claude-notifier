@@ -272,6 +272,35 @@ Describe 's_018_02 · проверка работы и выпуски' {
         $script:AppVersion = $null; $script:UpdateInfo = $null; $script:UpdateTask = $null
     }
 
+    It 'выпадающий список: щелчок вне него закрывает (открыт — следит за мышью, внутри — не закрывает)' {
+        $m = New-NotifierMenu -Theme ([ClaudeNotifier.Ui.Theme]::Create($true)) -Items @(@('Один', $null), @('Два', $null))
+        try {
+            $m.Show((New-Object System.Drawing.Point 200, 200))
+            $m.Visible | Should -Be $true
+            $inside = New-Object System.Drawing.Point ($m.Bounds.X + 5), ($m.Bounds.Y + 5)
+            [ClaudeNotifier.Ui.Native]::InsideMenu($m, $inside) | Should -Be $true
+            [ClaudeNotifier.Ui.Native]::InsideMenu($m, (New-Object System.Drawing.Point ($m.Bounds.Right + 50), ($m.Bounds.Bottom + 50))) | Should -Be $false
+            $m.Close()
+            [ClaudeNotifier.Ui.Native]::InsideMenu($m, $inside) | Should -Be $false   # закрытое — не мешает
+        }
+        finally { $m.Dispose() }
+        (Get-Content -LiteralPath (Join-Path $repoRoot 'src\ClaudeNotifier.Ui.ps1') -Raw) | Should -Match 'CloseOnOutsideClick'
+    }
+
+    It 'картинка уведомления: маскот с эмоцией события, рисуется один раз и берётся из кэша' {
+        $root = Join-Path $TestDrive 'logo'
+        New-Item -ItemType Directory $root -Force | Out-Null
+        $p1 = Get-NotifierToastLogo -Event ([pscustomobject]@{ type = 'error' }) -DataRoot $root
+        Test-Path -LiteralPath $p1 | Should -Be $true
+        $p1 | Should -Match '-error-v\d+\.png$'
+        $img = [System.Drawing.Image]::FromFile($p1); try { $img.Width | Should -Be 96 } finally { $img.Dispose() }
+        $t1 = (Get-Item $p1).LastWriteTimeUtc
+        Start-Sleep -Milliseconds 30
+        (Get-NotifierToastLogo -Event ([pscustomobject]@{ type = 'error' }) -DataRoot $root) | Should -Be $p1
+        (Get-Item $p1).LastWriteTimeUtc | Should -Be $t1   # из кэша
+        (Get-NotifierToastLogo -Event ([pscustomobject]@{ type = 'что-то' }) -DataRoot $root) | Should -Match '-done-v\d+\.png$'
+    }
+
     It 'настройки: новые строки и значения по умолчанию' {
         $c = Get-NotifierDefaultConfig
         $c.notch.sounds | Should -Be $true

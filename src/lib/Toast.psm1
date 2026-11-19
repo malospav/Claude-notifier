@@ -36,11 +36,19 @@ function New-NotifierToastXml {
     его играет Sound.psm1.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)]$Event, [object[]]$Actions = @())
+    param([Parameter(Mandatory = $true)]$Event, [object[]]$Actions = @(), [string]$Logo = '')
 
     $lines = "<text>$(ConvertTo-XmlText ([string]$Event.title))</text>"
     $preview = [string]$Event.preview
     if ($preview -ne '') { $lines += "<text>$(ConvertTo-XmlText $preview)</text>" }
+    # Мелкая подпись внизу: проект и откуда сеанс («shop · Терминал»).
+    $attr = Get-NotifierToastAttribution -Event $Event
+    if ($attr) { $lines += "<text placement=`"attribution`">$(ConvertTo-XmlText $attr)</text>" }
+    # Маскот сеанса с подходящей эмоцией — круглой картинкой слева (только свой файл из кэша).
+    if ($Logo -and (Test-Path -LiteralPath $Logo -PathType Leaf)) {
+        $uri = (New-Object System.Uri ([IO.Path]::GetFullPath($Logo))).AbsoluteUri
+        $lines = "<image placement=`"appLogoOverride`" hint-crop=`"circle`" src=`"$(ConvertTo-XmlText $uri)`"/>" + $lines
+    }
     # Кнопки (до 5): activationType foreground — нажатие ловит сам трей (ToastHook), внешний обработчик не запускается.
     $acts = ''
     foreach ($a in @($Actions | Select-Object -First 5)) {
@@ -51,6 +59,17 @@ function New-NotifierToastXml {
     return "<toast><visual><binding template=`"ToastGeneric`">$lines</binding></visual>$acts<audio silent=`"true`"/></toast>"
 }
 
+function Get-NotifierToastAttribution {
+    <# .SYNOPSIS Подпись уведомления: «проект · Терминал / Приложение / устройство»; '' — нечего подписать. #>
+    param([Parameter(Mandatory = $true)]$Event)
+    $parts = @()
+    if ($Event.PSObject.Properties['project'] -and [string]$Event.project -ne '') { $parts += [string]$Event.project }
+    if ($Event.PSObject.Properties['origin']) {
+        switch ([string]$Event.origin) { 'cli' { $parts += 'Терминал' } 'desktop' { $parts += 'Приложение' } }
+    }
+    return ($parts -join " $([char]0x00B7) ")
+}
+
 function ConvertTo-WinRtXml([string]$Xml) {
     $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
     $doc = New-Object Windows.Data.Xml.Dom.XmlDocument
@@ -58,10 +77,12 @@ function ConvertTo-WinRtXml([string]$Xml) {
     return $doc
 }
 
-function Invoke-ToastShow([string]$Xml, [string]$AppId) {
+function Invoke-ToastShow([string]$Xml, [string]$AppId, [string]$Tag = '', [string]$Group = '') {
     # Точка подмены в тестах: реальный показ через WinRT.
     $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
     $toast = New-Object Windows.UI.Notifications.ToastNotification (ConvertTo-WinRtXml $Xml)
+    # Тег и группа: новое уведомление того же типа по тому же сеансу заменяет прежнее в центре уведомлений.
+    if ($Tag -and $Group) { $toast.Tag = $Tag.Substring(0, [Math]::Min(64, $Tag.Length)); $toast.Group = $Group.Substring(0, [Math]::Min(64, $Group.Length)) }
     # С кнопками — подписка на нажатие (если интерфейс загружен); уведомление держим, пока оно может быть нажато.
     if ($Xml.Contains('<actions>') -and ('ClaudeNotifier.Ui.ToastHook' -as [type])) {
         [ClaudeNotifier.Ui.ToastHook]::Attach($toast)
@@ -86,10 +107,14 @@ function Show-NotifierToast {
         [Parameter(Mandatory = $true)]$Event,
         [object[]]$Actions = @(),
         [string]$AppId = (Get-NotifierToastAppId),
-        [string]$DataRoot = (Get-NotifierDataRoot)
+        [string]$DataRoot = (Get-NotifierDataRoot),
+        [string]$Logo = ''
     )
     try {
-        Invoke-ToastShow -Xml (New-NotifierToastXml -Event $Event -Actions $Actions) -AppId $AppId
+        $tag = ''; $group = ''
+        if ($Event.PSObject.Properties['session_id'] -and [string]$Event.session_id -match '^[A-Za-z0-9_-]{1,64}$') { $group = [string]$Event.session_id; $tag = [string]$Event.type }
+        if ($Event.PSObject.Properties['reminder'] -and $Event.reminder) { $tag = '' }   # напоминание — отдельным уведомлением
+        Invoke-ToastShow -Xml (New-NotifierToastXml -Event $Event -Actions $Actions -Logo $Logo) -AppId $AppId -Tag $tag -Group $group
         return $true
     }
     catch {
@@ -98,4 +123,4 @@ function Show-NotifierToast {
     }
 }
 
-Export-ModuleMember -Function New-NotifierToastXml, Show-NotifierToast, Get-NotifierToastAppId
+Export-ModuleMember -Function New-NotifierToastXml, Show-NotifierToast, Get-NotifierToastAppId, Get-NotifierToastAttribution

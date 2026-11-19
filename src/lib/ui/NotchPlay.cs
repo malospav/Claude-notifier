@@ -24,6 +24,9 @@ namespace ClaudeNotifier.Ui {
         public static double QuickSeconds = 8;        // сколько висят кнопки решения у маскота
 
         string playId;                 // сеанс главного маскота ("" — сеансов нет)
+        DateTime dustAt = DateTime.MinValue;
+        // Удар о край или пол: пружина сжатия главного маскота.
+        void Bump(float v) { FaceMotion fm; if (playId != null && motions.TryGetValue(playId, out fm)) fm.Squash.Kick(v); }
         string playKind = "flatsphynx"; // его вид — для звуков
         bool purred;                   // за это поглаживание уже мурлыкал
         // Реакции на события сеансов: id сеанса ("" — главный маскот) → вид реакции и когда.
@@ -51,6 +54,8 @@ namespace ClaudeNotifier.Ui {
             double age = Since(r.Value);
             if (age >= 2.5) return;
             md.React = r.Key; md.ReactAge = (float)age;
+            if (r.Key == "wave") md.Wave = (float)Math.Sin(Math.PI * Math.Min(1.0, age / 1.6));          // машет ушедшему
+            if (r.Key == "notice") md.Brow = (float)Math.Sin(Math.PI * Math.Min(1.0, age / 1.2));        // удивился новенькому
         }
         RectangleF playHome;           // где маскот стоит (координаты раскладки), без сдвига от броска
         float pet;                     // 0..1 — гладят
@@ -107,6 +112,10 @@ namespace ClaudeNotifier.Ui {
                 }
             }
             md.Grumpy = Angry;
+            // Полёт после броска: верх отстаёт от движения; приземлился — облачко пыли.
+            if (flying || dragging) md.Shear += Math.Max(-0.35f, Math.Min(0.35f, -tossVel.X / theme.S(2500)));
+            double dust = Since(dustAt);
+            if (dust < 0.5) md.Dust = (float)dust;
             md.Sad = Missing && pet < 0.3f && !md.Grumpy;
             // Любит вас — иногда машет и радуется: чаще, чем крепче дружба (раз в 60 с → раз в 15 с).
             if (Animate && !md.Sad && !md.Grumpy && Affection >= 10 && it != null && (it.State == "waiting" || it.State == "working")) {
@@ -137,7 +146,7 @@ namespace ClaudeNotifier.Ui {
                 float cx = at.X + at.Width / 2, cy = at.Y + at.Height / 2;
                 g.TranslateTransform(cx, cy); g.RotateTransform(tossSpin); g.TranslateTransform(-cx, -cy);
             }
-            try { Mascot.Paint(g, at, PlayState(it), T, seed, Animate, md, it != null ? it.Device : null); }
+            try { DrawMascot(g, at, it, PlayState(it), seed, md, MotionFor(it)); }
             finally { if (gs != null) g.Restore(gs); }
         }
 
@@ -247,8 +256,11 @@ namespace ClaudeNotifier.Ui {
                 tossOff = new PointF(tossOff.X + tossVel.X * dt, tossOff.Y + tossVel.Y * dt);
                 tossVel = new PointF(tossVel.X * (float)Math.Exp(-dt * 2.2), tossVel.Y * (float)Math.Exp(-dt * 2.2) + theme.S(900) * dt);   // трение и тяжесть
                 PointF c = ClampToss(tossOff);
-                if (c.X != tossOff.X) tossVel.X = -tossVel.X * 0.65f;   // отскок от края шторки
-                if (c.Y != tossOff.Y) { tossVel.Y = -tossVel.Y * 0.55f; tossVel.X *= 0.9f; }
+                if (c.X != tossOff.X) { tossVel.X = -tossVel.X * 0.65f; Bump(-2.2f); }   // отскок от края шторки
+                if (c.Y != tossOff.Y) {
+                    if (c.Y < tossOff.Y && Math.Abs(tossVel.Y) > theme.S(120)) { Bump(-3.2f); dustAt = DateTime.UtcNow; }   // шлёпнулся — пыль
+                    tossVel.Y = -tossVel.Y * 0.55f; tossVel.X *= 0.9f;
+                }
                 tossOff = c;
                 tossSpin += tossVel.X * dt * 0.35f;
                 float speed = (float)Math.Sqrt(tossVel.X * tossVel.X + tossVel.Y * tossVel.Y);
@@ -309,7 +321,7 @@ namespace ClaudeNotifier.Ui {
                 int bw = TextRenderer.MeasureText(text, fBold).Width + theme.S(18);
                 if (x + bw > right) break;
                 Rectangle br = new Rectangle(x, y, bw, bh);
-                PaintPill(g, br, text, style, hover == "qact:" + id);
+                PaintPill(g, br, text, style, "qact:" + id);
                 Hit(br, "qact:" + id);
                 x += bw + theme.S(5);
             }
@@ -331,6 +343,7 @@ namespace ClaudeNotifier.Ui {
         // Щелчок по кнопке решения у маскота — ответ сеансу маскота, кнопки убираются.
         void QuickAnswer(string action, Point p) {
             string id = quickId;
+            MarkSent(action);
             quickId = null;
             EventHandler h0 = CollapsedResize; if (h0 != null) h0(this, EventArgs.Empty);
             Invalidate();

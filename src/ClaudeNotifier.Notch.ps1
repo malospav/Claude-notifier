@@ -100,6 +100,59 @@ function Switch-NotifierMascot {
     Set-NotifierMascot
 }
 
+function Get-NotifierToastLogo {
+    <#
+    .SYNOPSIS
+    Картинка для уведомления: маскот сеанса (свой у устройства) с эмоцией по событию — «Готово» радуется,
+    запрос — круглые глаза и «о», ошибка — крестики, лимит — встревожен. Рисуется один раз в DataRoot\cache\toast.
+    '' — интерфейс не загружен.
+    #>
+    param([Parameter(Mandatory = $true)]$Event, [string]$DataRoot = $script:TrayDataRoot)
+    if (-not ('ClaudeNotifier.Ui.Mascot' -as [type])) { return '' }
+    $device = ''
+    if ($Event.PSObject.Properties['device']) { $device = [string]$Event.device }
+    $kind = [ClaudeNotifier.Ui.Mascot]::For($device)
+    $type = [string]$Event.type
+    if (@('done', 'permission', 'error', 'limit') -notcontains $type) { $type = 'done' }
+    $dir = Join-Path $DataRoot 'cache\toast'
+    $path = Join-Path $dir "$kind-$type-v2.png"
+    if (Test-Path -LiteralPath $path) { return $path }
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $size = 96
+    $bmp = New-Object System.Drawing.Bitmap $size, $size
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        # Круг-подложка в цвет события (Windows обрезает картинку кругом).
+        $bg = @{ done = 0x2B3A2F; permission = 0x3D3221; error = 0x3D2525; limit = 0x2C2F3D }[$type]
+        $b = New-Object System.Drawing.SolidBrush ([ClaudeNotifier.Ui.Theme]::Hex($bg))
+        $g.FillEllipse($b, 0, 0, $size, $size); $b.Dispose()
+        $m = New-Object ClaudeNotifier.Ui.CatMood
+        $state = 'waiting'
+        switch ($type) {
+            'done' { $m.EyesOverride = 'happy'; $m.MouthOverride = 'up' }
+            'permission' { $state = 'permission' }
+            'error' { $state = 'error' }
+            'limit' { $m.EyesOverride = 'round'; $m.MouthOverride = 'wavy' }
+        }
+        $r = New-Object System.Drawing.RectangleF(10, 15, 76, 63)
+        [ClaudeNotifier.Ui.Mascot]::PaintKind($g, $r, $kind, $state, 0, 1, $false, $m)
+    }
+    finally { $g.Dispose() }
+    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+    return $path
+}
+
+function Show-NotifierMascotPreview {
+    <# .SYNOPSIS Окно «Анимации»: все движения маскота этого ПК по очереди (одно окно — повторный щелчок его поднимает). #>
+    param($Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
+    $f = $script:MascotPreviewForm
+    if ($f -and -not $f.IsDisposed) { $f.Activate(); return $f }
+    $kind = [string]$Config.notch.mascot
+    $script:MascotPreviewForm = [ClaudeNotifier.Ui.MascotPreview]::Open($kind, (Format-NotifierMascot $kind))
+    return $script:MascotPreviewForm
+}
+
 function Save-NotifierFriendship {
     <#
     .SYNOPSIS
@@ -466,8 +519,8 @@ function Get-NotifierNotchSettingsRows {
         $rows += New-NotifierNotchRow choice "sound.$type" 'Звук' $label[0] -Value (Get-NotifierSelectLabel "sound.$type" -Config $c)
     }
     $rows += New-NotifierNotchRow choice 'quiet' 'Без звука' 'Всегда или по часам' -Value (Get-NotifierSelectLabel 'quiet' -Config $c)
-    $rows += New-NotifierNotchRow choice 'longTasks' 'Звук «Готово»' 'После задач дольше (или вас нет)' -Value (Get-NotifierSelectLabel 'longTasks' -Config $c)
-    $rows += New-NotifierNotchRow choice 'budget' 'Расход за день' 'Предупредить, когда дойдёт до суммы' -Value (Get-NotifierSelectLabel 'budget' -Config $c)
+    $rows += New-NotifierNotchRow choice 'longTasks' 'Звук «Готово»' 'Только после долгих задач' -Value (Get-NotifierSelectLabel 'longTasks' -Config $c)
+    $rows += New-NotifierNotchRow choice 'budget' 'Расход за день' 'Предупредить о сумме' -Value (Get-NotifierSelectLabel 'budget' -Config $c)
     $rows += New-NotifierNotchRow header -Title 'Телефон'
     $rows += New-NotifierNotchRow button 'push' 'На телефон вне сети' (Format-NotifierPushTarget ([string]$c.push.url)) -Value 'Настроить'
     $rows += New-NotifierNotchRow choice 'push.away' 'Отправлять' 'Через ntfy или Telegram' -Value (Get-NotifierSelectLabel 'push.away' -Config $c)
@@ -498,6 +551,7 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow switch 'notch' 'Шторка вместо окна' 'Выключить — прежнее окно «Сеансы»' -On $true
     $rows += New-NotifierNotchRow header -Title 'Маскоты'
     $rows += New-NotifierNotchRow choice 'mascot:' 'Этот ПК' 'Сеансы Claude на этом компьютере' -Value (Get-NotifierSelectLabel 'mascot:' -Config $c)
+    $rows += New-NotifierNotchRow button 'mascotPreview' 'Анимации' 'Все движения маскота этого ПК по очереди' -Value 'Показать'
     $devices = @()
     if ($script:Net -and $script:Net.Network) { $devices = @($script:Net.Network.devices | Where-Object { $_ }) }
     foreach ($d in $devices) {
@@ -514,7 +568,7 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow choice 'update.channel' 'Откуда обновляться' 'Проверенные выпуски или каждое изменение' -Value (Get-NotifierSelectLabel 'update.channel' -Config $c)
     $rows += New-NotifierNotchRow button 'diag' 'Проверка работы' 'Хуки, приём событий, сеть, устройства, журнал' -Value 'Проверить'
     $rows += New-NotifierNotchRow button 'data' 'Папка данных' (Format-NotifierShortText ([string]$script:TrayDataRoot)) -Value 'Открыть'
-    $rows += New-NotifierNotchRow button 'export' 'Экспорт настроек' 'Сохранить в файл для другого ПК' -Value 'Сохранить…'
+    $rows += New-NotifierNotchRow button 'export' 'Экспорт настроек' 'В файл для другого ПК' -Value 'Сохранить…'
     $rows += New-NotifierNotchRow button 'import' 'Импорт настроек' 'Загрузить из сохранённого файла' -Value 'Загрузить…'
     return $rows   # строки по одной в конвейер: вызывающие оборачивают в @()
 }
@@ -1179,6 +1233,7 @@ function Invoke-NotifierNotchCommand {
                 elseif ($id -eq 'push') { Edit-NotifierPushSettings }
                 elseif ($id -eq 'update') { [void](Invoke-NotifierUpdateNow) }
                 elseif ($id -eq 'diag') { Show-NotifierDiagnostics }
+                elseif ($id -eq 'mascotPreview') { Show-NotifierMascotPreview }
                 elseif ($id -like 'sound.*') { $keepHold = $true; Show-NotifierSoundMenuAt -Type $id.Substring(6) -Location $Event.Location }
                 elseif ($Event.Action) { Invoke-NotifierDeviceActionById -Id $id -Action ([string]$Event.Action) }
                 Push-NotifierNotchPage

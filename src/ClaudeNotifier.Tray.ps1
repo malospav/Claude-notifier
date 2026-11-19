@@ -280,7 +280,9 @@ function Invoke-NotifierEventBatch {
             if (-not $NoOutput) {
                 $buttons = @()
                 try { $buttons = @(Get-NotifierToastButtons -Event $event -Config $config -Request:$wasRequest -DataRoot $DataRoot) } catch { }
-                [void](Show-NotifierToast -Event $event -Actions $buttons -DataRoot $DataRoot)
+                $logo = ''
+                try { $logo = Get-NotifierToastLogo -Event $event -DataRoot $DataRoot } catch { }
+                [void](Show-NotifierToast -Event $event -Actions $buttons -DataRoot $DataRoot -Logo $logo)
                 if (-not (Test-NotifierQuietTime -Config $config)) { [void](Invoke-NotifierSound -Type $event.type -Config $config -DataRoot $DataRoot) }   # звук выключен в шторке или по расписанию
             }
             # Вас нет за ПК — то же событие на телефон через ntfy или Telegram (в фоне).

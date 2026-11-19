@@ -47,6 +47,34 @@ Describe 's_002_01 · New-NotifierToastXml' {
     }
 }
 
+Describe 's_002_01 · уведомление: подпись, маскот, группа' {
+    It 'подпись внизу — проект и откуда; маскот — круглой картинкой, только если файл есть' {
+        $e = [pscustomobject]@{ type = 'done'; title = 'Готово'; preview = 'Тесты'; project = 'shop'; origin = 'cli' }
+        Get-NotifierToastAttribution -Event $e | Should -Be 'shop · Терминал'
+        Get-NotifierToastAttribution -Event ([pscustomobject]@{ title = 'x' }) | Should -Be ''
+        [xml]$x = New-NotifierToastXml -Event $e
+        @($x.toast.visual.binding.text | Where-Object { $_.placement -eq 'attribution' })[0].'#text' | Should -Be 'shop · Терминал'
+        $x.toast.visual.binding.image | Should -BeNullOrEmpty
+        $png = Join-Path $TestDrive 'm.png'; [IO.File]::WriteAllBytes($png, [byte[]](1, 2, 3))
+        [xml]$y = New-NotifierToastXml -Event $e -Logo $png
+        $y.toast.visual.binding.image.placement | Should -Be 'appLogoOverride'
+        $y.toast.visual.binding.image.'hint-crop' | Should -Be 'circle'
+        $y.toast.visual.binding.image.src | Should -Match '^file:///'
+        [xml]$z = New-NotifierToastXml -Event $e -Logo (Join-Path $TestDrive 'нет.png')
+        $z.toast.visual.binding.image | Should -BeNullOrEmpty
+    }
+
+    It 'тег и группа: тип события и сеанс (новое заменяет прежнее); напоминание — отдельно' {
+        Mock -ModuleName Toast Invoke-ToastShow { }
+        $e = [pscustomobject]@{ type = 'done'; title = 'Готово'; preview = ''; session_id = 'abc-123' }
+        Show-NotifierToast -Event $e -AppId 'T' -DataRoot $TestDrive | Should -Be $true
+        Assert-MockCalled -ModuleName Toast Invoke-ToastShow -Scope It -Times 1 -Exactly -ParameterFilter { $Tag -eq 'done' -and $Group -eq 'abc-123' }
+        $r = [pscustomobject]@{ type = 'permission'; title = 'x'; preview = ''; session_id = 'abc-123'; reminder = $true }
+        Show-NotifierToast -Event $r -AppId 'T' -DataRoot $TestDrive | Should -Be $true
+        Assert-MockCalled -ModuleName Toast Invoke-ToastShow -Scope It -Times 1 -Exactly -ParameterFilter { $Tag -eq '' }
+    }
+}
+
 Describe 's_002_01 · Show-NotifierToast' {
     It 'передаёт XML и AppId в WinRT и возвращает $true' {
         Mock -ModuleName Toast Invoke-ToastShow { }
