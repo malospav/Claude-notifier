@@ -1,11 +1,11 @@
 ﻿<#
 .SYNOPSIS
 Генерирует иконку приложения src\assets\icon.ico: «сквиркл» с градиентом Apple (systemBlue → systemIndigo)
-и белой точкой статуса с мягким кольцом — тот же мотив, что точка в трее.
+и белый силуэт сфинкса — тот же, что в трее.
 
 .DESCRIPTION
 Кадры 16, 20, 24, 32, 40, 48, 64, 128 и 256 px — PNG внутри ICO (Windows Vista+), альфа-канал сохраняется.
-Мелкие размеры рисуются упрощённо: без кольца, точка крупнее — иначе детали сливаются.
+Силуэт одинаковый на всех размерах — простой и поэтому читается и в 16 px.
 С -PreviewDir дополнительно сохраняет PNG каждого размера для просмотра.
 #>
 param(
@@ -58,22 +58,19 @@ function New-IconBitmap([int]$Size) {
     $grad.WrapMode = [System.Drawing.Drawing2D.WrapMode]::TileFlipXY   # без полосы на краю кисти (артефакт GDI+)
     $g.FillPath($grad, $path)
 
-    # Точка статуса и кольцо-«пульс».
-    $c = $Size / 2
-    $white = [System.Drawing.Color]::White
-    if ($Size -ge 32) {
-        $ringD = $tile * 0.56
-        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(110, 255, 255, 255)), ([float]($tile * 0.055))
-        $g.DrawEllipse($pen, [float]($c - $ringD / 2), [float]($c - $ringD / 2), [float]$ringD, [float]$ringD)
-        $dotD = $tile * 0.30
-    }
-    else {
-        $dotD = $tile * 0.42
-    }
-    $g.FillEllipse((New-Object System.Drawing.SolidBrush $white), [float]($c - $dotD / 2), [float]($c - $dotD / 2), [float]$dotD, [float]$dotD)
+    # Белый силуэт сфинкса — тот же, что в трее (ClaudeNotifier.Ui.TrayDot.Glyph): голова с ушами и глазами-прорезями.
+    $gs = [int][Math]::Round($tile * 0.72)
+    $glyph = [ClaudeNotifier.Ui.TrayDot]::Glyph($gs, [System.Drawing.Color]::White)
+    $gx = [float]($margin + ($tile - $gs) / 2); $gy = [float]($margin + ($tile - $gs) / 2 - $tile * 0.01)
+    $g.DrawImage($glyph, $gx, $gy, [float]$gs, [float]$gs)
+    $glyph.Dispose()
     $g.Dispose()
     return $bmp
 }
+
+# Силуэт — из сборки интерфейса (тот же код рисует значок в трее).
+Import-Module (Join-Path $PSScriptRoot '..\src\lib\Ui.psm1') -ErrorAction Stop
+[void](Import-NotifierUi -CacheDir (Join-Path $env:TEMP 'cn-icon-ui'))
 
 $sizes = @(16, 20, 24, 32, 40, 48, 64, 128, 256)
 $frames = @()

@@ -28,7 +28,7 @@ Describe 's_009_01 · иконка приложения' {
         @($ico.Frames | Where-Object { -not $_.Png }).Count | Should -Be 0
     }
 
-    It 'генератор пересоздаёт иконку; 256 px: прозрачный угол, белая точка в центре, градиент сверху синий' {
+    It 'генератор пересоздаёт иконку; 256 px: прозрачный угол, белый силуэт сфинкса (как в трее), градиент сверху синий' {
         $out = Join-Path $TestDrive 'icon.ico'
         $preview = Join-Path $TestDrive 'preview'
         & (Join-Path $repoRoot 'tools\New-Icon.ps1') -OutFile $out -PreviewDir $preview | Out-Null
@@ -37,7 +37,7 @@ Describe 's_009_01 · иконка приложения' {
         $bmp = New-Object System.Drawing.Bitmap (Join-Path $preview 'icon-256.png')
         try {
             $bmp.GetPixel(2, 2).A | Should -Be 0
-            $c = $bmp.GetPixel(128, 128)
+            $c = $bmp.GetPixel(128, 190)   # лицо силуэта — белое
             "$($c.R),$($c.G),$($c.B)" | Should -Be '255,255,255'
             $top = $bmp.GetPixel(128, 40)
             $top.B | Should -BeGreaterThan 200
@@ -45,7 +45,7 @@ Describe 's_009_01 · иконка приложения' {
         }
         finally { $bmp.Dispose() }
         $small = New-Object System.Drawing.Bitmap (Join-Path $preview 'icon-16.png')
-        try { $c = $small.GetPixel(8, 8); "$($c.R),$($c.G),$($c.B)" | Should -Be '255,255,255' } finally { $small.Dispose() }
+        try { $c = $small.GetPixel(8, 10); "$($c.R),$($c.G),$($c.B)" | Should -Be '255,255,255' } finally { $small.Dispose() }   # силуэт и в 16 px
     }
 }
 

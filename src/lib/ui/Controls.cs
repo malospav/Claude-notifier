@@ -57,6 +57,24 @@ namespace ClaudeNotifier.Ui {
             g.FillPolygon(b, new PointF[] { new PointF(14.6f * u, 9.4f * u), new PointF(14.0f * u, 0.8f * u), new PointF(8.6f * u, 5.4f * u) });
         }
 
+        // Только силуэт (голова с глазами-прорезями) нужного цвета — для логотипа приложения (tools\New-Icon.ps1).
+        public static Bitmap Glyph(int size, Color color) {
+            Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp)) {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.Clear(Color.Transparent);
+                float u = size / 16f;
+                using (SolidBrush b = new SolidBrush(color)) FillHead(g, b, size);
+                g.CompositingMode = CompositingMode.SourceCopy;
+                using (SolidBrush clear = new SolidBrush(Color.Transparent)) {
+                    g.FillEllipse(clear, 4.0f * u, 8.6f * u, 2.7f * u, 2.1f * u);
+                    g.FillEllipse(clear, 9.3f * u, 8.6f * u, 2.7f * u, 2.1f * u);
+                }
+            }
+            return bmp;
+        }
+
         public static Bitmap Render(string state, int size, int count) {
             Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(bmp)) {
