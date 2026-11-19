@@ -52,7 +52,7 @@ function Set-NotifierEventOption {
 function Set-NotifierOptionValue {
     <# .SYNOPSIS Меняет поле раздела approvals / quickReplies или showPrompt и сохраняет config.json. #>
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups', 'inactive', 'notch', 'quiet', 'budget', 'push', 'update')][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('approvals', 'quickReplies', 'showPrompt', 'context', 'hotkey', 'stalled', 'longTasks', 'groups', 'inactive', 'notch', 'quiet', 'budget', 'push', 'update', 'smartQuiet', 'voice')][string]$Name,
         [string]$Field = 'enabled',
         [Parameter(Mandatory = $true)]$Value,
         [string]$DataRoot = $script:TrayDataRoot

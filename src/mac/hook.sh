@@ -145,7 +145,8 @@ case "$KIND" in
     # Сначала — отложенные события (порядок важен: «запрос» после «готово» снова сделал бы сеанс «работающим»).
     if flush && post 2 "/api/event?kind=$KIND&entry=$ENTRY"; then
       # Новый сеанс — заодно проверить, не обновились ли хуки на ПК (в фоне: Claude не ждёт).
-      if [ "$KIND" = sessionstart ] && [ -f "$DIR/version" ]; then ( self_update ) </dev/null >/dev/null 2>&1 & fi
+      # Без файла версии — тоже: старая установка иначе никогда не обновилась бы.
+      if [ "$KIND" = sessionstart ]; then ( self_update ) </dev/null >/dev/null 2>&1 & fi
       exit 0
     fi
     enqueue

@@ -163,6 +163,26 @@ Describe 's_018_05 · уведомления: правила проектов, �
         $c.smartQuiet.enabled | Should -Be $true
     }
 
+    It 'настройки в шторке: тумблер «Умная тишина» и «Голосом» записываются (регрессия: раздел не был разрешён)' {
+        $script:TrayDataRoot = New-Root 'toggles'
+        [void](Invoke-NotifierNotchSetting -Key 'smartQuiet')
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).smartQuiet.enabled | Should -Be $false
+        [void](Invoke-NotifierNotchSetting -Key 'smartQuiet')
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).smartQuiet.enabled | Should -Be $true
+        Set-NotifierSelectValue -Key 'voice' -Value '10'
+        $c = Get-NotifierConfig -DataRoot $script:TrayDataRoot
+        "$($c.voice.enabled) $($c.voice.idle)" | Should -Be 'True 10'
+        Set-NotifierSelectValue -Key 'voice' -Value 'off'
+        (Get-NotifierConfig -DataRoot $script:TrayDataRoot).voice.enabled | Should -Be $false
+    }
+
+    It 'проверка работы видит подключённую строку статуса' {
+        $settings = Join-Path (New-Root 'diag-sl') 'settings.json'
+        '{ "statusLine": { "type": "command", "command": "C:/Windows/powershell.exe -File \"C:/Users/u/.claude-notifier/app/statusline.ps1\"" } }' | Set-Content $settings -Encoding UTF8
+        $item = @(Get-NotifierDiagnostics -SettingsPath $settings -DataRoot (New-Root 'diag-sl-data') | Where-Object { $_.Title -eq 'Строка статуса' })[0]
+        $item.Level | Should -Be 'ok'
+    }
+
     It 'умная тишина: сводка отложенного — самый важный тип, счёт по типам, проекты' {
         $s = New-NotifierHeldSummary -Events @((New-Ev done shop), (New-Ev done blog), (New-Ev permission shop))
         $s.type | Should -Be 'permission'

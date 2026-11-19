@@ -127,7 +127,7 @@ function Get-NotifierDiagnostics {
     }
     try {
         $s = Read-ClaudeSettings -Path $SettingsPath
-        if (Test-NotifierStatusLine -Settings $s) { $items += New-NotifierDiagItem ok 'Строка статуса' 'Подключена: лимиты и контекст обновляются' }
+        if (Test-NotifierStatusLine $s.PSObject.Properties['statusLine'].Value) { $items += New-NotifierDiagItem ok 'Строка статуса' 'Подключена: лимиты и контекст обновляются' }
         else { $items += New-NotifierDiagItem warn 'Строка статуса' "Не подключена $([char]0x2014) лимиты не видны; запустите install.ps1" }
     }
     catch { }
@@ -140,7 +140,12 @@ function Get-NotifierDiagnostics {
             $label = "$(Get-NotifierDeviceOsLabel $d) «$([string]$d.name)»"
             $seen = [DateTimeOffset]::MinValue
             $old = -not [DateTimeOffset]::TryParse([string]$d.last_seen, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$seen) -or ($Now - $seen.UtcDateTime).TotalHours -gt 24
-            if (Test-NotifierMacHooksOutdated -Device $d) { $items += New-NotifierDiagItem warn $label "Хуки устарели $([char]0x2014) обновятся сами при новом сеансе или «Получить команду установки»" }
+            if (Test-NotifierMacHooksOutdated -Device $d) {
+                # Без версии — установка старее самообновления: сама не обновится, нужна команда установки один раз.
+                $hv = if ($d.PSObject.Properties['hooks_ver']) { [string]$d.hooks_ver } else { '' }
+                if ($hv -eq '') { $items += New-NotifierDiagItem warn $label "Хуки старые и сами не обновятся $([char]0x2014) на Mac откройте страницу подключения, нажмите «Получить команду установки» и вставьте её в Терминал (один раз)" }
+                else { $items += New-NotifierDiagItem warn $label "Хуки устарели $([char]0x2014) обновятся сами при новом сеансе Claude на Mac" }
+            }
             elseif ($old) { $items += New-NotifierDiagItem warn $label "Давно не на связи ($(Format-NotifierLastSeen -Ts ([string]$d.last_seen) -Now $Now))" }
             else { $items += New-NotifierDiagItem ok $label "На связи $(Format-NotifierLastSeen -Ts ([string]$d.last_seen) -Now $Now)" }
         }
