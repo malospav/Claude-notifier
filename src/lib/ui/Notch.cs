@@ -277,7 +277,7 @@ namespace ClaudeNotifier.Ui {
             RectangleF fr = r; fr.Offset(origin.X, origin.Y);
             faceRects.Add(fr);
             if (it == null) {
-                if (main) PaintPlayFace(g, r, null, new CatMood(), 0);
+                if (main) { CatMood m0 = new CatMood(); ApplyReaction(null, m0, true); PaintPlayFace(g, r, null, m0, 0); }
                 else Mascot.Paint(g, r, "none", T, 0, Animate, null);
                 return;
             }
@@ -295,6 +295,7 @@ namespace ClaudeNotifier.Ui {
                     md.AhaAge = (float)(ph % 0.8);
                 }
             }
+            ApplyReaction(it, md, main);
             if (main) { PaintPlayFace(g, r, it, md, seed); return; }
             Mascot.Paint(g, r, it.State, T, seed, Animate, md, it.Device);
         }
@@ -1651,7 +1652,9 @@ namespace ClaudeNotifier.Ui {
         public static readonly System.Collections.Concurrent.ConcurrentQueue<NotchEventArgs> Commands = new System.Collections.Concurrent.ConcurrentQueue<NotchEventArgs>();
         // Последняя ошибка в потоке шторки (поток при этом продолжает работать) — для лога трея и проверок.
         public static string LastError;
+        public static string LastStack;    // полный текст последнего сбоя (со стеком) — для «Скопировать отчёт»
         public static int ErrorCount;
+        public static void ResetErrors() { LastError = null; LastStack = null; ErrorCount = 0; }
 
         public static bool Running { get { NotchForm f = form; return f != null && !f.IsDisposed && f.IsHandleCreated; } }
         public static NotchForm Form { get { return form; } }
@@ -1659,6 +1662,8 @@ namespace ClaudeNotifier.Ui {
         internal static void Report(Exception e) {
             if (e == null) return;
             LastError = DateTime.UtcNow.ToString("o") + " " + e.GetType().Name + ": " + e.Message;
+            string full = e.ToString();
+            LastStack = full.Length > 3000 ? full.Substring(0, 3000) : full;
             System.Threading.Interlocked.Increment(ref ErrorCount);
         }
 
@@ -1752,6 +1757,8 @@ namespace ClaudeNotifier.Ui {
                 v.LimitsStale = stale; v.SoundOff = soundOff; v.Invalidate();
             });
         }
+        public static void Peek(string text, int ms) { Post(delegate (NotchForm f) { if (!f.View.Expanded) f.View.StartPeek(text, null, ms); }); }
+        public static void React(string id, string kind) { Post(delegate (NotchForm f) { f.View.React(id, kind); }); }
         public static void SetExpanded(bool expanded, string page) { Post(delegate (NotchForm f) { f.SetExpanded(expanded, page); }); }
         public static void Toggle(string page) { Post(delegate (NotchForm f) { f.SetExpanded(!f.View.Expanded, page); }); }
         public static void SetHold(bool hold) { Post(delegate (NotchForm f) { f.Hold = hold; }); }

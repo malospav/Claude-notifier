@@ -510,13 +510,65 @@ function Get-NotifierPermissionReminders {
     return $events
 }
 
+$script:Forgotten = @{}   # «сеанс|с какого момента ждёт» → сколько раз напомнили
+$script:MaxForgotten = 2
+
+function Get-NotifierForgottenReminders {
+    <#
+    .SYNOPSIS
+    Забытые сеансы: Claude закончил и ждёт ответа дольше push.remind минут — напомнить на телефон (через remind и
+    ещё через столько же, не больше 2 раз за одно ожидание). Возвращает события для отправки (не для уведомлений на ПК).
+    #>
+    param(
+        [AllowEmptyCollection()][object[]]$Sessions = @(),
+        [Parameter(Mandatory = $true)]$Config,
+        [hashtable]$Prefs = @{},
+        [datetime]$Now = [DateTime]::UtcNow
+    )
+    $mins = [int]$Config.push.remind
+    if ($mins -le 0 -or -not $Config.push.enabled) { return @() }
+    $events = @()
+    $alive = @{}
+    foreach ($s in $Sessions) {
+        if ($null -eq $s -or [string]$s.state -ne 'waiting') { continue }
+        $sid = [string]$s.session_id
+        if (Test-NotifierSessionMuted $sid $Prefs) { continue }
+        $since = [DateTimeOffset]::MinValue
+        if (-not ($s.PSObject.Properties['since'] -and [DateTimeOffset]::TryParse([string]$s.since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$since))) { continue }
+        $key = "$sid|$([string]$s.since)"
+        $alive[$key] = $true
+        $n = 0
+        if ($script:Forgotten.ContainsKey($key)) { $n = [int]$script:Forgotten[$key] }
+        if ($n -ge $script:MaxForgotten) { continue }
+        $age = ($Now - $since.UtcDateTime).TotalMinutes
+        if ($age -lt $mins * ($n + 1)) { continue }
+        $script:Forgotten[$key] = $n + 1
+        $name = Get-NotifierSessionName -Session $s -Prefs $Prefs
+        $events += [pscustomobject][ordered]@{
+            type       = 'done'
+            reminder   = $true
+            session_id = $sid
+            title      = "Всё ещё ждёт ответа $([char]0x00B7) $name"
+            preview    = "Claude закончил $([int][Math]::Floor($age)) мин назад и ждёт вас"
+        }
+    }
+    foreach ($k in @($script:Forgotten.Keys)) { if (-not $alive.ContainsKey($k)) { $script:Forgotten.Remove($k) } }
+    return $events
+}
+
 function Invoke-NotifierReminders {
-    <# .SYNOPSIS Из обновления сеансов: напоминания — в очередь трея. #>
+    <# .SYNOPSIS Из обновления сеансов: напоминания о запросах — в очередь трея; о забытых сеансах — на телефон. #>
     param([AllowEmptyCollection()][object[]]$Sessions = @(), [string]$DataRoot = $script:TrayDataRoot)
     if ($null -eq $script:TrayQueue) { return }
     $config = Get-NotifierConfig -DataRoot $DataRoot
     $prefs = Get-NotifierSessionPrefs -DataRoot $DataRoot
     foreach ($ev in (Get-NotifierPermissionReminders -Pending $script:Pending -Config $config -Sessions $Sessions -Prefs $prefs)) { $script:TrayQueue.Enqueue($ev) }
+    $idle = Get-NotifierIdleSeconds
+    foreach ($ev in (Get-NotifierForgottenReminders -Sessions $Sessions -Config $config -Prefs $prefs)) {
+        if ($script:TrayNoOutput -or -not (Test-NotifierPushDue -Event $ev -Config $config -IdleSeconds $idle)) { continue }
+        [void](Send-NotifierPush -Url ([string]$config.push.url) -Message (New-NotifierPushMessage -Event $ev -Preview:([bool]$config.push.preview)) -DataRoot $DataRoot)
+        Write-NotifierLog -Level INFO -Message "push: напоминание о забытом сеансе $($ev.session_id)" -DataRoot $DataRoot
+    }
 }
 
 function Update-NotifierTrayBlink {

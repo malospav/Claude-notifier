@@ -50,11 +50,11 @@ function Get-NotifierDefaultConfig {
         stalled         = @{ enabled = $true; minutes = 10 }       # «Работает», но журнал молчит столько минут — «сеанс, похоже, остановился»
         longTasks       = @{ enabled = $true; minutes = 2 }        # «Готово» со звуком — только если Claude работал дольше (или вас нет за ПК)
         groups          = @{ enabled = $true; minSessions = 4 }    # от стольких сеансов — сеансы одного проекта сворачиваются в группу
-        push            = @{ enabled = $false; url = ''; away = 5; preview = $false }   # на телефон вне сети: url — тема ntfy или бот Telegram (lib\Push.psm1); away — только если вас нет за ПК столько минут (0 — всегда); preview — с текстом вопроса
-        update          = @{ enabled = $true }                      # раз в 6 ч проверять обновление на GitHub (app\version.json)
+        push            = @{ enabled = $false; url = ''; away = 5; preview = $false; remind = 30 }   # на телефон вне сети: url — тема ntfy или бот Telegram (lib\Push.psm1); away — только если вас нет за ПК столько минут (0 — всегда); preview — с текстом вопроса; remind — сеанс ждёт ответа дольше стольких минут: напомнить на телефон ещё раз (до 2 раз; 0 — нет)
+        update          = @{ enabled = $true; channel = 'release' }   # раз в 6 ч проверять обновление на GitHub (app\version.json); channel — release (последний выпуск, иначе main) | main
         budget          = @{ enabled = $false; daily = 20 }        # расход за сегодня (примерно, по ценам API) дошёл до суммы, $ — одно уведомление в день
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
-        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'flatsphynx'; mascots = @{}; stats = $true; attention = $true }   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'flatsphynx'; mascots = @{}; stats = $true; attention = $true; sounds = $true; seasonal = $true; digest = $true; digestHour = 18 }   # sounds — звуки маскота; seasonal — наряды (ночной колпак, праздники); digest — сводка дня во «выдохе» шторки после digestHour   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
     }
 }
@@ -251,8 +251,16 @@ function Get-NotifierConfig {
     Merge-OptionSection $config $user 'groups' @{ minSessions = @(2, 20) } $DataRoot
     Merge-OptionSection $config $user 'inactive' @{ hours = @(1, 72) } $DataRoot
     Merge-OptionSection $config $user 'budget' @{ daily = @(1, 10000) } $DataRoot
-    Merge-OptionSection $config $user 'push' @{ away = @(0, 240) } $DataRoot
+    Merge-OptionSection $config $user 'push' @{ away = @(0, 240); remind = @(0, 720) } $DataRoot
     Merge-OptionSection $config $user 'update' @{} $DataRoot
+    $upd = Get-JsonProperty $user 'update'
+    if ($upd.found -and $upd.value -is [System.Management.Automation.PSCustomObject]) {
+        $ch = Get-JsonProperty $upd.value 'channel'
+        if ($ch.found) {
+            if (@('release', 'main') -contains [string]$ch.value) { $config.update.channel = [string]$ch.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'update.channel' должно быть release или main" -DataRoot $DataRoot }
+        }
+    }
     $push = Get-JsonProperty $user 'push'
     if ($push.found -and $push.value -is [System.Management.Automation.PSCustomObject]) {
         $u = Get-JsonProperty $push.value 'url'
@@ -263,7 +271,7 @@ function Get-NotifierConfig {
         $pv = Get-JsonProperty $push.value 'preview'
         if ($pv.found -and $pv.value -is [bool]) { $config.push.preview = $pv.value }
     }
-    Merge-OptionSection $config $user 'notch' @{} $DataRoot
+    Merge-OptionSection $config $user 'notch' @{ digestHour = @(0, 23) } $DataRoot
     Merge-OptionSection $config $user 'quiet' @{} $DataRoot
     $hk = Get-JsonProperty $user 'hotkey'
     if ($hk.found -and $hk.value -is [System.Management.Automation.PSCustomObject]) {
@@ -289,6 +297,12 @@ function Get-NotifierConfig {
         if ($att.found) {
             if ($att.value -is [bool]) { $config.notch.attention = $att.value }
             else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.attention' должно быть true/false" -DataRoot $DataRoot }
+        }
+        foreach ($flag in @('sounds', 'seasonal', 'digest')) {
+            $fv = Get-JsonProperty $notch.value $flag
+            if (-not $fv.found) { continue }
+            if ($fv.value -is [bool]) { $config.notch[$flag] = $fv.value }
+            else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.$flag' должно быть true/false" -DataRoot $DataRoot }
         }
         $stats = Get-JsonProperty $notch.value 'stats'
         if ($stats.found) {

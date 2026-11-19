@@ -53,6 +53,43 @@ function Get-NotifierDiagLogErrors {
     return (New-NotifierDiagItem warn 'Журнал' "Ошибок за сутки: $($errors.Count). Последняя: $last")
 }
 
+function Get-NotifierDiagNotch {
+    <# .SYNOPSIS Шторка: запущена ли и были ли сбои в её потоке (поток их переживает, но так видно, что чинить). #>
+    if (-not ('ClaudeNotifier.Ui.NotchHost' -as [type])) { return (New-NotifierDiagItem warn 'Шторка' 'Интерфейс не загружен') }
+    if (-not [ClaudeNotifier.Ui.NotchHost]::Running) { return (New-NotifierDiagItem error 'Шторка' "Включена, но не запущена $([char]0x2014) перезапустите приложение") }
+    $n = [int][ClaudeNotifier.Ui.NotchHost]::ErrorCount
+    if ($n -le 0) { return (New-NotifierDiagItem ok 'Шторка' 'Работает, сбоев нет') }
+    $last = [string][ClaudeNotifier.Ui.NotchHost]::LastError
+    $last = $last -replace '^\S+ ', ''
+    if ($last.Length -gt 140) { $last = $last.Substring(0, 139) + [char]0x2026 }
+    return (New-NotifierDiagItem warn 'Шторка' "Сбоев: $n (шторка работает дальше). Последний: $last $([char]0x2014) «Скопировать отчёт» и пришлите разработчику")
+}
+
+function Get-NotifierDiagReport {
+    <#
+    .SYNOPSIS
+    Отчёт для «Скопировать»: итоги проверки, версия, полный текст последнего сбоя шторки, последние предупреждения
+    и ошибки журнала. Без токенов и адресов push (их в журнале нет).
+    #>
+    param([Parameter(Mandatory = $true)][object[]]$Items, [string]$DataRoot = $script:TrayDataRoot)
+    $lines = @("Claude Notifier $([char]0x2014) проверка работы", (Format-NotifierDiagnostics -Items $Items), '')
+    $v = $null; try { $v = Get-NotifierAppVersion } catch { }
+    $lines += "Версия: $(if ($v) { $v.Commit.Substring(0, 12) } else { 'не из git' }); Windows $([Environment]::OSVersion.Version); PowerShell $($PSVersionTable.PSVersion)"
+    try {
+        if ('ClaudeNotifier.Ui.NotchHost' -as [type]) {
+            $stack = [string][ClaudeNotifier.Ui.NotchHost]::LastStack
+            if ($stack) { $lines += ''; $lines += "Последний сбой шторки ($([ClaudeNotifier.Ui.NotchHost]::ErrorCount) всего):"; $lines += $stack }
+        }
+    }
+    catch { }
+    $log = Join-Path $DataRoot 'log.txt'
+    if (Test-Path -LiteralPath $log) {
+        $bad = @(Get-Content -LiteralPath $log -Tail 2000 -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -match '\[(WARN|ERROR)\]' } | Select-Object -Last 25)
+        if ($bad.Count -gt 0) { $lines += ''; $lines += 'Журнал (последние предупреждения и ошибки):'; $lines += $bad }
+    }
+    return ($lines -join "`r`n")
+}
+
 function Get-NotifierDiagnostics {
     <# .SYNOPSIS Все проверки: массив @{ Level = ok | warn | error; Title; Detail }. #>
     param([string]$DataRoot = $script:TrayDataRoot, [string]$SettingsPath = (Join-Path $env:USERPROFILE '.claude\settings.json'), [datetime]$Now = [DateTime]::UtcNow)
@@ -95,6 +132,8 @@ function Get-NotifierDiagnostics {
     }
     $auto = $false; try { $auto = [bool](Test-NotifierAutostart) } catch { }
     if ($auto) { $items += New-NotifierDiagItem ok 'Автозапуск' 'Запускается при входе в Windows' }
+    else { $items += New-NotifierDiagItem warn 'Автозапуск' "Выключен $([char]0x2014) после перезагрузки уведомлений не будет, пока не откроете приложение" }
+    if ($config.notch.enabled) { $items += Get-NotifierDiagNotch }
     if ($config.notch.stats) {
         try {
             $ct = [ClaudeNotifier.Ui.SysStats]::CpuTemp; $gt = [ClaudeNotifier.Ui.SysStats]::GpuTemp
@@ -103,7 +142,6 @@ function Get-NotifierDiagnostics {
         }
         catch { }
     }
-    else { $items += New-NotifierDiagItem warn 'Автозапуск' "Выключен $([char]0x2014) после перезагрузки уведомлений не будет, пока не откроете приложение" }
     if ($script:UpdateInfo) { $items += New-NotifierDiagItem warn 'Обновления' "Доступно: новых изменений $($script:UpdateInfo.Count)" }
     elseif (Get-NotifierAppVersion) { $items += New-NotifierDiagItem ok 'Обновления' (Format-NotifierUpdateSubtitle) }
     $items += Get-NotifierDiagLogErrors -DataRoot $DataRoot -Now $Now
@@ -133,8 +171,13 @@ function Show-NotifierDiagnostics {
     $items = @(Get-NotifierDiagnostics)
     Write-NotifierLog -Level INFO -Message "tray: проверка работы $([char]0x2014) $(@($items | Where-Object { $_.Level -ne 'ok' }).Count) замечаний" -DataRoot $script:TrayDataRoot
     $script:DialogOpen = $true
-    try { $r = Show-NotifierDialog -Owner $null -Title 'Проверка работы' -Message (Format-NotifierDiagnostics -Items $items) -Primary 'Открыть журнал' -Secondary 'Закрыть' }
+    try { $r = Show-NotifierDialog -Owner $null -Title 'Проверка работы' -Message (Format-NotifierDiagnostics -Items $items) -Primary 'Открыть журнал' -Secondary 'Закрыть' -Extra 'Скопировать отчёт' }
     finally { $script:DialogOpen = $false }
+    if ($r.Extra) {
+        try { [System.Windows.Forms.Clipboard]::SetText((Get-NotifierDiagReport -Items $items)); Show-NotifierActionNotice 'Отчёт скопирован' }
+        catch { Write-NotifierLog -Level WARN -Message "tray: отчёт не скопирован: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+        return
+    }
     if ($r.Ok) {
         $log = Join-Path $script:TrayDataRoot 'log.txt'
         if (Test-Path -LiteralPath $log) { Start-Process notepad.exe -ArgumentList "`"$log`"" }

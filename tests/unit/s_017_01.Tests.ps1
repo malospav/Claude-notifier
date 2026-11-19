@@ -42,6 +42,7 @@ Describe 's_017_01 · обновление с GitHub (ПК) и самообно�
     It 'трей: проверка по расписанию, обновление — уведомление один раз с кнопкой «Обновить»' {
         $script:TrayDataRoot = Join-Path $TestDrive 'upd'
         New-Item -ItemType Directory $script:TrayDataRoot -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $script:TrayDataRoot 'config.json'), '{"update":{"channel":"main"}}')   # канал «ветка main»
         $script:AppVersion = @{ Commit = 'a' * 40; Repo = 'o/r'; Installed = '' }
         $new = 'b' * 40
         $done = [System.Threading.Tasks.Task]::FromResult("{`"status`":`"ahead`",`"ahead_by`":2,`"commits`":[{`"sha`":`"$new`",`"commit`":{`"message`":`"fix: x`"}}]}")

@@ -5,6 +5,9 @@
 # (GitHub compare API): main впереди — «Доступно обновление». Обновление — отдельный скрытый процесс:
 # архив коммита с codeload.github.com → временная папка → install.ps1 (он закрывает трей и запускает новый).
 # Без version.json (установка не из git) проверка не делается.
+# Канал release (по умолчанию): последний выпуск репозитория (GitHub Releases, собирает .github/workflows/release.yml
+# по тегу v*) — архив claude-notifier-<тег>.zip и его SHA-256; коммит выпуска — строка «commit: <sha>» в описании.
+# Выпусков нет — как канал main. Архив выпуска перед установкой сверяется с SHA-256.
 
 Import-Module (Join-Path $PSScriptRoot 'Log.psm1')
 
@@ -68,6 +71,63 @@ function ConvertFrom-NotifierCompare {
     return @{ Available = $true; Sha = $sha; Count = [int]$c.ahead_by; Message = $msg }
 }
 
+function Start-NotifierReleaseCheck {
+    <# .SYNOPSIS Запрос последнего выпуска в фоне (результат — Receive-NotifierReleaseCheck). #>
+    param([Parameter(Mandatory = $true)][string]$Repo)
+    if ($Repo -notmatch $script:RepoPattern) { throw 'неверный репозиторий' }
+    return (Get-UpdateClient).GetStringAsync("https://api.github.com/repos/$Repo/releases/latest")
+}
+
+function ConvertFrom-NotifierRelease {
+    <#
+    .SYNOPSIS
+    Ответ releases/latest → @{ Tag; Sha; ZipUrl; HashUrl; Title } или $null (нет коммита в описании или архива).
+    Адреса — только загрузки выпусков этого репозитория на github.com.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Json, [Parameter(Mandatory = $true)][string]$Repo)
+    $r = ConvertFrom-Json $Json -ErrorAction Stop
+    $tag = [string]$r.tag_name
+    if ($tag -notmatch '^[A-Za-z0-9._-]{1,40}$') { return $null }
+    if ([string]$r.body -notmatch '(?m)^commit:\s*([0-9a-f]{40})\s*$') { return $null }
+    $sha = $Matches[1]
+    $prefix = "https://github.com/$Repo/releases/download/$tag/"
+    $zip = ''; $hash = ''
+    foreach ($a in @($r.assets)) {
+        $u = [string]$a.browser_download_url
+        if (-not $u.StartsWith($prefix, [StringComparison]::Ordinal) -or $u.Substring($prefix.Length) -notmatch '^[A-Za-z0-9._-]+$') { continue }
+        if ($u.EndsWith('.zip.sha256')) { $hash = $u } elseif ($u.EndsWith('.zip')) { $zip = $u }
+    }
+    if ($zip -eq '' -or $hash -eq '') { return $null }
+    $title = ([string]$r.name).Trim(); if ($title -eq '') { $title = $tag }
+    return @{ Tag = $tag; Sha = $sha; ZipUrl = $zip; HashUrl = $hash; Title = $title }
+}
+
+function Receive-NotifierReleaseCheck {
+    <#
+    .SYNOPSIS
+    Завершённый запрос выпуска: @{ Release = <ConvertFrom-NotifierRelease> } | @{ NotFound = $true } (выпусков нет —
+    проверять ветку main) | @{ Failed = $true }; $null — ещё идёт.
+    #>
+    param([Parameter(Mandatory = $true)]$Task, [Parameter(Mandatory = $true)][string]$Repo, [string]$DataRoot)
+    if (-not $Task.IsCompleted) { return $null }
+    if ($Task.IsFaulted -or $Task.IsCanceled) {
+        $e = $Task.Exception; $text = 'истекло время'
+        if ($e) { while ($e.InnerException) { $e = $e.InnerException }; $text = $e.Message }
+        if ($text -match '404') { return @{ NotFound = $true } }
+        if ($DataRoot) { Write-NotifierLog -Level WARN -Message "update: выпуск не получен $([char]0x2014) $text" -DataRoot $DataRoot }
+        return @{ Failed = $true }
+    }
+    try {
+        $rel = ConvertFrom-NotifierRelease -Json $Task.Result -Repo $Repo
+        if ($null -eq $rel) { return @{ NotFound = $true } }
+        return @{ Release = $rel }
+    }
+    catch {
+        if ($DataRoot) { Write-NotifierLog -Level WARN -Message "update: непонятный ответ о выпуске $([char]0x2014) $($_.Exception.Message)" -DataRoot $DataRoot }
+        return @{ Failed = $true }
+    }
+}
+
 function Receive-NotifierUpdateCheck {
     <# .SYNOPSIS Завершённая проверка: результат ConvertFrom-NotifierCompare, $null — ещё идёт или ошибка (в журнал). #>
     param([Parameter(Mandatory = $true)]$Task, [string]$DataRoot)
@@ -91,9 +151,26 @@ function Get-NotifierUpdateScript {
     Команда скрытого процесса обновления: скачать архив коммита, распаковать во временную папку, запустить install.ps1.
     Журнал — DataRoot\update.log.
     #>
-    param([Parameter(Mandatory = $true)][string]$Repo, [Parameter(Mandatory = $true)][string]$Sha, [Parameter(Mandatory = $true)][string]$DataRoot)
+    param([Parameter(Mandatory = $true)][string]$Repo, [Parameter(Mandatory = $true)][string]$Sha, [Parameter(Mandatory = $true)][string]$DataRoot,
+        [string]$ZipUrl = '', [string]$HashUrl = '')
     if ($Repo -notmatch $script:RepoPattern -or $Sha -notmatch '^[0-9a-f]{40}$') { throw 'неверный репозиторий или коммит' }
     $q = { param($s) "'" + ($s -replace "'", "''") + "'" }
+    # Выпуск: архив и SHA-256 только из загрузок выпусков этого репозитория.
+    $rx = '^https://github\.com/' + [regex]::Escape($Repo) + '/releases/download/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+    $download = "Invoke-WebRequest -UseBasicParsing -Uri 'https://codeload.github.com/$Repo/zip/$Sha' -OutFile `$zip -Headers @{ 'User-Agent' = 'claude-notifier-update' }"
+    $what = "$Repo@$Sha"
+    if ($ZipUrl -or $HashUrl) {
+        if ($ZipUrl -notmatch $rx -or $HashUrl -notmatch $rx) { throw 'неверный адрес выпуска' }
+        $what = $ZipUrl
+        $download = @"
+Invoke-WebRequest -UseBasicParsing -Uri '$ZipUrl' -OutFile `$zip -Headers @{ 'User-Agent' = 'claude-notifier-update' }
+    Invoke-WebRequest -UseBasicParsing -Uri '$HashUrl' -OutFile "`$zip.sha256" -Headers @{ 'User-Agent' = 'claude-notifier-update' }
+    `$want = ((Get-Content -LiteralPath "`$zip.sha256" -Raw) -split '\s+' | Where-Object { `$_ })[0].Trim().ToLowerInvariant()
+    `$have = (Get-FileHash -LiteralPath `$zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (`$want -notmatch '^[0-9a-f]{64}`$' -or `$want -ne `$have) { throw "SHA-256 архива не совпал (ждали `$want, получили `$have)" }
+    Out-Log 'SHA-256 совпал'
+"@
+    }
     return @"
 `$ErrorActionPreference = 'Stop'
 `$log = Join-Path $(& $q $DataRoot) 'update.log'
@@ -104,8 +181,8 @@ try {
     if (Test-Path -LiteralPath `$dir) { Remove-Item -LiteralPath `$dir -Recurse -Force }
     New-Item -ItemType Directory -Path `$dir | Out-Null
     `$zip = Join-Path `$dir 'src.zip'
-    Out-Log 'Скачивание $Repo@$Sha'
-    Invoke-WebRequest -UseBasicParsing -Uri 'https://codeload.github.com/$Repo/zip/$Sha' -OutFile `$zip -Headers @{ 'User-Agent' = 'claude-notifier-update' }
+    Out-Log 'Скачивание $what'
+    $download
     Expand-Archive -LiteralPath `$zip -DestinationPath `$dir -Force
     `$root = @(Get-ChildItem -LiteralPath `$dir -Directory)[0].FullName
     Out-Log 'Установка'
@@ -120,11 +197,12 @@ catch { Out-Log ('Ошибка: ' + `$_.Exception.Message) }
 
 function Start-NotifierUpdateInstall {
     <# .SYNOPSIS Запускает обновление скрытым процессом PowerShell (трей закроется и запустится заново). #>
-    param([Parameter(Mandatory = $true)][string]$Repo, [Parameter(Mandatory = $true)][string]$Sha, [Parameter(Mandatory = $true)][string]$DataRoot)
-    $script = Get-NotifierUpdateScript -Repo $Repo -Sha $Sha -DataRoot $DataRoot
+    param([Parameter(Mandatory = $true)][string]$Repo, [Parameter(Mandatory = $true)][string]$Sha, [Parameter(Mandatory = $true)][string]$DataRoot,
+        [string]$ZipUrl = '', [string]$HashUrl = '')
+    $script = Get-NotifierUpdateScript -Repo $Repo -Sha $Sha -DataRoot $DataRoot -ZipUrl $ZipUrl -HashUrl $HashUrl
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
     Write-NotifierLog -Level INFO -Message "update: обновление до $($Sha.Substring(0, 12)) запущено" -DataRoot $DataRoot
     return (Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc))
 }
 
-Export-ModuleMember -Function Get-NotifierInstalledVersion, ConvertTo-NotifierRepo, Start-NotifierUpdateCheck, ConvertFrom-NotifierCompare, Receive-NotifierUpdateCheck, Get-NotifierUpdateScript, Start-NotifierUpdateInstall
+Export-ModuleMember -Function Get-NotifierInstalledVersion, ConvertTo-NotifierRepo, Start-NotifierUpdateCheck, ConvertFrom-NotifierCompare, Receive-NotifierUpdateCheck, Start-NotifierReleaseCheck, ConvertFrom-NotifierRelease, Receive-NotifierReleaseCheck, Get-NotifierUpdateScript, Start-NotifierUpdateInstall

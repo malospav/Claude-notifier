@@ -24,6 +24,34 @@ namespace ClaudeNotifier.Ui {
         public static double QuickSeconds = 8;        // сколько висят кнопки решения у маскота
 
         string playId;                 // сеанс главного маскота ("" — сеансов нет)
+        string playKind = "flatsphynx"; // его вид — для звуков
+        bool purred;                   // за это поглаживание уже мурлыкал
+        // Реакции на события сеансов: id сеанса ("" — главный маскот) → вид реакции и когда.
+        readonly Dictionary<string, KeyValuePair<string, DateTime>> reactions = new Dictionary<string, KeyValuePair<string, DateTime>>();
+
+        // Задача готова — joy, ошибка — panic, лимит — nervous. id пустой или неизвестный — главный маскот.
+        public void React(string id, string kind) {
+            if (kind != "joy" && kind != "panic" && kind != "nervous") return;
+            string key = "";
+            foreach (NotchItem x in items) if (x.Id == id) key = id;
+            reactions[key] = new KeyValuePair<string, DateTime>(kind, DateTime.UtcNow);
+            WakePlay();
+        }
+
+        public string ReactionOf(string id) {
+            KeyValuePair<string, DateTime> r;
+            if (reactions.TryGetValue(id ?? "", out r) && Since(r.Value) < 2.5) return r.Key;
+            return null;
+        }
+
+        void ApplyReaction(NotchItem it, CatMood md, bool main) {
+            KeyValuePair<string, DateTime> r;
+            string id = it != null ? it.Id : "";
+            if (!reactions.TryGetValue(id, out r) && !(main && reactions.TryGetValue("", out r))) return;
+            double age = Since(r.Value);
+            if (age >= 2.5) return;
+            md.React = r.Key; md.ReactAge = (float)age;
+        }
         RectangleF playHome;           // где маскот стоит (координаты раскладки), без сдвига от броска
         float pet;                     // 0..1 — гладят
         DateTime petLast = DateTime.MinValue, pokeAt = DateTime.MinValue, wakeAt = DateTime.MinValue, angryAt = DateTime.MinValue, playClock = DateTime.UtcNow;
@@ -94,6 +122,7 @@ namespace ClaudeNotifier.Ui {
         // Рисует главного маскота: бросок (сдвиг и поворот), место для щелчка, подсказка.
         void PaintPlayFace(Graphics g, RectangleF r, NotchItem it, CatMood md, int seed) {
             playId = it != null ? it.Id : "";
+            playKind = Mascot.For(it != null ? it.Device : null);
             playHome = r;
             PlayMood(it, md, r);
             RectangleF at = r;
@@ -150,6 +179,7 @@ namespace ClaudeNotifier.Ui {
                 if (d > 0 && d < theme.S(80)) {
                     pet = Math.Min(1f, pet + d / theme.S(220));
                     petLast = DateTime.UtcNow;
+                    if (pet > 0.5f && !purred) { purred = true; MascotSound.Play("purr", playKind); }
                     WakePlay();
                 }
             } else petPrev = PointF.Empty;
@@ -174,7 +204,8 @@ namespace ClaudeNotifier.Ui {
             tossVel = v;
             flying = true;
             float speed = (float)Math.Sqrt(v.X * v.X + v.Y * v.Y);
-            if (speed > theme.S(1800)) { angryAt = now; Befriend(-3); }
+            if (speed > theme.S(1800)) { angryAt = now; Befriend(-3); MascotSound.Play("grr", playKind); }
+            else MascotSound.Play("boing", playKind);
             WakePlay();
             return true;
         }
@@ -191,8 +222,8 @@ namespace ClaudeNotifier.Ui {
                 Invalidate();
                 return;
             }
-            if (Asleep(it) && !Woken) wakeAt = DateTime.UtcNow;
-            else pokeAt = DateTime.UtcNow;
+            if (Asleep(it) && !Woken) { wakeAt = DateTime.UtcNow; MascotSound.Play("yawn", playKind); }
+            else { pokeAt = DateTime.UtcNow; MascotSound.Play("boop", playKind); }
             WakePlay();
         }
 
@@ -233,6 +264,7 @@ namespace ClaudeNotifier.Ui {
             // Поглаживание: держится, пока гладят, потом плавно спадает. Дружба растёт, пока довольно жмурится.
             if (pet > 0) {
                 if (Since(petLast) > 0.25) pet = Math.Max(0, pet - dt * 0.7f);
+                if (pet < 0.2f) purred = false;
                 if (pet > 0.3f) {
                     bool wasMissing = Missing;
                     Befriend(dt * 1.5);
@@ -244,6 +276,7 @@ namespace ClaudeNotifier.Ui {
             if (friendDirty && (pet <= 0 || Since(friendSent) >= 5)) SendFriend();
             if (quickId != null && now >= quickUntil) { quickId = null; EventHandler h = CollapsedResize; if (h != null) h(this, EventArgs.Empty); busy = true; }
             if (QuickActive || Since(pokeAt) < 3.4 || Since(wakeAt) < 3.5 || Angry) busy = true;
+            foreach (KeyValuePair<string, DateTime> rv in reactions.Values) if (Since(rv.Value) < 2.6) busy = true;
             if (Missing) busy = true;   // тучка с каплями
             if (busy) { playActive = true; return true; }
             if (playActive) { playActive = false; UpdateTimer(); Invalidate(); }

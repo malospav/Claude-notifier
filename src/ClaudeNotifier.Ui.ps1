@@ -773,7 +773,8 @@ function Show-NotifierDialog {
         [string]$Secondary = 'Отмена',
         $InputValue = $null,   # без типа: [string] превратил бы $null в '' и показал бы поле ввода
         [switch]$Destructive,
-        [System.Windows.Forms.IWin32Window]$Owner
+        [System.Windows.Forms.IWin32Window]$Owner,
+        [string]$Extra = ''    # третья кнопка во всю ширину под остальными (результат — Extra = $true)
     )
     $t = Get-NotifierTheme
     $w = 360
@@ -831,6 +832,13 @@ function Show-NotifierDialog {
         $f.CancelButton = $cancel
     }
     $f.AcceptButton = $ok
+    if ($Extra) {
+        $y += $ok.Height + $gap
+        $more = New-NotifierButton -Theme $t -Text $Extra -Width $inner
+        $more.DialogResult = [System.Windows.Forms.DialogResult]::Retry
+        $more.Location = New-Object System.Drawing.Point($pad, $y)
+        $f.Controls.Add($more)
+    }
     $f.ClientSize = New-Object System.Drawing.Size($t.S($w), ($y + $ok.Height + $t.S(20)))
     $f.TopMost = $true   # поверх мини-окна у трея
     $f.Tag.Box = $box
@@ -839,7 +847,7 @@ function Show-NotifierDialog {
         $result = $f.ShowDialog($Owner)
         $value = $null
         if ($box) { $value = $box.Text }
-        return @{ Ok = ($result -eq [System.Windows.Forms.DialogResult]::OK); Value = $value }
+        return @{ Ok = ($result -eq [System.Windows.Forms.DialogResult]::OK); Value = $value; Extra = ($result -eq [System.Windows.Forms.DialogResult]::Retry) }
     }
     finally { $f.Dispose() }
 }

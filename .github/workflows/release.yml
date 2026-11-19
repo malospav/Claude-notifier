@@ -1,0 +1,40 @@
+name: release
+
+# Выпуск по тегу v* (например, git tag v1.4.0 && git push origin v1.4.0): архив claude-notifier-<тег>.zip с
+# исходниками и установщиком, его SHA-256 и описание с коммитом — автообновление (канал «Выпуски») берёт их отсюда.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Архив и выпуск
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Архив, SHA-256, описание
+        run: |
+          set -e
+          TAG="$GITHUB_REF_NAME"
+          NAME="claude-notifier-$TAG.zip"
+          SHA="$(git rev-parse HEAD)"
+          git archive --format=zip --prefix=claude-notifier/ -o "$NAME" HEAD
+          sha256sum "$NAME" | cut -d' ' -f1 > "$NAME.sha256"
+          PREV="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+          {
+            echo "commit: $SHA"
+            echo
+            if [ -n "$PREV" ]; then echo "Изменения с $PREV:"; git log --format='- %s' "$PREV..$TAG"; else git log -20 --format='- %s'; fi
+          } > notes.md
+          cat notes.md
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+      - name: Выпуск на GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$NAME" "$NAME.sha256" --title "Claude Notifier $GITHUB_REF_NAME" --notes-file notes.md

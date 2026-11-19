@@ -250,6 +250,7 @@ function Invoke-NotifierEventBatch {
                 if (-not $notifyOnly) { $sessions = Update-NotifierSessionList -Sessions $sessions -Event $event }
             }
             catch { Write-NotifierLog -Level ERROR -Message "tray: статус сеанса не обновлён: $($_.Exception.Message)" -DataRoot $DataRoot }
+            try { Send-NotifierNotchReaction -Event $event } catch { }   # задача готова — маскот радуется, ошибка — паникует
             $wasRequest = $event.type -eq 'request'
             if ($wasRequest) { $event.type = 'permission' }   # уведомление, звук и история — как «Нужно разрешение»
             elseif ($duplicate -and -not ($event.PSObject.Properties['reminder'] -and $event.reminder)) { $shown++; continue }   # дубль уведомления Claude о том же запросе
@@ -371,7 +372,9 @@ function Invoke-NotifierUsageTick {
 $script:UpdateEveryHours = 6
 $script:UpdateNextCheck = [datetime]::UtcNow.AddMinutes(2)   # первая проверка — через 2 минуты после запуска
 $script:UpdateTask = $null
-$script:UpdateInfo = $null          # @{ Sha; Count; Message } — main впереди установленного
+$script:UpdateInfo = $null
+$script:UpdateStage = ''           # release — ждём ответ о выпуске; compare — сравнение коммитов
+$script:UpdateRelease = $null      # выпуск, с которым сейчас сравниваем (@{ Tag; Sha; ZipUrl; HashUrl; Title })          # @{ Sha; Count; Message } — main впереди установленного
 $script:UpdateNotifiedSha = ''
 $script:AppVersion = $null
 
@@ -388,12 +391,32 @@ function Get-NotifierAppVersion {
 function Invoke-NotifierUpdateTick {
     <# .SYNOPSIS Из таймера: раз в 6 ч спросить GitHub, впереди ли main; новое — уведомление с кнопкой «Обновить». #>
     param([datetime]$Now = [DateTime]::UtcNow, [string]$DataRoot = $script:TrayDataRoot)
+    if ($script:UpdateTask -and $script:UpdateStage -eq 'release') {
+        # Канал «Выпуски»: последний выпуск → сравнить установленный коммит с коммитом выпуска (не предлагать откат).
+        $v = Get-NotifierAppVersion
+        $rr = Receive-NotifierReleaseCheck -Task $script:UpdateTask -Repo $v.Repo -DataRoot $DataRoot
+        if ($null -eq $rr) { return }
+        $script:UpdateTask = $null; $script:UpdateStage = 'compare'
+        if ($rr.ContainsKey('Failed')) { $script:UpdateStage = ''; return }
+        $script:UpdateRelease = $null
+        $branch = 'main'
+        if ($rr.ContainsKey('Release')) {
+            if ($rr.Release.Sha -eq $v.Commit) { $script:UpdateInfo = $null; $script:UpdateStage = ''; return }
+            $script:UpdateRelease = $rr.Release; $branch = $rr.Release.Sha
+        }
+        $script:UpdateTask = Start-NotifierUpdateCheck -Version $v -Branch $branch
+        return
+    }
     if ($script:UpdateTask) {
         $r = Receive-NotifierUpdateCheck -Task $script:UpdateTask -DataRoot $DataRoot
         if ($null -eq $r) { return }
         $script:UpdateTask = $null
         if ($r.ContainsKey('Failed')) { return }
         if (-not $r.Available) { $script:UpdateInfo = $null; return }
+        if ($script:UpdateRelease) {
+            $rel = $script:UpdateRelease
+            $r.Tag = $rel.Tag; $r.ZipUrl = $rel.ZipUrl; $r.HashUrl = $rel.HashUrl; $r.Message = "Выпуск $($rel.Title)"
+        }
         $script:UpdateInfo = $r
         if ($r.Sha -ne $script:UpdateNotifiedSha) {
             $script:UpdateNotifiedSha = $r.Sha
@@ -411,7 +434,9 @@ function Invoke-NotifierUpdateTick {
     if (-not (Get-NotifierConfig -DataRoot $DataRoot).update.enabled) { return }
     $v = Get-NotifierAppVersion
     if ($null -eq $v) { return }
-    $script:UpdateTask = Start-NotifierUpdateCheck -Version $v
+    $script:UpdateRelease = $null
+    if ([string](Get-NotifierConfig -DataRoot $DataRoot).update.channel -eq 'main') { $script:UpdateStage = 'compare'; $script:UpdateTask = Start-NotifierUpdateCheck -Version $v }
+    else { $script:UpdateStage = 'release'; $script:UpdateTask = Start-NotifierReleaseCheck -Repo $v.Repo }
 }
 
 function Format-NotifierUpdateSubtitle {
@@ -441,7 +466,9 @@ function Invoke-NotifierUpdateNow {
     }
     finally { $script:DialogOpen = $false }
     if (-not $r.Ok) { return '' }
-    [void](Start-NotifierUpdateInstall -Repo $v.Repo -Sha $info.Sha -DataRoot $script:TrayDataRoot)
+    $zip = ''; $hash = ''
+    if ($info.ContainsKey('ZipUrl')) { $zip = [string]$info.ZipUrl; $hash = [string]$info.HashUrl }
+    [void](Start-NotifierUpdateInstall -Repo $v.Repo -Sha $info.Sha -DataRoot $script:TrayDataRoot -ZipUrl $zip -HashUrl $hash)
     return 'Обновление скачивается'
 }
 

@@ -29,6 +29,11 @@ namespace ClaudeNotifier.Ui {
         public float PokeAge = -1f;        // секунд назад «тыкнули» — фирменное движение по требованию
         public float Startle;              // 1 → 0: проснулся от щелчка («!», подскок)
         public float Wave;                 // 0..1: машет лапкой (любит вас)
+        // Реакция на событие сеанса: joy — задача готова (прыгает от радости), panic — ошибка (хватается за голову),
+        // nervous — лимит почти исчерпан (нервничает); ReactAge — секунд с события (реакция длится 2,5 с).
+        public string React;
+        public float ReactAge = -1f;
+        public bool Reacting { get { return React != null && ReactAge >= 0 && ReactAge < 2.5f; } }
     }
 
     // Выбранный маскот шторки (настройка «Маскот»): все векторные. Прежний объёмный «sphynx» — теперь плоский сфинкс.
@@ -70,7 +75,7 @@ namespace ClaudeNotifier.Ui {
 
         public static void PaintKind(Graphics g, RectangleF r, string kind, string state, float t, int seed, bool animate, CatMood mood) {
             kind = Normalize(kind);
-            if (mood == null || !mood.Play) { PaintBody(g, r, kind, state, t, seed, animate, mood); return; }
+            if (mood == null || !(mood.Play || mood.Reacting)) { PaintBody(g, r, kind, state, t, seed, animate, mood); return; }
             // Главный маскот: «тык» запускает фирменное движение, реакции — поверх фигуры.
             MascotSig.Poke = animate ? mood.PokeAge : -1f;
             try { PaintBody(g, MascotPlay.Body(r, kind, mood, t), kind, state, t, seed, animate, mood); }
@@ -266,6 +271,7 @@ namespace ClaudeNotifier.Ui {
         // и улыбается; зевает; обиделся — прищур и кривой рот; скучает — глаза закрыты, ротик ровный.
         public static string MoodEyes(CatMood m, string eyes) {
             if (m == null) return eyes;
+            if (m.Reacting) return m.React == "joy" ? "happy" : m.React == "panic" ? "x" : "round";
             if (m.Pet > 0.3f) return "happy";
             if (m.Yawn) return "squint";
             if (m.Grumpy) return "squint";
@@ -274,6 +280,7 @@ namespace ClaudeNotifier.Ui {
         }
         public static string MoodMouth(CatMood m, string mouth) {
             if (m == null) return mouth;
+            if (m.Reacting) return m.React == "joy" ? "up" : m.React == "panic" ? "o" : "wavy";
             if (m.Pet > 0.3f) return "up";
             if (m.Yawn) return "o";
             if (m.Grumpy) return "wavy";

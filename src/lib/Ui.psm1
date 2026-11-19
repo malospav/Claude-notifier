@@ -101,9 +101,69 @@ function Format-NotifierTrayTooltip {
 
 $script:UiImportError = $null
 
+# Эталонные картинки маскотов (tests\golden): каждый маскот в каждом статусе, кадр без анимации.
+$script:GoldenStates = @('waiting', 'working', 'permission', 'error', 'none')
+
+function Get-NotifierGoldenStates { return $script:GoldenStates }
+
+function New-NotifierMascotFrame {
+    <#
+    .SYNOPSIS
+    Кадр маскота для сравнения с эталоном: Width×Height на чёрном фоне, без анимации (t = 0), seed = 1.
+    Возвращает Bitmap (освобождает вызывающий).
+    #>
+    param([Parameter(Mandatory = $true)][string]$Kind, [Parameter(Mandatory = $true)][string]$State, [int]$Width = 104, [int]$Height = 84)
+    $bmp = New-Object System.Drawing.Bitmap $Width, $Height
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.Clear([System.Drawing.Color]::Black)
+        $r = New-Object System.Drawing.RectangleF(($Width * 0.12), ($Height * 0.16), ($Width * 0.76), ($Height * 0.74))
+        [ClaudeNotifier.Ui.Mascot]::PaintKind($g, $r, $Kind, $State, 0, 1, $false, $null)
+    }
+    finally { $g.Dispose() }
+    return $bmp
+}
+
+function Compare-NotifierBitmap {
+    <#
+    .SYNOPSIS
+    Доля заметно отличающихся пикселей (любой канал больше чем на Threshold из 255) между двумя картинками одного
+    размера; разный размер — 1. -Diff — сохранить картинку отличий (красным) по этому пути.
+    #>
+    param([Parameter(Mandatory = $true)][System.Drawing.Bitmap]$A, [Parameter(Mandatory = $true)][System.Drawing.Bitmap]$B, [int]$Threshold = 48, [string]$Diff = '')
+    if ($A.Width -ne $B.Width -or $A.Height -ne $B.Height) { return 1.0 }
+    $rect = New-Object System.Drawing.Rectangle(0, 0, $A.Width, $A.Height)
+    $fmt = [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+    $da = $A.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, $fmt)
+    $db = $B.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, $fmt)
+    try {
+        $n = [Math]::Abs($da.Stride) * $A.Height
+        $ba = New-Object byte[] $n; $bb = New-Object byte[] $n
+        [Runtime.InteropServices.Marshal]::Copy($da.Scan0, $ba, 0, $n)
+        [Runtime.InteropServices.Marshal]::Copy($db.Scan0, $bb, 0, $n)
+    }
+    finally { $A.UnlockBits($da); $B.UnlockBits($db) }
+    $bad = [ClaudeNotifier.Ui.PixelDiff]::Count($ba, $bb, $Threshold)
+    if ($Diff -and $bad -gt 0) {
+        $out = New-Object System.Drawing.Bitmap $A.Width, $A.Height
+        try {
+            for ($y = 0; $y -lt $A.Height; $y++) {
+                for ($x = 0; $x -lt $A.Width; $x++) {
+                    $p = $A.GetPixel($x, $y); $q = $B.GetPixel($x, $y)
+                    $d = [Math]::Max([Math]::Abs($p.R - $q.R), [Math]::Max([Math]::Abs($p.G - $q.G), [Math]::Abs($p.B - $q.B)))
+                    if ($d -gt $Threshold) { $out.SetPixel($x, $y, [System.Drawing.Color]::Red) } else { $out.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(255, [int]($p.R / 3), [int]($p.G / 3), [int]($p.B / 3))) }
+                }
+            }
+            $out.Save($Diff, [System.Drawing.Imaging.ImageFormat]::Png)
+        }
+        finally { $out.Dispose() }
+    }
+    return [double]$bad / ($A.Width * $A.Height)
+}
+
 function Get-NotifierUiImportError {
     <# .SYNOPSIS Почему последняя загрузка интерфейса пошла медленным путём (без кэша сборки), или $null. #>
     return $script:UiImportError
 }
 
-Export-ModuleMember -Function Import-NotifierUi, Get-NotifierUiImportError, Get-NotifierTrayState, Format-NotifierTrayTooltip
+Export-ModuleMember -Function Import-NotifierUi, Get-NotifierUiImportError, Get-NotifierTrayState, Format-NotifierTrayTooltip, Get-NotifierGoldenStates, New-NotifierMascotFrame, Compare-NotifierBitmap
