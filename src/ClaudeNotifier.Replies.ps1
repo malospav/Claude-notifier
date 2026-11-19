@@ -131,7 +131,7 @@ function Invoke-NotifierCardAction {
     Кнопка в карточке сеанса: allow | always | deny | answer:<n> | answer-custom | reply:<n> | reply-custom | focus.
     Возвращает текст подсказки для окна или ''.
     #>
-    param([Parameter(Mandatory = $true)]$Item, [Parameter(Mandatory = $true)][string]$ActionId, [string]$DataRoot = $script:TrayDataRoot)
+    param([Parameter(Mandatory = $true)]$Item, [Parameter(Mandatory = $true)][string]$ActionId, [string]$DataRoot = $script:TrayDataRoot, [string]$Text = '')
     $session = $Item.Tag
     $req = $null
     if ($session -is [hashtable]) { $req = $session.Request; $session = $session.Session }
@@ -175,6 +175,26 @@ function Invoke-NotifierCardAction {
             $r = Show-NotifierDialog -Owner $script:SessionsForm -Title "Ответ для «$($session.project)»" -Message 'Claude получит его как ваше сообщение и продолжит работу.' -Primary 'Отправить' -InputValue ''
             if ($r.Ok -and ([string]$r.Value).Trim() -ne '') {
                 if (Write-NotifierReply -SessionId $sid -Text ([string]$r.Value) -DataRoot $DataRoot) {
+                    [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $DataRoot)
+                    $notice = 'Ответ отправлен'
+                }
+                else { $notice = 'Сеанс больше не ждёт ответа' }
+            }
+        }
+        '^answer-text$' {
+            # Свой ответ на вопрос — текстом из поля шторки (без диалога).
+            $t = $Text.Trim()
+            if ($t -ne '' -and $req -and (Write-NotifierDecision -RequestId $req.id -Behavior allow -Answer $t -DataRoot $DataRoot)) {
+                [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $DataRoot)
+                $notice = 'Ответ отправлен'
+            }
+            elseif ($t -ne '') { $notice = 'Вопрос уже закрыт в Claude' }
+        }
+        '^reply-text$' {
+            # Свой ответ после «Готово» — текстом из поля шторки.
+            $t = $Text.Trim()
+            if ($t -ne '') {
+                if (Write-NotifierReply -SessionId $sid -Text $t -DataRoot $DataRoot) {
                     [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $DataRoot)
                     $notice = 'Ответ отправлен'
                 }

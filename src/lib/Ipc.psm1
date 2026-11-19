@@ -45,7 +45,7 @@ function Send-NotifierEvent {
     )
     $client = $null
     try {
-        $line = ($Event | ConvertTo-Json -Compress -Depth 6) + "`n"
+        $line = (ConvertTo-NotifierJson -InputObject $Event -Depth 6) + "`n"
         $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes($line)
         $client = New-Object System.IO.Pipes.NamedPipeClientStream('.', $PipeName, [System.IO.Pipes.PipeDirection]::Out)
         $client.Connect($TimeoutMs)
@@ -94,7 +94,7 @@ function Receive-NotifierFrame {
     $text = $sb.ToString().Trim()
     if ($text -eq '') { return 'empty' }
     try {
-        $obj = $text | ConvertFrom-Json -ErrorAction Stop
+        $obj = ConvertFrom-NotifierJson -InputObject $text
     }
     catch { $obj = $null }
     if ($obj -isnot [System.Management.Automation.PSCustomObject]) {

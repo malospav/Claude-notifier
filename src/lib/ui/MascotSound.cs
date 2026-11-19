@@ -1,4 +1,4 @@
-// claude-notifier: тихие звуки главного маскота — синтезируются в памяти (WAV 22 кГц, моно), без файлов.
+﻿// claude-notifier: тихие звуки главного маскота — синтезируются в памяти (WAV 22 кГц, моно), без файлов.
 //   purr — «мрр», когда гладят; boop — тык; boing — «ой», когда подкинули; grr — обиделся; yawn — проснулся и зевает.
 // Высота у каждого маскота своя (динозаврик ниже, пчёлка выше). Молчат при «Без звука», в тихие часы
 // (Muted ставит шторка из SetLimits) и при выключенной настройке «Звуки маскота» (Enabled).
@@ -116,6 +116,32 @@ namespace ClaudeNotifier.Ui {
                 s[i] = (float)(v * env);
             }
             return s;
+        }
+
+        // Набор «Маскот» для уведомлений: колокольчики (основной тон + неровные обертоны с затуханием).
+        // done — две ноты вверх; permission — три ноты, зовёт; error — две вниз, минор; limit — низкий двойной.
+        public static byte[] EventWave(string type) {
+            double[][] notes;   // { частота, начало (с), длительность (с) }
+            switch (type) {
+                case "permission": notes = new double[][] { new double[] { 784, 0, 0.5 }, new double[] { 988, 0.12, 0.5 }, new double[] { 1175, 0.24, 0.7 } }; break;
+                case "error": notes = new double[][] { new double[] { 659, 0, 0.5 }, new double[] { 523, 0.16, 0.8 } }; break;
+                case "limit": notes = new double[][] { new double[] { 392, 0, 0.35 }, new double[] { 392, 0.22, 0.5 } }; break;
+                default: notes = new double[][] { new double[] { 1047, 0, 0.6 }, new double[] { 1568, 0.13, 0.9 } }; break;
+            }
+            double total = 0;
+            foreach (double[] nn in notes) total = Math.Max(total, nn[1] + nn[2]);
+            int n = (int)((total + 0.05) * Rate);
+            float[] s = new float[n];
+            foreach (double[] nn in notes) {
+                int start = (int)(nn[1] * Rate), len = (int)(nn[2] * Rate);
+                for (int i = 0; i < len && start + i < n; i++) {
+                    double t = (double)i / Rate;
+                    double env = Math.Min(1, t / 0.004) * Math.Exp(-t * 6.5);
+                    double v = Math.Sin(2 * Math.PI * nn[0] * t) + 0.35 * Math.Sin(2 * Math.PI * nn[0] * 2.76 * t) * Math.Exp(-t * 9) + 0.15 * Math.Sin(2 * Math.PI * nn[0] * 5.4 * t) * Math.Exp(-t * 14);
+                    s[start + i] += (float)(v * env * 0.22);
+                }
+            }
+            return ToWav(s);
         }
 
         static byte[] ToWav(float[] s) {

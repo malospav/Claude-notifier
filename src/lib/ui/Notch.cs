@@ -112,8 +112,8 @@ namespace ClaudeNotifier.Ui {
         }
 
         public NotchView() {
-            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            BackColor = Color.Black;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            BackColor = Bg;
             anim.Interval = 33;
             anim.Tick += delegate { try { AnimTick(); } catch (Exception e) { NotchHost.Report(e); } };
             peekTimer.Tick += delegate { try { EndPeek(); } catch (Exception e) { peekTimer.Stop(); NotchHost.Report(e); } };
@@ -196,6 +196,7 @@ namespace ClaudeNotifier.Ui {
             TrackMoods();
             TrackMotions();
             TrackAttention();
+            TryPendingQuick();
             UpdateTimer();
             Invalidate();
         }
@@ -571,10 +572,23 @@ namespace ClaudeNotifier.Ui {
                 // Углы шторки — рисованные (у окна нет Region); вне фигуры — прозрачное.
                 g.Clear(Outside);
                 g.SmoothingMode = SmoothingMode.None;   // край без сглаживания — иначе цветная кайма у прозрачного цвета
-                using (SolidBrush b = new SolidBrush(Color.Black)) g.FillPath(b, path);
+                using (SolidBrush b = new SolidBrush(Bg)) g.FillPath(b, path);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 GraphicsState st = g.Save();
                 g.SetClip(path, CombineMode.Intersect);
+                if (Morphing && showExpanded && lastMainWin.Width > 0 && Animate) {
+                    // Раскрытие «из маскота»: содержимое проявляется кругом от главного маскота (и сворачивается в него).
+                    PointF c0 = new PointF(lastMainWin.X + lastMainWin.Width / 2f, lastMainWin.Y + lastMainWin.Height / 2f);
+                    float far = 0;
+                    foreach (PointF corner in new PointF[] { new PointF(s.Left, s.Top), new PointF(s.Right, s.Top), new PointF(s.Left, s.Bottom), new PointF(s.Right, s.Bottom) })
+                        far = Math.Max(far, (float)Math.Sqrt((corner.X - c0.X) * (corner.X - c0.X) + (corner.Y - c0.Y) * (corner.Y - c0.Y)));
+                    float k = MascotMotion.Smooth(Math.Max(0f, Math.Min(1f, (Progress - 0.3f) / 0.6f)));
+                    float rad = Math.Max(1f, far * k);
+                    using (GraphicsPath circle = new GraphicsPath()) {
+                        circle.AddEllipse(c0.X - rad, c0.Y - rad, rad * 2, rad * 2);
+                        g.SetClip(circle, CombineMode.Intersect);
+                    }
+                }
                 g.TranslateTransform(origin.X, origin.Y);
                 if (showExpanded) { PaintExpanded(g); PaintPageShot(g); } else PaintCollapsed(g);
                 g.Restore(st);
@@ -600,7 +614,7 @@ namespace ClaudeNotifier.Ui {
                 float ph = Math.Min(h * 0.8f, theme.S(30)), pw = ph * 1.3f;
                 PaintFace(g, new RectangleF(pad, (h - ph) / 2, pw, ph), pm, false);
                 int tx = pad + (int)pw + theme.S(12);
-                TextRenderer.DrawText(g, peekText, fBold, new Rectangle(tx, 0, Math.Max(0, lay.Width - tx - theme.S(14)), h), Color.White,
+                TextRenderer.DrawText(g, peekText, fBold, new Rectangle(tx, 0, Math.Max(0, lay.Width - tx - theme.S(14)), h), Fg,
                     TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
                 PaintGlow(g, h);
                 return;
@@ -665,7 +679,7 @@ namespace ClaudeNotifier.Ui {
             // Плавно проявляется и гаснет в начале и в конце показа.
             float ph = T % 15f, fade = 1f;
             if (ShowStats && Animate) fade = Math.Min(1f, Math.Min(ph / 0.35f, (5f - ph) / 0.35f));
-            Color c = Draw.Mix(Theme.Hex(0x1A1A1C), Color.White, Math.Max(0, Math.Min(1, fade)));
+            Color c = Draw.Mix(Pal(0x1A1A1C), Fg, Math.Max(0, Math.Min(1, fade)));
             Rectangle r = new Rectangle(x, 0, tw, h);
             TextRenderer.DrawText(g, it.Ask, fBold, r, c, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             return r;
@@ -679,7 +693,7 @@ namespace ClaudeNotifier.Ui {
             if (gi == null) return;
             float amp = 0.3f + 0.7f * (float)Math.Max(0, Math.Min(1, WaitAge(gi) / GlowFullSeconds));
             float pulse = Animate ? 0.5f + 0.5f * (float)Math.Sin(T * Math.PI * 2 / 1.8) : 0.6f;
-            Color c = gi.State == "error" ? Theme.Hex(0xFF453A) : gi.State == "permission" ? Theme.Hex(0xFF9F0A) : Theme.Hex(0x64D2FF);
+            Color c = gi.State == "error" ? Pal(0xFF453A) : gi.State == "permission" ? Pal(0xFF9F0A) : Pal(0x64D2FF);
             int a = (int)(255 * amp * (0.25f + 0.75f * pulse));
             float R = Math.Max(4, CornerRadius);
             SmoothingMode sm = g.SmoothingMode;
@@ -720,11 +734,11 @@ namespace ClaudeNotifier.Ui {
             int y = (h - vh - lh) / 2;
             int x0 = x;
             for (int i = 0; i < 3; i++) {
-                Color vc = load[i] >= 90 ? Theme.Hex(0xFF6961) : load[i] >= 70 ? Theme.Hex(0xFFB340) : Theme.Hex(0xE5E5EA);
+                Color vc = load[i] >= 90 ? Pal(0xFF6961) : load[i] >= 70 ? Pal(0xFFB340) : Pal(0xE5E5EA);
                 if (load[i] < 0) vc = theme.Muted;
                 TextRenderer.DrawText(g, vals[i], fBold, new Rectangle(x, y, w[i], vh), vc, TextFormatFlags.HorizontalCenter | TextFormatFlags.Bottom | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                 // Горячо — подпись янтарная (от 80°) или красная (от 90°).
-                Color lc = temp[i] >= 90 ? Theme.Hex(0xFF6961) : temp[i] >= 80 ? Theme.Hex(0xFFB340) : theme.Muted;
+                Color lc = temp[i] >= 90 ? Pal(0xFF6961) : temp[i] >= 80 ? Pal(0xFFB340) : theme.Muted;
                 TextRenderer.DrawText(g, labels[i], fSmall, new Rectangle(x, y + vh, w[i], lh), lc, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                 x += w[i] + colGap;
             }
@@ -736,18 +750,18 @@ namespace ClaudeNotifier.Ui {
             bool hot = hover == "page:stats-limits";
             bool none = left < 0;
             float v = none ? 0 : Anim("lim:" + name, Math.Max(0, Math.Min(100, left)), 6f);
-            Color c = none || LimitsStale ? Theme.Hex(0x636366) : v <= 10 ? Theme.Hex(0xFF453A) : v <= 25 ? Theme.Hex(0xFFB340) : Theme.Hex(0x30D158);
+            Color c = none || LimitsStale ? Pal(0x636366) : v <= 10 ? Pal(0xFF453A) : v <= 25 ? Pal(0xFFB340) : Pal(0x30D158);
             int lineH = theme.S(16), barH = theme.S(6);
             int ty = r.Y + theme.S(4), by = ty + lineH + theme.S(4);
             string pct = none ? "нет данных" : "осталось " + ((int)Math.Round(v)) + " %";
             int pw = TextRenderer.MeasureText(pct, fBold).Width;
-            TextRenderer.DrawText(g, pct, fBold, new Rectangle(r.Right - pw, ty, pw, lineH), none ? theme.Muted : (hot ? Color.White : Theme.Hex(0xE5E5EA)),
+            TextRenderer.DrawText(g, pct, fBold, new Rectangle(r.Right - pw, ty, pw, lineH), none ? theme.Muted : (hot ? Fg : Pal(0xE5E5EA)),
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
             string label = string.IsNullOrEmpty(detail) ? name : name + " · " + detail;
-            TextRenderer.DrawText(g, label, fSmall, new Rectangle(r.X, ty, Math.Max(0, r.Width - pw - theme.S(6)), lineH), hot ? Theme.Hex(0xC7C7CC) : theme.Muted,
+            TextRenderer.DrawText(g, label, fSmall, new Rectangle(r.X, ty, Math.Max(0, r.Width - pw - theme.S(6)), lineH), hot ? Pal(0xC7C7CC) : theme.Muted,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             RectangleF bar = new RectangleF(r.X, by, r.Width, barH);
-            Draw.Fill(g, bar, barH / 2f, Theme.Hex(0x2C2C2E));
+            Draw.Fill(g, bar, barH / 2f, Pal(0x2C2C2E));
             if (v > 0) Draw.Fill(g, new RectangleF(bar.X, bar.Y, Math.Max(barH, bar.Width * v / 100f), barH), barH / 2f, c);
             Hit(r, "page:stats-limits");
         }
@@ -756,9 +770,9 @@ namespace ClaudeNotifier.Ui {
             float h = Hot(id), p = Press(id), a = Anim("tab:" + id, active ? 1f : 0f, 18f);
             float inset = p * theme.S(1.5f);
             RectangleF rr = new RectangleF(r.X + inset, r.Y + inset, r.Width - inset * 2, r.Height - inset * 2);
-            Color bg = Draw.Mix(Draw.Mix(Color.Black, Theme.Hex(0x1C1C1E), h), Theme.Hex(0x2C2C2E), a);
+            Color bg = Draw.Mix(Draw.Mix(Bg, Pal(0x1C1C1E), h), Pal(0x2C2C2E), a);
             if (h > 0.01f || a > 0.01f) Draw.Fill(g, rr, rr.Height / 2f, bg);
-            TextRenderer.DrawText(g, glyph, fIcon, r, Draw.Mix(Theme.Hex(0xB0B0B5), Color.White, Math.Max(a, h * 0.6f)),
+            TextRenderer.DrawText(g, glyph, fIcon, r, Draw.Mix(Pal(0xB0B0B5), Fg, Math.Max(a, h * 0.6f)),
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             Hit(r, id);
         }
@@ -767,7 +781,7 @@ namespace ClaudeNotifier.Ui {
             int W = lay.Width, H = lay.Height, pad = theme.S(14), bs = theme.S(34), gap = theme.S(4);
             int y0 = theme.S(10), x = pad;
             // Страницы — слева; справа — звук и «закрыть»; между ними — полоски оставшихся лимитов.
-            string[,] tabs = { { "home", "\uE80F" }, { "stats", "\uE9D2" }, { "devices", "\uE772" }, { "settings", "\uE713" } };
+            string[,] tabs = { { "home", "\uE80F" }, { "history", "\uE81C" }, { "stats", "\uE9D2" }, { "devices", "\uE772" }, { "settings", "\uE713" } };
             for (int i = 0; i < tabs.GetLength(0); i++) { IconButtonAt(g, new Rectangle(x, y0, bs, bs), tabs[i, 1], "page:" + tabs[i, 0], Page == tabs[i, 0] || (Page == "answer" && tabs[i, 0] == "home"), null); x += bs + gap; }
             int rx = W - pad;
             rx -= bs; IconButtonAt(g, new Rectangle(rx, y0, bs, bs), "\uE711", "close", false, null);
@@ -784,10 +798,11 @@ namespace ClaudeNotifier.Ui {
                 int ch = H - top - pad;
                 int lw = (int)((W - pad * 3) * 0.54f);
                 Rectangle left = new Rectangle(pad, top, lw, ch), right = new Rectangle(pad * 2 + lw, top, W - pad * 3 - lw, ch);
-                Draw.Fill(g, left, theme.S(18), Theme.Hex(0x161618));
-                Draw.Fill(g, right, theme.S(18), Theme.Hex(0x161618));
+                Draw.Fill(g, left, theme.S(18), Pal(0x161618));
+                Draw.Fill(g, right, theme.S(18), Pal(0x161618));
                 PaintMain(g, left);
                 PaintOthers(g, right);
+                PaintDraggedChip(g);
             } else if (Page == "answer") {
                 PaintAnswer(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
             } else if (Page == "settings") {
@@ -854,19 +869,19 @@ namespace ClaudeNotifier.Ui {
             if (SettingsSection >= secs.Count || SettingsSection < 0) SettingsSection = 0;
             // Боковое меню.
             Rectangle side = new Rectangle(area.X, area.Y, SidebarWidth, area.Height);
-            Draw.Fill(g, side, theme.S(16), Theme.Hex(0x111113));
+            Draw.Fill(g, side, theme.S(16), Pal(0x111113));
             int iy = side.Y + theme.S(6), ih = theme.S(36);
             float selY = Anim("sidebar", side.Y + theme.S(6) + SettingsSection * (ih + theme.S(4)), 18f);
-            Draw.Fill(g, new RectangleF(side.X + theme.S(6), selY, side.Width - theme.S(12), ih), theme.S(10), Theme.Hex(0x2C2C2E));
+            Draw.Fill(g, new RectangleF(side.X + theme.S(6), selY, side.Width - theme.S(12), ih), theme.S(10), Pal(0x2C2C2E));
             for (int i = 0; i < secs.Count; i++) {
                 Rectangle it = new Rectangle(side.X + theme.S(6), iy, side.Width - theme.S(12), ih);
                 string id = "section:" + i;
                 bool sel = i == SettingsSection;
                 float hh = Hot(id);
-                if (!sel && hh > 0.01f) Draw.Fill(g, it, theme.S(10), Color.FromArgb((int)(255 * hh), Theme.Hex(0x1C1C1E)));
-                TextRenderer.DrawText(g, SectionIcon(secs[i].Title), fIconSmall, new Rectangle(it.X + theme.S(8), it.Y, theme.S(22), ih), sel ? Theme.Hex(0x0A84FF) : Theme.Hex(0x98989D),
+                if (!sel && hh > 0.01f) Draw.Fill(g, it, theme.S(10), Color.FromArgb((int)(255 * hh), Pal(0x1C1C1E)));
+                TextRenderer.DrawText(g, SectionIcon(secs[i].Title), fIconSmall, new Rectangle(it.X + theme.S(8), it.Y, theme.S(22), ih), sel ? Pal(0x0A84FF) : Pal(0x98989D),
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-                TextRenderer.DrawText(g, secs[i].Title, sel ? fBold : fBody, new Rectangle(it.X + theme.S(36), it.Y, it.Width - theme.S(40), ih), sel ? Color.White : Theme.Hex(0xC7C7CC),
+                TextRenderer.DrawText(g, secs[i].Title, sel ? fBold : fBody, new Rectangle(it.X + theme.S(36), it.Y, it.Width - theme.S(40), ih), sel ? Fg : Pal(0xC7C7CC),
                     TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
                 Hit(it, id);
                 iy += ih + theme.S(4);
@@ -874,7 +889,7 @@ namespace ClaudeNotifier.Ui {
             // Раздел: заголовок и строки в две колонки.
             Section s = secs[SettingsSection];
             Rectangle body = new Rectangle(side.Right + theme.S(14), area.Y, area.Right - side.Right - theme.S(14), area.Height);
-            TextRenderer.DrawText(g, s.Title, fTitle, new Rectangle(body.X + theme.S(4), body.Y, body.Width, theme.S(24)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, s.Title, fTitle, new Rectangle(body.X + theme.S(4), body.Y, body.Width, theme.S(24)), Fg, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter);
             Rectangle grid = new Rectangle(body.X, body.Y + theme.S(30), body.Width, body.Height - theme.S(30));
             viewHeight = grid.Height;
             contentHeight = GridHeight(s.Rows, grid.Width);
@@ -925,22 +940,22 @@ namespace ClaudeNotifier.Ui {
 
         void PaintAnswer(Graphics g, Rectangle area) {
             NotchItem it = Selected;
-            Draw.Fill(g, area, theme.S(18), Theme.Hex(0x161618));
+            Draw.Fill(g, area, theme.S(18), Pal(0x161618));
             if (it == null) { TextRenderer.DrawText(g, "Сеансов нет", fBody, area, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter); return; }
             int pad = theme.S(16);
             // Заголовок: «назад», персонаж, название, статус.
             Rectangle back = new Rectangle(area.X + theme.S(10), area.Y + theme.S(10), theme.S(30), theme.S(30));
-            Draw.Fill(g, back, back.Height / 2f, Draw.Mix(Theme.Hex(0x2C2C2E), Theme.Hex(0x3A3A3C), Hot("page:home")));
-            TextRenderer.DrawText(g, "\uE72B", fIconSmall, back, Theme.Hex(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            Draw.Fill(g, back, back.Height / 2f, Draw.Mix(Pal(0x2C2C2E), Pal(0x3A3A3C), Hot("page:home")));
+            TextRenderer.DrawText(g, "\uE72B", fIconSmall, back, Pal(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             Hit(back, "page:home");
             float fh = theme.S(26), fw = fh * 1.3f;
             PaintFace(g, new RectangleF(back.Right + theme.S(10), area.Y + theme.S(12), fw, fh), it, true);
             int tx = back.Right + theme.S(10) + (int)fw + theme.S(10);
-            TextRenderer.DrawText(g, it.Title, fTitle, new Rectangle(tx, area.Y + theme.S(8), area.Right - tx - pad, theme.S(20)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, it.Title, fTitle, new Rectangle(tx, area.Y + theme.S(8), area.Right - tx - pad, theme.S(20)), Fg, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             TextRenderer.DrawText(g, it.StateText, fSmall, new Rectangle(tx, area.Y + theme.S(28), area.Right - tx - pad, theme.S(18)), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             Rectangle arrow = new Rectangle(area.Right - theme.S(40), area.Y + theme.S(12), theme.S(26), theme.S(26));
-            Draw.Fill(g, arrow, arrow.Height / 2f, Draw.Mix(Theme.Hex(0x2C2C2E), Theme.Hex(0x3A3A3C), Hot("open")));
-            TextRenderer.DrawText(g, "\uE8A7", fIconSmall, arrow, Theme.Hex(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            Draw.Fill(g, arrow, arrow.Height / 2f, Draw.Mix(Pal(0x2C2C2E), Pal(0x3A3A3C), Hot("open")));
+            TextRenderer.DrawText(g, "\uE8A7", fIconSmall, arrow, Pal(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             Hit(arrow, "open");
             // Кнопки ответа — внизу, всегда видны.
             int barH = theme.S(52);
@@ -960,6 +975,7 @@ namespace ClaudeNotifier.Ui {
                 Hit(br, "act:" + id);
                 bx += bw + theme.S(8);
             }
+            if (CanTextReply(it)) PaintReplyField(g, new Rectangle(bx + theme.S(4), by, area.Right - pad - bx - theme.S(4), bhh));
             // Текст ответа целиком — с прокруткой колесом.
             Rectangle textArea = new Rectangle(area.X + pad, area.Y + theme.S(56), AnswerTextWidth(area.Width), bar.Y - area.Y - theme.S(60));
             string body = AnswerText(it);
@@ -968,7 +984,7 @@ namespace ClaudeNotifier.Ui {
             int scroll = Scroll;
             Region old = g.Clip;
             g.SetClip(textArea, CombineMode.Intersect);   // сужаем, а не заменяем: при сворачивании текст режется формой шторки
-            TextRenderer.DrawText(g, body, fBody, new Rectangle(textArea.X, textArea.Y - scroll, textArea.Width, th + theme.S(4)), Theme.Hex(0xE5E5EA), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
+            TextRenderer.DrawText(g, body, fBody, new Rectangle(textArea.X, textArea.Y - scroll, textArea.Width, th + theme.S(4)), Pal(0xE5E5EA), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl);
             g.Clip = old; old.Dispose();   // g.Clip отдаёт копию — без Dispose регион GDI+ копится на каждом кадре
             if (th > textArea.Height + theme.S(3) && !Resizing) {
                 int sh = Math.Max(theme.S(24), textArea.Height * textArea.Height / th);
@@ -980,12 +996,12 @@ namespace ClaudeNotifier.Ui {
         void PaintMain(Graphics g, Rectangle r) {
             NotchItem it = Selected;
             if (it != null) {
-                if (hover == "answer") Draw.Fill(g, r, theme.S(18), Theme.Hex(0x1C1C1F));
+                if (hover == "answer") Draw.Fill(g, r, theme.S(18), Pal(0x1C1C1F));
                 Hit(r, "answer");   // щелчок по карточке — полный ответ и варианты ответа
             }
             if (it == null) {
                 PaintFace(g, new RectangleF(r.X + theme.S(18), r.Y + (r.Height - theme.S(64)) / 2f, theme.S(84), theme.S(64)), null, false, true);
-                TextRenderer.DrawText(g, "Сеансов нет", fTitle, new Rectangle(r.X + theme.S(120), r.Y, r.Width - theme.S(130), r.Height / 2), Color.White, TextFormatFlags.Bottom | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(g, "Сеансов нет", fTitle, new Rectangle(r.X + theme.S(120), r.Y, r.Width - theme.S(130), r.Height / 2), Fg, TextFormatFlags.Bottom | TextFormatFlags.NoPrefix);
                 TextRenderer.DrawText(g, "Начните работу в Claude Code — сеанс появится здесь.", fSmall, new Rectangle(r.X + theme.S(120), r.Y + r.Height / 2 + theme.S(4), r.Width - theme.S(130), r.Height / 2), theme.Muted, TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
                 return;
             }
@@ -995,20 +1011,20 @@ namespace ClaudeNotifier.Ui {
             int tx = r.X + theme.S(16) + fw + theme.S(16), tw = r.Right - tx - theme.S(44);
             int y = r.Y + theme.S(14);
             int titleW = Math.Min(tw, TextRenderer.MeasureText(it.Title, fTitle).Width);
-            TextRenderer.DrawText(g, it.Title, fTitle, new Rectangle(tx, y, titleW + 2, theme.S(22)), Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+            TextRenderer.DrawText(g, it.Title, fTitle, new Rectangle(tx, y, titleW + 2, theme.S(22)), Fg, TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
             if (!string.IsNullOrEmpty(it.Meta) && titleW + theme.S(8) + TextRenderer.MeasureText(it.Meta, fBody).Width <= tw)
                 TextRenderer.DrawText(g, it.Meta, fBody, new Rectangle(tx + titleW + theme.S(8), y + theme.S(2), tw - titleW - theme.S(8), theme.S(22)), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
             y += theme.S(24);
             float d = theme.S(7);
             using (SolidBrush b = new SolidBrush(TrayDot.ColorFor(it.State))) g.FillEllipse(b, tx, y + theme.S(10) - d / 2, d, d);
-            TextRenderer.DrawText(g, it.StateText, fBody, new Rectangle(tx + theme.S(13), y, tw - theme.S(13), theme.S(20)), Theme.Hex(0xAEAEB2), TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+            TextRenderer.DrawText(g, it.StateText, fBody, new Rectangle(tx + theme.S(13), y, tw - theme.S(13), theme.S(20)), Pal(0xAEAEB2), TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
             y += theme.S(24);
             string body = !string.IsNullOrEmpty(it.RequestTitle) ? it.RequestTitle : it.Preview;
             int lines = 2;
             int bottomReserve = it.Actions.Length > 0 ? theme.S(40) : theme.S(28);
             int bh = Math.Max(0, Math.Min(r.Bottom - bottomReserve - y, TextRenderer.MeasureText("Ag", fSmall).Height * lines));
             if (!string.IsNullOrEmpty(body) && bh > 0)
-                TextRenderer.DrawText(g, body, fSmall, new Rectangle(tx, y, tw + theme.S(30), bh), Theme.Hex(0x98989D), TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.TextBoxControl);
+                TextRenderer.DrawText(g, body, fSmall, new Rectangle(tx, y, tw + theme.S(30), bh), Pal(0x98989D), TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.TextBoxControl);
             if (it.Actions.Length > 0) {
                 int bx = r.X + theme.S(16), by = r.Bottom - theme.S(38), bhh = theme.S(28);
                 foreach (string a in it.Actions) {
@@ -1024,26 +1040,26 @@ namespace ClaudeNotifier.Ui {
             } else {
                 string open = "Полный ответ  \u203A";
                 Rectangle or = new Rectangle(tx, r.Bottom - theme.S(32), TextRenderer.MeasureText(open, fBold).Width, theme.S(22));
-                TextRenderer.DrawText(g, open, fBold, or, hover == "answer" ? Color.White : Theme.Hex(0xD1D1D6), TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                TextRenderer.DrawText(g, open, fBold, or, hover == "answer" ? Fg : Pal(0xD1D1D6), TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
             }
             Rectangle arrow = new Rectangle(r.Right - theme.S(36), r.Y + theme.S(10), theme.S(26), theme.S(26));
-            Draw.Fill(g, arrow, arrow.Height / 2f, Draw.Mix(Theme.Hex(0x2C2C2E), Theme.Hex(0x3A3A3C), Hot("open")));
-            TextRenderer.DrawText(g, "", fIconSmall, arrow, Theme.Hex(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            Draw.Fill(g, arrow, arrow.Height / 2f, Draw.Mix(Pal(0x2C2C2E), Pal(0x3A3A3C), Hot("open")));
+            TextRenderer.DrawText(g, "", fIconSmall, arrow, Pal(0xC7C7CC), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             Hit(arrow, "open");
         }
 
         void PaintSelect(Graphics g, Rectangle br, string text, string id) {
             float rad = theme.S(8), h = Hot(id), pr = Press(id);
-            Draw.Fill(g, br, rad, Draw.Mix(Draw.Mix(Theme.Hex(0x2C2C2E), Theme.Hex(0x3A3A3C), h), Color.Black, 0.15f * pr));
+            Draw.Fill(g, br, rad, Draw.Mix(Draw.Mix(Pal(0x2C2C2E), Pal(0x3A3A3C), h), Bg, 0.15f * pr));
             using (GraphicsPath path = Draw.Round(new RectangleF(br.X + 0.5f, br.Y + 0.5f, br.Width - 1, br.Height - 1), rad))
-            using (Pen border = new Pen(Draw.Mix(Theme.Hex(0x48484A), Theme.Hex(0x6A6A6E), h)))
+            using (Pen border = new Pen(Draw.Mix(Pal(0x48484A), Pal(0x6A6A6E), h)))
                 g.DrawPath(border, path);
             int chev = theme.S(26);
-            TextRenderer.DrawText(g, text, fBody, new Rectangle(br.X + theme.S(12), br.Y, br.Width - theme.S(12) - chev, br.Height), Color.White,
+            TextRenderer.DrawText(g, text, fBody, new Rectangle(br.X + theme.S(12), br.Y, br.Width - theme.S(12) - chev, br.Height), Fg,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             // Стрелка вниз — как у системного выпадающего списка.
             float cx = br.Right - chev / 2f - theme.S(2), cy = br.Y + br.Height / 2f, w = theme.S(4.5f);
-            using (Pen p = new Pen(Theme.Hex(0xAEAEB2), theme.S(1.6f))) {
+            using (Pen p = new Pen(Pal(0xAEAEB2), theme.S(1.6f))) {
                 p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
                 g.DrawLines(p, new PointF[] { new PointF(cx - w, cy - w / 2), new PointF(cx, cy + w / 2), new PointF(cx + w, cy - w / 2) });
             }
@@ -1053,14 +1069,27 @@ namespace ClaudeNotifier.Ui {
             NotchItem sel = Selected;
             int pad = theme.S(12), chH = theme.S(40), gap = theme.S(8);
             int x = r.X + pad, y = r.Y + pad, colW = Math.Max(theme.S(120), (r.Width - pad * 2 - gap) / 2);
+            y += PaintSearchField(g, new Rectangle(r.X + pad, r.Y + pad, r.Width - pad * 2, 0));   // поиск (печатают на главной)
             int shown = 0, total = 0;
             // Сеансы нескольких устройств — группами с подписью («Этот ПК», «MacBook Air»): одинаковые проекты не путаются.
             bool grouped = false;
             foreach (NotchItem it in items) if (it.Device != items[0].Device) { grouped = true; break; }
             string group = null;
             int labelH = theme.S(20);
-            foreach (NotchItem it in items) {
+            List<NotchItem> order = new List<NotchItem>(items);
+            if (chipDragging && chipDrag != null) {
+                int from = order.FindIndex(delegate (NotchItem q) { return q.Id == chipDrag; });
+                if (from >= 0) {
+                    NotchItem d = order[from]; order.RemoveAt(from);
+                    string before = DropTarget(chipDragPos, chipDrag);
+                    int to = before == null ? order.Count : order.FindIndex(delegate (NotchItem q) { return q.Id == before; });
+                    order.Insert(to < 0 ? order.Count : to, d);
+                }
+            }
+            chipSlots.Clear();
+            foreach (NotchItem it in order) {
                 if (sel != null && it.Id == sel.Id) continue;
+                if (!Matches(it)) continue;
                 total++;
                 if (grouped && it.Device != group) {
                     group = it.Device;
@@ -1073,11 +1102,23 @@ namespace ClaudeNotifier.Ui {
                     y += labelH;
                 }
                 if (y + chH > r.Bottom - pad + 1) continue;
-                Rectangle chip = new Rectangle(x, y, colW, chH);
+                Rectangle target = new Rectangle(x, y, colW, chH);
+                Rectangle chip = new Rectangle((int)Math.Round(Anim("cx:" + it.Id, x, 18f)), (int)Math.Round(Anim("cy:" + it.Id, y, 18f)), colW, chH);
+                Rectangle slotW = target; slotW.Offset(origin);
+                chipSlots.Add(new KeyValuePair<string, Rectangle>(it.Id, slotW));
+                if (chipDragging && chipDrag == it.Id) {
+                    using (Pen ph = new Pen(Pal(0x3A3A3C), Math.Max(1f, theme.S(1.2f)))) {
+                        ph.DashStyle = DashStyle.Dash;
+                        using (GraphicsPath pp = Draw.Round(new RectangleF(target.X + 0.5f, target.Y + 0.5f, target.Width - 1, target.Height - 1), chH / 2f)) g.DrawPath(ph, pp);
+                    }
+                    shown++;
+                    if (x == r.X + pad) x += colW + gap; else { x = r.X + pad; y += chH + gap; }
+                    continue;
+                }
                 bool hot = hover == "item:" + it.Id || hover == "remove:" + it.Id;
                 float chipH = Math.Max(Hot("item:" + it.Id), Hot("remove:" + it.Id)), chipP = Press("item:" + it.Id);
                 RectangleF chipR = RectangleF.Inflate(chip, -chipP * theme.S(1.5f), -chipP * theme.S(1.5f));
-                Draw.Fill(g, chipR, chipR.Height / 2f, Draw.Mix(Theme.Hex(0x1F1F21), Theme.Hex(0x2C2C2E), chipH));
+                Draw.Fill(g, chipR, chipR.Height / 2f, Draw.Mix(Pal(0x1F1F21), Pal(0x2C2C2E), chipH));
                 float fh = chH * 0.62f, fw = fh * 1.3f;
                 PaintFace(g, new RectangleF(chip.X + theme.S(8), chip.Y + (chH - fh) / 2, fw, fh), it, false);
                 // Крестик справа — убрать сеанс из списка (вернётся, если в нём что-то произойдёт).
@@ -1086,15 +1127,15 @@ namespace ClaudeNotifier.Ui {
                 bool xhot = hover == "remove:" + it.Id;
                 // Крестик — только при наведении на плашку: в покое имени и статусу больше места.
                 if (hot) {
-                    if (xhot) Draw.Fill(g, xr, xs / 2f, Theme.Hex(0x3A3A3C));
-                    TextRenderer.DrawText(g, "\uE711", fIconSmall, xr, xhot ? Color.White : Theme.Hex(0x98989D),
+                    if (xhot) Draw.Fill(g, xr, xs / 2f, Pal(0x3A3A3C));
+                    TextRenderer.DrawText(g, "\uE711", fIconSmall, xr, xhot ? Fg : Pal(0x98989D),
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 }
                 int tx = chip.X + theme.S(8) + (int)fw + theme.S(8), tr = (hot ? xr.X : chip.Right - theme.S(14)) - tx;
                 // Имя и под ним — статус («Работает · 12 мин»).
                 bool sub = !string.IsNullOrEmpty(it.StateText) && chH >= theme.S(36);
                 int nameY = sub ? chip.Y + theme.S(3) : chip.Y, nameH = sub ? theme.S(19) : chH;
-                TextRenderer.DrawText(g, it.Title, fBold, new Rectangle(tx, nameY, tr, nameH), Theme.Hex(0xE5E5EA),
+                TextRenderer.DrawText(g, it.Title, fBold, new Rectangle(tx, nameY, tr, nameH), Pal(0xE5E5EA),
                     (sub ? TextFormatFlags.Bottom : TextFormatFlags.VerticalCenter) | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
                 if (sub) TextRenderer.DrawText(g, it.StateText, fSmall, new Rectangle(tx, chip.Y + theme.S(21), tr, theme.S(15)),
                     it.State == "permission" || it.State == "error" ? TrayDot.ColorFor(it.State) : theme.Muted,
@@ -1104,7 +1145,7 @@ namespace ClaudeNotifier.Ui {
                 shown++;
                 if (x == r.X + pad) x += colW + gap; else { x = r.X + pad; y += chH + gap; }
             }
-            if (total == 0) TextRenderer.DrawText(g, "Других сеансов нет", fBody, r, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            if (total == 0) TextRenderer.DrawText(g, SearchActive && search.Length > 0 ? "Ничего не найдено" : "Других сеансов нет", fBody, r, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             else if (shown < total) TextRenderer.DrawText(g, "ещё " + (total - shown), fSmall, new Rectangle(r.X, r.Bottom - theme.S(22), r.Width - pad, theme.S(18)), theme.Muted, TextFormatFlags.Right | TextFormatFlags.NoPrefix);
         }
 
@@ -1191,9 +1232,9 @@ namespace ClaudeNotifier.Ui {
                 TextRenderer.DrawText(g, row.Title, fSmall, new Rectangle(r.X + theme.S(6), r.Y, r.Width - theme.S(8), r.Height), theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
                 return;
             }
-            string hitId = row.Kind == "switch" || row.Kind == "choice" ? "set:" + row.Key : (row.Kind == "button" ? "row:" + row.Key : null);
+            string hitId = row.Kind == "switch" || row.Kind == "choice" ? "set:" + row.Key : (row.Kind == "button" || row.Kind == "link" ? "row:" + row.Key : null);
             bool hot = hitId != null && hover == hitId;
-            Draw.Fill(g, r, theme.S(14), Draw.Mix(Draw.Mix(Theme.Hex(0x161618), Theme.Hex(0x222225), Hot(hitId)), Theme.Hex(0x111113), Press(hitId)));
+            Draw.Fill(g, r, theme.S(14), Draw.Mix(Draw.Mix(Pal(0x161618), Pal(0x222225), Hot(hitId)), Pal(0x111113), Press(hitId)));
             if (row.Kind == "chart") { PaintChart(g, row, r); return; }
             int pad = theme.S(14), rightW = 0;
             // Правая часть: тумблер, выбор, кнопка, значение или действия устройства.
@@ -1230,22 +1271,30 @@ namespace ClaudeNotifier.Ui {
                     bx -= theme.S(6);
                 }
                 rightW = r.Right - pad - bx;
+            } else if (row.Kind == "link") {
+                int cw = theme.S(14);
+                TextRenderer.DrawText(g, "\u203A", fTitle, new Rectangle(r.Right - pad - cw, r.Y, cw, r.Height), Draw.Mix(Pal(0x6E6E73), Fg, Hot(hitId) * 0.6f),
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+                int vw = string.IsNullOrEmpty(row.Value) ? 0 : TextRenderer.MeasureText(row.Value, fSmall).Width + theme.S(4);
+                if (vw > 0) TextRenderer.DrawText(g, row.Value, fSmall, new Rectangle(r.Right - pad - cw - theme.S(6) - vw, r.Y, vw, r.Height), theme.Muted,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                rightW = cw + theme.S(10) + vw;
             } else if (!string.IsNullOrEmpty(row.Value)) {
                 int vw = Math.Min(r.Width / 2, TextRenderer.MeasureText(row.Value, fBody).Width + theme.S(4));
-                TextRenderer.DrawText(g, row.Value, fBody, new Rectangle(r.Right - pad - vw, r.Y, vw, r.Height), Theme.Hex(0xAEAEB2), TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, row.Value, fBody, new Rectangle(r.Right - pad - vw, r.Y, vw, r.Height), Pal(0xAEAEB2), TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
                 rightW = vw + theme.S(10);
             }
             int tx = r.X + pad;
             if (!string.IsNullOrEmpty(row.Dot)) {
                 float d = theme.S(8);
-                Color dc = row.Dot == "online" ? Theme.Hex(0x30D158) : TrayDot.ColorFor(row.Dot);
+                Color dc = row.Dot == "online" ? Pal(0x30D158) : TrayDot.ColorFor(row.Dot);
                 using (SolidBrush b = new SolidBrush(dc)) g.FillEllipse(b, tx, r.Y + r.Height / 2f - d / 2, d, d);
                 tx += theme.S(16);
             }
             int tw = Math.Max(theme.S(40), r.Right - pad - rightW - tx);
             if (string.IsNullOrEmpty(row.Subtitle)) {
                 Rectangle tr = new Rectangle(tx, r.Y, tw, r.Height);
-                TextRenderer.DrawText(g, row.Title, fBold, tr, Color.White, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, row.Title, fBold, tr, Fg, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
                 Tip(Rectangle.Intersect(tr, area), row.Title, fBold);
             } else {
                 // Подпись в одну строку, а если не помещается — в две (строка выше); текст — по середине строки.
@@ -1253,7 +1302,7 @@ namespace ClaudeNotifier.Ui {
                 int subH = two ? theme.S(34) : theme.S(18), blockH = theme.S(20) + subH;
                 int ty0 = r.Y + (r.Height - blockH) / 2;
                 Rectangle tr = new Rectangle(tx, ty0, tw, theme.S(20)), sr = new Rectangle(tx, ty0 + theme.S(20), tw, subH);
-                TextRenderer.DrawText(g, row.Title, fBold, tr, Color.White, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, row.Title, fBold, tr, Fg, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
                 TextRenderer.DrawText(g, row.Subtitle, fSmall, sr, theme.Muted, TextFormatFlags.NoPrefix | (two ? TextFormatFlags.WordBreak : TextFormatFlags.SingleLine) | TextFormatFlags.EndEllipsis);
                 Tip(Rectangle.Intersect(tr, area), row.Title, fBold);
                 Tip(Rectangle.Intersect(sr, area), row.Subtitle, fSmall);
@@ -1273,11 +1322,11 @@ namespace ClaudeNotifier.Ui {
                 float h = max > 0 ? (float)((bottom - top) * row.Values[i] / max) : 0;
                 h = Math.Max(row.Values[i] > 0 ? theme.S(4) : theme.S(2), h);
                 bool hi = i == row.Highlight;
-                Draw.Fill(g, new RectangleF(cx - bw / 2, bottom - h, bw, h), theme.S(5), hi ? theme.Accent : Theme.Hex(0x3A3A3C));
+                Draw.Fill(g, new RectangleF(cx - bw / 2, bottom - h, bw, h), theme.S(5), hi ? theme.Accent : Pal(0x3A3A3C));
                 if (i < row.ValueLabels.Length && row.Values[i] > 0)
-                    TextRenderer.DrawText(g, row.ValueLabels[i], fSmall, new Rectangle((int)(cx - slot / 2), (int)(bottom - h) - valueH, (int)slot, valueH), hi ? Color.White : theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                    TextRenderer.DrawText(g, row.ValueLabels[i], fSmall, new Rectangle((int)(cx - slot / 2), (int)(bottom - h) - valueH, (int)slot, valueH), hi ? Fg : theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                 if (i < row.Labels.Length)
-                    TextRenderer.DrawText(g, row.Labels[i], hi ? fBold : fSmall, new Rectangle((int)(cx - slot / 2), bottom + theme.S(4), (int)slot, labelH), hi ? Color.White : theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                    TextRenderer.DrawText(g, row.Labels[i], hi ? fBold : fSmall, new Rectangle((int)(cx - slot / 2), bottom + theme.S(4), (int)slot, labelH), hi ? Fg : theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
             }
         }
 
@@ -1290,12 +1339,14 @@ namespace ClaudeNotifier.Ui {
             base.OnMouseDown(e);
             string h0 = HitAt(e.Location);
             if (e.Button == MouseButtons.Left && h0 != "mascot") { pressed = h0; WakeUi(); Invalidate(); }
+            ChipMouseDown(e, h0);
             PlayMouseDown(e, h0);
         }
 
         protected override void OnMouseMove(MouseEventArgs e) {
             base.OnMouseMove(e);
             string h = HitAt(e.Location);
+            if (ChipMouseMove(e)) return;      // тянут плашку сеанса
             if (PlayMouseMove(e, h)) return;   // тянут маскота
             if (h != hover) { hover = h; Cursor = h != null ? Cursors.Hand : Cursors.Default; Invalidate(); }
             UpdateTip(e.Location);
@@ -1315,6 +1366,7 @@ namespace ClaudeNotifier.Ui {
         protected override void OnMouseUp(MouseEventArgs e) {
             base.OnMouseUp(e);
             if (pressed != null) { pressed = null; WakeUi(); Invalidate(); }
+            if (ChipMouseUp(e)) return;   // перенесли плашку сеанса
             if (PlayMouseUp(e)) return;   // бросили маскота или щёлкнули по нему
             string hit = HitAt(e.Location);
             if (e.Button == MouseButtons.Right) {
@@ -1349,6 +1401,11 @@ namespace ClaudeNotifier.Ui {
                 return;
             }
             if (hit == "mascot") { MascotClick(); return; }
+            if (hit == "reply-field") {
+                replyOn = true; searchOn = false;
+                NotchForm nf = FindForm() as NotchForm; if (nf != null) nf.EnsureKeyboard();
+                Invalidate(); return;
+            }
             if (hit.StartsWith("qact:")) { QuickAnswer(hit.Substring(5), p); return; }
             if (hit.StartsWith("item:")) { SelectedId = hit.Substring(5); Invalidate(); return; }
             if (hit.StartsWith("remove:")) { if (h != null) h(this, new NotchEventArgs("remove", hit.Substring(7), null, p)); return; }
@@ -1389,7 +1446,7 @@ namespace ClaudeNotifier.Ui {
 
     // Окно шторки: без рамки, поверх всех окон, без кнопки на панели задач и без перехвата фокуса.
     // Прижато к верхнему краю выбранного монитора; нижние углы скруглены; размер меняется пружиной.
-    public sealed class NotchForm : Form {
+    public sealed partial class NotchForm : Form {
         public readonly NotchView View = new NotchView();
         readonly Timer spring = new Timer();
         readonly Timer outside = new Timer();
@@ -1467,10 +1524,11 @@ namespace ClaudeNotifier.Ui {
             return s > 0.5f && s < 8f ? s : 1f;
         }
 
-        public void ApplyDpi() {
-            float s = ScreenScale();
-            if (Math.Abs(View.Theme.Scale - s) < 0.001f) return;
-            Theme t = Theme.Create(true);
+        public void ApplyDpi() { ApplyDpi(false); }
+        public void ApplyDpi(bool force) {
+            float s = ScreenScale() * NotchView.UserScale;   // размер шторки из настроек — множитель к DPI
+            if (!force && Math.Abs(View.Theme.Scale - s) < 0.001f && View.Theme.Dark == !NotchView.Light) return;
+            Theme t = Theme.Create(!NotchView.Light);
             t.Scale = s;
             View.ApplyTheme(t);
         }
@@ -1539,6 +1597,7 @@ namespace ClaudeNotifier.Ui {
 
         // Свёрнутая полоска; с загрузкой ПК посередине — шире.
         // «Выдох» — шире, по длине строки; главный маскот вырос (долго ждёт вас) — выше.
+        public Size CollapsedSizeNow() { return CollapsedSize(); }
         Size CollapsedSize() {
             Theme t = View.Theme;
             int w = t.S(View.ShowStats || View.HasAsk ? 400 : 240), h = t.S(View.Grown ? 48 : 38);
@@ -1584,6 +1643,9 @@ namespace ClaudeNotifier.Ui {
             if (expanded) View.LayoutExpanded = s;
             if (changed && Visible && Motion.Enabled) View.Morphing = true;
             if (expanded) RaiseToTop();
+            // Клавиатура: раскрыли — шторка принимает клавиши; свернули — фокус прежнему окну.
+            if (expanded && changed) TakeKeyboard();
+            if (!expanded) { ReleaseKeyboard(); View.EndTyping(); }
             SetTargetSize(s, true);
             View.Invalidate();
         }
@@ -1744,6 +1806,10 @@ namespace ClaudeNotifier.Ui {
             System.Threading.Interlocked.Increment(ref ErrorCount);
         }
 
+        // Будильник трея: щелчок в шторке будит поток трея сразу (а не на его следующем такте до 100 мс).
+        public static TrayWaker Waker;
+        static void WakeTray() { TrayWaker w = Waker; if (w != null) w.Wake(); }
+
         public static void Start() {
             if (Running) return;
             System.Threading.ManualResetEvent ready = new System.Threading.ManualResetEvent(false);
@@ -1753,8 +1819,8 @@ namespace ClaudeNotifier.Ui {
                 try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException, false); } catch { }
                 Application.ThreadException += delegate (object s, System.Threading.ThreadExceptionEventArgs e) { Report(e.Exception); };
                 NotchForm f = new NotchForm();
-                f.View.Command += delegate (object s, NotchEventArgs e) { Commands.Enqueue(e); };
-                f.Collapsed += delegate { Commands.Enqueue(new NotchEventArgs("collapse", "", null, Point.Empty)); };
+                f.View.Command += delegate (object s, NotchEventArgs e) { Commands.Enqueue(e); WakeTray(); };
+                f.Collapsed += delegate { Commands.Enqueue(new NotchEventArgs("collapse", "", null, Point.Empty)); WakeTray(); };
                 IntPtr h = f.Handle;   // создать окно в этом потоке
                 form = f;
                 // Заблокирован экран или компьютер засыпает — анимация на паузе (не тратим процессор впустую).
@@ -1834,6 +1900,20 @@ namespace ClaudeNotifier.Ui {
                 v.LimitsStale = stale; v.SoundOff = soundOff; v.Invalidate();
             });
         }
+        // Открыть сеанс на главной раскрытой шторки (щелчок по событию в истории).
+        public static void Select(string id) { Post(delegate (NotchForm f) { f.View.SelectedId = id; f.View.SetPage("home"); f.View.Invalidate(); }); }
+        // Тема (светлая/тёмная) и размер шторки — сразу, с пересчётом раскладки.
+        public static void SetLook(bool light, float scale) {
+            Post(delegate (NotchForm f) {
+                if (NotchView.Light == light && Math.Abs(NotchView.UserScale - scale) < 0.001f) return;
+                NotchView.Light = light; NotchView.UserScale = scale;
+                f.ApplyDpi(true);
+                f.View.LayoutCollapsed = f.CollapsedSizeNow();
+                f.SetTargetSize(f.SizeFor(), false);
+                f.View.Invalidate();
+            });
+        }
+        public static void ShowQuick(string id) { Post(delegate (NotchForm f) { f.View.ShowQuick(id); }); }
         public static void Peek(string text, int ms) { Post(delegate (NotchForm f) { if (!f.View.Expanded) f.View.StartPeek(text, null, ms); }); }
         public static void React(string id, string kind) { Post(delegate (NotchForm f) { f.View.React(id, kind); }); }
         public static void SetExpanded(bool expanded, string page) { Post(delegate (NotchForm f) { f.SetExpanded(expanded, page); }); }

@@ -280,9 +280,16 @@ function Invoke-NotifierEventBatch {
             if (-not $NoOutput) {
                 $buttons = @()
                 try { $buttons = @(Get-NotifierToastButtons -Event $event -Config $config -Request:$wasRequest -DataRoot $DataRoot) } catch { }
-                $logo = ''
-                try { $logo = Get-NotifierToastLogo -Event $event -DataRoot $DataRoot } catch { }
-                [void](Show-NotifierToast -Event $event -Actions $buttons -DataRoot $DataRoot -Logo $logo)
+                # Вы за ПК и шторка запущена — уведомление показывает шторка (выдох, у запроса — кнопки у маскота);
+                # нет вас — всплывающее уведомление Windows.
+                $inline = $false
+                try { $inline = Test-NotifierNotchInline -Event $event -Config $config -IdleSeconds (Get-NotifierIdleSeconds) } catch { }
+                if ($inline) { Show-NotifierNotchInline -Event $event }
+                else {
+                    $logo = ''
+                    try { $logo = Get-NotifierToastLogo -Event $event -DataRoot $DataRoot } catch { }
+                    [void](Show-NotifierToast -Event $event -Actions $buttons -DataRoot $DataRoot -Logo $logo)
+                }
                 if (-not (Test-NotifierQuietTime -Config $config)) { [void](Invoke-NotifierSound -Type $event.type -Config $config -DataRoot $DataRoot) }   # звук выключен в шторке или по расписанию
             }
             # Вас нет за ПК — то же событие на телефон через ntfy или Telegram (в фоне).
@@ -714,6 +721,16 @@ function Start-NotifierTray {
         catch { Write-NotifierLog -Level WARN -Message "tray: горячая клавиша: $($_.Exception.Message)" -DataRoot $DataRoot }
         try { Initialize-NotifierNotch -DataRoot $DataRoot }
         catch { Write-NotifierLog -Level WARN -Message "tray: шторка: $($_.Exception.Message)" -DataRoot $DataRoot }
+        # Будильник: щелчок в шторке обрабатывается сразу, а не на следующем такте таймера.
+        try {
+            if ('ClaudeNotifier.Ui.TrayWaker' -as [type]) {
+                $script:TrayWaker = New-Object ClaudeNotifier.Ui.TrayWaker
+                $null = $script:TrayWaker.Handle
+                $script:TrayWaker.add_Woke({ try { Invoke-NotifierNotchCommands } catch { Write-NotifierLog -Level WARN -Message "tray: шторка: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot } })
+                [ClaudeNotifier.Ui.NotchHost]::Waker = $script:TrayWaker
+            }
+        }
+        catch { Write-NotifierLog -Level WARN -Message "tray: будильник шторки: $($_.Exception.Message)" -DataRoot $DataRoot }
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = $script:TickMs
         $script:LastActivity = [datetime]::UtcNow   # старт считается активностью: первая обрезка через 30 с

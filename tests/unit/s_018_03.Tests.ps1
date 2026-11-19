@@ -3,6 +3,8 @@
     . (Join-Path $repoRoot 'src\ClaudeNotifier.Tray.ps1')
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     [void](Import-NotifierUi)
+    # Анимации проверяются при включённых эффектах — и на машинах, где они в Windows выключены (GitHub Actions).
+    [ClaudeNotifier.Ui.Motion]::Force($true)
 
     function New-It([string]$Id, [string]$State) { $it = New-Object ClaudeNotifier.Ui.NotchItem; $it.Id = $Id; $it.Title = $Id; $it.State = $State; return $it }
     function Invoke-Draw($Form) {
@@ -17,6 +19,8 @@
         $g.Dispose(); return $b
     }
 }
+
+AfterAll { [ClaudeNotifier.Ui.Motion]::Force($null) }
 
 Describe 's_018_03 · пружины, сжатие, запаздывание' {
     It 'пружина: перелетает цель и успокаивается; по реальному времени одинаково при 10 и 60 кадрах' {

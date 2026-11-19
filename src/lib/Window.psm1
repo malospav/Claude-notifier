@@ -7,9 +7,204 @@ $script:FLASHW_ALL_TIMERNOFG = 0x3 -bor 0xC
 
 $script:Win32Source = @'
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
+using System.Management.Automation;
 using System.Runtime.InteropServices;
+using System.Text;
 namespace ClaudeNotifier {
+    // Лёгкий разбор JSON (мосту хуков): первый ConvertFrom-Json в Windows PowerShell 5.1 стоит ~70 мс на загрузку
+    // сборки, а мост запускается на каждое событие. Результат — как у ConvertFrom-Json: объекты — PSCustomObject,
+    // массивы — object[], числа — int / long / decimal, true/false, null. Ошибка разбора — FormatException.
+    public static class JsonLite {
+        public static object Parse(string text) { return Parse(text, false); }
+        // hashtables = true: объекты — Hashtable без учёта регистра (как @{} в PowerShell), а не PSCustomObject.
+        public static object Parse(string text, bool hashtables) {
+            if (text == null) throw new FormatException("JSON: пусто");
+            int i = 0;
+            object v = Value(text, ref i, hashtables);
+            Ws(text, ref i);
+            if (i != text.Length) throw new FormatException("JSON: лишние символы на позиции " + i);
+            return v;
+        }
+        static void Ws(string s, ref int i) { while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n' || s[i] == '\uFEFF')) i++; }
+        static object Value(string s, ref int i, bool h) {
+            Ws(s, ref i);
+            if (i >= s.Length) throw new FormatException("JSON: неожиданный конец");
+            char c = s[i];
+            if (c == '{') return h ? (object)Table(s, ref i) : Obj(s, ref i);
+            if (c == '[') return Arr(s, ref i, h);
+            if (c == '"') return Str(s, ref i);
+            if (c == 't' && string.CompareOrdinal(s, i, "true", 0, 4) == 0) { i += 4; return true; }
+            if (c == 'f' && string.CompareOrdinal(s, i, "false", 0, 5) == 0) { i += 5; return false; }
+            if (c == 'n' && string.CompareOrdinal(s, i, "null", 0, 4) == 0) { i += 4; return null; }
+            return Num(s, ref i);
+        }
+        static PSObject Obj(string s, ref int i) {
+            PSObject o = new PSObject();
+            i++; Ws(s, ref i);
+            if (i < s.Length && s[i] == '}') { i++; return o; }
+            while (true) {
+                Ws(s, ref i);
+                if (i >= s.Length || s[i] != '"') throw new FormatException("JSON: ожидалось имя свойства на позиции " + i);
+                string k = Str(s, ref i);
+                Ws(s, ref i);
+                if (i >= s.Length || s[i] != ':') throw new FormatException("JSON: ожидалось «:» на позиции " + i);
+                i++;
+                object v = Value(s, ref i, false);
+                if (o.Properties[k] != null) o.Properties.Remove(k);
+                o.Properties.Add(new PSNoteProperty(k, v));
+                Ws(s, ref i);
+                if (i < s.Length && s[i] == ',') { i++; continue; }
+                if (i < s.Length && s[i] == '}') { i++; return o; }
+                throw new FormatException("JSON: ожидалось «,» или «}» на позиции " + i);
+            }
+        }
+        static System.Collections.Hashtable Table(string s, ref int i) {
+            System.Collections.Hashtable o = new System.Collections.Hashtable(StringComparer.OrdinalIgnoreCase);
+            i++; Ws(s, ref i);
+            if (i < s.Length && s[i] == '}') { i++; return o; }
+            while (true) {
+                Ws(s, ref i);
+                if (i >= s.Length || s[i] != '"') throw new FormatException("JSON: ожидалось имя свойства на позиции " + i);
+                string k = Str(s, ref i);
+                Ws(s, ref i);
+                if (i >= s.Length || s[i] != ':') throw new FormatException("JSON: ожидалось «:» на позиции " + i);
+                i++;
+                o[k] = Value(s, ref i, true);
+                Ws(s, ref i);
+                if (i < s.Length && s[i] == ',') { i++; continue; }
+                if (i < s.Length && s[i] == '}') { i++; return o; }
+                throw new FormatException("JSON: ожидалось «,» или «}» на позиции " + i);
+            }
+        }
+        static object[] Arr(string s, ref int i, bool h) {
+            List<object> l = new List<object>();
+            i++; Ws(s, ref i);
+            if (i < s.Length && s[i] == ']') { i++; return l.ToArray(); }
+            while (true) {
+                l.Add(Value(s, ref i, h));
+                Ws(s, ref i);
+                if (i < s.Length && s[i] == ',') { i++; continue; }
+                if (i < s.Length && s[i] == ']') { i++; return l.ToArray(); }
+                throw new FormatException("JSON: ожидалось «,» или «]» на позиции " + i);
+            }
+        }
+        static string Str(string s, ref int i) {
+            StringBuilder b = new StringBuilder();
+            i++;
+            while (i < s.Length) {
+                char c = s[i++];
+                if (c == '"') return b.ToString();
+                if (c != '\\') { b.Append(c); continue; }
+                if (i >= s.Length) break;
+                char e = s[i++];
+                switch (e) {
+                    case '"': b.Append('"'); break;
+                    case '\\': b.Append('\\'); break;
+                    case '/': b.Append('/'); break;
+                    case 'b': b.Append('\b'); break;
+                    case 'f': b.Append('\f'); break;
+                    case 'n': b.Append('\n'); break;
+                    case 'r': b.Append('\r'); break;
+                    case 't': b.Append('\t'); break;
+                    case 'u':
+                        if (i + 4 > s.Length) throw new FormatException("JSON: неполный \\u");
+                        b.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture)); i += 4; break;
+                    default: throw new FormatException("JSON: неизвестная escape-последовательность");
+                }
+            }
+            throw new FormatException("JSON: незакрытая строка");
+        }
+        static object Num(string s, ref int i) {
+            int st = i;
+            if (i < s.Length && (s[i] == '-' || s[i] == '+')) i++;
+            bool frac = false;
+            while (i < s.Length) {
+                char c = s[i];
+                if (c >= '0' && c <= '9') { i++; continue; }
+                if (c == '.' || c == 'e' || c == 'E' || ((c == '-' || c == '+') && (s[i - 1] == 'e' || s[i - 1] == 'E'))) { frac = true; i++; continue; }
+                break;
+            }
+            string t = s.Substring(st, i - st);
+            if (t.Length == 0 || t == "-" || t == "+") throw new FormatException("JSON: ожидалось значение на позиции " + st);
+            if (!frac) {
+                int iv; if (int.TryParse(t, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out iv)) return iv;
+                long lv; if (long.TryParse(t, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out lv)) return lv;
+            }
+            decimal dv; if (decimal.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out dv)) return dv;
+            return double.Parse(t, NumberStyles.Float, CultureInfo.InvariantCulture);
+        }
+
+        // Объект → JSON одной строкой (как ConvertTo-Json -Compress): PSCustomObject и словари — объекты,
+        // списки — массивы, даты — ISO 8601. Первый ConvertTo-Json в PowerShell 5.1 стоит ~25 мс.
+        public static string Write(object v) { StringBuilder b = new StringBuilder(256); W(b, v, 0); return b.ToString(); }
+        static void W(StringBuilder b, object v, int depth) {
+            if (v == null) { b.Append("null"); return; }
+            PSObject po = v as PSObject;
+            if (po != null) {
+                if (po.BaseObject is PSCustomObject) {
+                    if (depth > 12) { b.Append("null"); return; }
+                    b.Append('{'); bool first = true;
+                    foreach (PSPropertyInfo p in po.Properties) {
+                        if (!first) b.Append(','); first = false;
+                        WStr(b, p.Name); b.Append(':');
+                        object pv; try { pv = p.Value; } catch { pv = null; }
+                        W(b, pv, depth + 1);
+                    }
+                    b.Append('}'); return;
+                }
+                v = po.BaseObject;
+            }
+            if (v is string) { WStr(b, (string)v); return; }
+            if (v is char) { WStr(b, v.ToString()); return; }
+            if (v is bool) { b.Append((bool)v ? "true" : "false"); return; }
+            if (v is DateTime) { WStr(b, ((DateTime)v).ToString("o", CultureInfo.InvariantCulture)); return; }
+            if (v is Enum) { b.Append(Convert.ToInt64(v, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)); return; }
+            if (v is double) { double d = (double)v; b.Append(double.IsNaN(d) || double.IsInfinity(d) ? "null" : d.ToString("R", CultureInfo.InvariantCulture)); return; }
+            if (v is float) { float f = (float)v; b.Append(float.IsNaN(f) || float.IsInfinity(f) ? "null" : f.ToString("R", CultureInfo.InvariantCulture)); return; }
+            if (v is int || v is long || v is short || v is byte || v is sbyte || v is uint || v is ulong || v is ushort || v is decimal) {
+                b.Append(((IFormattable)v).ToString(null, CultureInfo.InvariantCulture)); return;
+            }
+            if (depth > 12) { b.Append("null"); return; }
+            System.Collections.IDictionary dict = v as System.Collections.IDictionary;
+            if (dict != null) {
+                b.Append('{'); bool first = true;
+                foreach (System.Collections.DictionaryEntry e in dict) {
+                    if (!first) b.Append(','); first = false;
+                    WStr(b, Convert.ToString(e.Key, CultureInfo.InvariantCulture)); b.Append(':');
+                    W(b, e.Value, depth + 1);
+                }
+                b.Append('}'); return;
+            }
+            System.Collections.IEnumerable list = v as System.Collections.IEnumerable;
+            if (list != null) {
+                b.Append('['); bool first = true;
+                foreach (object x in list) { if (!first) b.Append(','); first = false; W(b, x, depth + 1); }
+                b.Append(']'); return;
+            }
+            WStr(b, Convert.ToString(v, CultureInfo.InvariantCulture));
+        }
+        static void WStr(StringBuilder b, string s) {
+            b.Append('"');
+            foreach (char c in s) {
+                switch (c) {
+                    case '"': b.Append("\\\""); break;
+                    case '\\': b.Append("\\\\"); break;
+                    case '\n': b.Append("\\n"); break;
+                    case '\r': b.Append("\\r"); break;
+                    case '\t': b.Append("\\t"); break;
+                    default:
+                        if (c < 0x20 || c == 0x2028 || c == 0x2029) b.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                        else b.Append(c);
+                        break;
+                }
+            }
+            b.Append('"');
+        }
+    }
+
     public static class Win32 {
         [StructLayout(LayoutKind.Sequential)]
         public struct FLASHWINFO {
@@ -50,12 +245,43 @@ namespace ClaudeNotifier {
         }
         // Имя образа вида "claude.exe" или null.
         public static string GetProcessName(int pid) {
+            string path = GetImagePath(pid);
+            if (!string.IsNullOrEmpty(path)) return System.IO.Path.GetFileName(path);
             try { using (Process p = Process.GetProcessById(pid)) { return p.ProcessName + ".exe"; } }
             catch { return null; }
         }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageNameW(IntPtr h, int flags, [Out] char[] name, ref int size);
+        // Полный путь образа процесса или null — один быстрый системный вызов (Process.Path читает список модулей).
+        public static string GetImagePath(int pid) {
+            IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+            if (h == IntPtr.Zero) return null;
+            try {
+                char[] buf = new char[1024];
+                int size = buf.Length;
+                return QueryFullProcessImageNameW(h, 0, buf, ref size) ? new string(buf, 0, size) : null;
+            } finally { CloseHandle(h); }
+        }
+        delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+        [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+        static Dictionary<int, long> mainWindows;
+        // Главное окно процесса: первое видимое окно верхнего уровня без владельца (как MainWindowHandle).
+        // Все окна перечисляются один раз за запуск моста — Process.GetProcessById на каждом шаге стоил дорого.
         public static long GetMainWindow(int pid) {
-            try { using (Process p = Process.GetProcessById(pid)) { return p.MainWindowHandle.ToInt64(); } }
-            catch { return 0; }
+            if (mainWindows == null) {
+                Dictionary<int, long> map = new Dictionary<int, long>();
+                try {
+                    EnumWindows(delegate (IntPtr hwnd, IntPtr lp) {
+                        int wp; GetWindowThreadProcessId(hwnd, out wp);
+                        if (!map.ContainsKey(wp) && IsWindowVisible(hwnd) && GetWindow(hwnd, 4) == IntPtr.Zero) map[wp] = hwnd.ToInt64();   // GW_OWNER
+                        return true;
+                    }, IntPtr.Zero);
+                } catch { }
+                mainWindows = map;
+            }
+            long h; return mainWindows.TryGetValue(pid, out h) ? h : 0;
         }
     }
 }
@@ -105,11 +331,16 @@ function Get-ConsoleRootWindow {
     return $root.ToInt64()
 }
 
+$script:ProcInfoCache = @{}
+
 function Get-ParentProcessInfo([int]$ProcessId) {
-    # @{ ParentId; Name } процесса или $null.
+    # @{ ParentId; Name } процесса или $null. Запоминается: «вложенный Claude» и поиск окна идут по тем же предкам.
+    if ($script:ProcInfoCache.ContainsKey($ProcessId)) { return $script:ProcInfoCache[$ProcessId] }
     $parent = [ClaudeNotifier.Win32]::GetParentPid($ProcessId)
-    if ($parent -lt 0) { return $null }
-    return @{ ParentId = $parent; Name = [ClaudeNotifier.Win32]::GetProcessName($ProcessId) }
+    $info = $null
+    if ($parent -ge 0) { $info = @{ ParentId = $parent; Name = [ClaudeNotifier.Win32]::GetProcessName($ProcessId) } }
+    $script:ProcInfoCache[$ProcessId] = $info
+    return $info
 }
 
 function Get-ProcessMainWindow([int]$ProcessId) {
@@ -168,7 +399,7 @@ function Test-NotifierNestedClaude {
             $seen[$current] = $true
             $current = $info.ParentId
             $path = ''
-            try { $path = [string]([System.Diagnostics.Process]::GetProcessById($current).Path) } catch { }
+            try { $path = [string][ClaudeNotifier.Win32]::GetImagePath($current) } catch { }
             if (Test-NotifierClaudeCodePath $path) { $codes++; if ($codes -ge 2) { return $true } }
         }
     }

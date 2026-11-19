@@ -219,6 +219,30 @@ namespace ClaudeNotifier.Ui {
             return true;
         }
 
+        // Уведомление прямо в шторке: запрос разрешения — кнопки решения у маскота сразу, без щелчка.
+        string pendingQuick;
+        DateTime pendingQuickAt = DateTime.MinValue;
+
+        public void ShowQuick(string id) {
+            if (Expanded) return;
+            pendingQuick = id; pendingQuickAt = DateTime.UtcNow;   // сеанс в шторке может ещё не обновиться — дождёмся
+            TryPendingQuick();
+        }
+
+        // Из SetItems: запрос пришёл раньше, чем сеанс в шторке стал «ждёт разрешения».
+        void TryPendingQuick() {
+            if (pendingQuick == null) return;
+            if ((DateTime.UtcNow - pendingQuickAt).TotalSeconds > 10 || Expanded) { pendingQuick = null; return; }
+            string id = pendingQuick;
+            foreach (NotchItem x in items) {
+                if (x.Id != id || x.State != "permission" || x.Actions.Length == 0) continue;
+                quickId = id; quickUntil = DateTime.UtcNow.AddSeconds(QuickSeconds * 1.5);
+                pendingQuick = null;
+                EventHandler h = CollapsedResize; if (h != null) h(this, EventArgs.Empty);
+                Invalidate();
+            }
+        }
+
         // Щелчок по главному маскоту: решение (ждёт разрешения), разбудить (спит) или тык.
         void MascotClick() {
             NotchItem it = null;

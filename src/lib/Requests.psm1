@@ -25,7 +25,7 @@ function Write-JsonAtomic([string]$Path, $Object) {
 }
 
 function Read-JsonFile([string]$Path) {
-    try { return (ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)) -ErrorAction Stop) } catch { return $null }
+    try { return (ConvertFrom-NotifierJson -InputObject ([IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8))) } catch { return $null }
 }
 
 function Test-ProcessAlive([int]$ProcessId) {

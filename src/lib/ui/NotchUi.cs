@@ -11,7 +11,43 @@ using System.Drawing;
 using System.Windows.Forms;
 
 namespace ClaudeNotifier.Ui {
+    // Невидимый элемент в потоке трея: Wake() из любого потока — событие Woke в потоке трея (один раз, пока не
+    // обработано). Шторка будит им трей, и команда щелчка выполняется сразу.
+    public sealed class TrayWaker : Control {
+        public event EventHandler Woke;
+        int pending;
+        public int Wakes;
+        public void Wake() {
+            if (!IsHandleCreated || IsDisposed) return;
+            if (System.Threading.Interlocked.Exchange(ref pending, 1) == 1) return;
+            try {
+                BeginInvoke((MethodInvoker)delegate {
+                    System.Threading.Interlocked.Exchange(ref pending, 0);
+                    Wakes++;
+                    EventHandler h = Woke; if (h != null) h(this, EventArgs.Empty);
+                });
+            } catch { System.Threading.Interlocked.Exchange(ref pending, 0); }
+        }
+    }
+
     public sealed partial class NotchView {
+        // Тема шторки: тёмная (как вырез экрана) или светлая. В светлой серые тона шторки зеркалятся по яркости
+        // (фон светлый, текст тёмный), цветные — акценты, статусы — остаются. Размер шторки — множитель к DPI.
+        public static bool Light;
+        public static float UserScale = 1f;
+
+        internal static Color Pal(int hex) {
+            Color c = Theme.Hex(hex);
+            if (!Light) return c;
+            int max = Math.Max(c.R, Math.Max(c.G, c.B)), min = Math.Min(c.R, Math.Min(c.G, c.B));
+            if (max - min > 30) return c;   // цветной акцент
+            float l = (max + min) / 510f, nl = 1f - l * 0.9f;
+            int v = Math.Max(0, Math.Min(255, (int)(nl * 255)));
+            return Color.FromArgb(c.A, v, v, Math.Min(255, v + 3));
+        }
+        static Color Fg { get { return Light ? Color.FromArgb(28, 28, 30) : Color.White; } }
+        static Color Bg { get { return Light ? Color.FromArgb(242, 242, 246) : Color.Black; } }
+
         sealed class AnimValue { public float Cur, Target, Rate; public DateTime Seen; }
         readonly Dictionary<string, AnimValue> anims = new Dictionary<string, AnimValue>();
         readonly Dictionary<string, float> scrollShown = new Dictionary<string, float>();
@@ -110,7 +146,7 @@ namespace ClaudeNotifier.Ui {
             Bitmap b = new Bitmap(lay.Width, lay.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
             try {
                 using (Graphics g2 = Graphics.FromImage(b)) {
-                    g2.Clear(Color.Black);
+                    g2.Clear(Bg);
                     g2.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
                     PaintExpanded(g2);
                 }
@@ -147,15 +183,15 @@ namespace ClaudeNotifier.Ui {
         void PaintPill(Graphics g, Rectangle br, string text, string style, string id) {
             float h = Hot(id), p = Press(id);
             bool sent = id != null && (id.StartsWith("act:") || id.StartsWith("qact:")) && Sent(id.Substring(id.IndexOf(':') + 1));
-            Color baseC = style == "primary" ? theme.Accent : Theme.Hex(0x2C2C2E);
-            Color hotC = style == "primary" ? theme.AccentHover : Theme.Hex(0x3A3A3C);
+            Color baseC = style == "primary" ? theme.Accent : Pal(0x2C2C2E);
+            Color hotC = style == "primary" ? theme.AccentHover : Pal(0x3A3A3C);
             Color fill = Draw.Mix(baseC, hotC, h);
-            if (p > 0.01f) fill = Draw.Mix(fill, Color.Black, 0.18f * p);
-            if (sent) fill = Draw.Mix(fill, Theme.Hex(0x30D158), 0.55f);
+            if (p > 0.01f) fill = Draw.Mix(fill, Bg, 0.18f * p);
+            if (sent) fill = Draw.Mix(fill, Pal(0x30D158), 0.55f);
             float inset = p * Math.Max(1f, br.Height * 0.05f);
             RectangleF r = new RectangleF(br.X + inset, br.Y + inset, br.Width - inset * 2, br.Height - inset * 2);
             Draw.Fill(g, r, r.Height / 2f, fill);
-            Color tc = style == "destructive" && !sent ? Theme.Hex(0xFF6961) : Color.White;
+            Color tc = style == "destructive" && !sent ? Pal(0xFF6961) : Fg;
             // С галочкой не помещается — одна галочка.
             string label = text;
             if (sent) label = TextRenderer.MeasureText("✓ " + text, fBold).Width <= br.Width - theme.S(8) ? "✓ " + text : "✓";
@@ -165,11 +201,11 @@ namespace ClaudeNotifier.Ui {
         // Тумблер: ползунок едет, цвет перетекает; при нажатии ползунок чуть вытягивается (как в iOS).
         void PaintSwitch(Graphics g, Rectangle t, string key, bool on, string hitId) {
             float k = Anim("sw:" + key, on ? 1f : 0f, 16f), p = Press(hitId);
-            Draw.Fill(g, t, t.Height / 2f, Draw.Mix(Theme.Hex(0x39393D), Theme.Hex(0x30D158), k));
+            Draw.Fill(g, t, t.Height / 2f, Draw.Mix(Pal(0x39393D), Pal(0x30D158), k));
             float kd = t.Height - theme.S(4), stretch = kd * 0.18f * p;
             float x0 = t.X + theme.S(2), x1 = t.Right - theme.S(2) - kd - stretch;
             float kx = x0 + (x1 - x0) * k;
-            Draw.Fill(g, new RectangleF(kx, t.Y + theme.S(2), kd + stretch, kd), kd / 2, Color.White);
+            Draw.Fill(g, new RectangleF(kx, t.Y + theme.S(2), kd + stretch, kd), kd / 2, Color.FromArgb(255, 255, 255));
         }
     }
 }

@@ -100,6 +100,34 @@ function Switch-NotifierMascot {
     Set-NotifierMascot
 }
 
+function Test-NotifierNotchInline {
+    <#
+    .SYNOPSIS
+    Показать уведомление в шторке, а не окном Windows: настройка «Уведомления в шторке», шторка запущена, вы за ПК
+    (меньше минуты без ввода), событие — готово / запрос / ошибка / лимит.
+    #>
+    param([Parameter(Mandatory = $true)]$Event, [Parameter(Mandatory = $true)]$Config, [double]$IdleSeconds = 0)
+    if (-not $Config.notch.enabled -or -not $Config.notch.inline) { return $false }
+    if (@('done', 'permission', 'error', 'limit') -notcontains [string]$Event.type) { return $false }
+    if ($IdleSeconds -ge 60) { return $false }
+    return [bool](Test-NotifierNotchActive)
+}
+
+function Show-NotifierNotchInline {
+    <# .SYNOPSIS Уведомление в шторке: «выдох» с заголовком и текстом; запрос разрешения — кнопки решения у маскота. #>
+    param([Parameter(Mandatory = $true)]$Event)
+    $text = ([string]$Event.title).Trim()
+    $preview = ([string]$Event.preview).Trim() -replace '\s+', ' '
+    if ($preview) {
+        if ($preview.Length -gt 80) { $preview = $preview.Substring(0, 79).TrimEnd() + [char]0x2026 }
+        $text = "$text $([char]0x2014) $preview"
+    }
+    [ClaudeNotifier.Ui.NotchHost]::Peek($text, 5000)
+    if ([string]$Event.type -eq 'permission' -and $Event.PSObject.Properties['session_id'] -and $Event.session_id) {
+        [ClaudeNotifier.Ui.NotchHost]::ShowQuick([string]$Event.session_id)
+    }
+}
+
 function Get-NotifierToastLogo {
     <#
     .SYNOPSIS
@@ -340,7 +368,14 @@ function Get-NotifierNotchItems {
     $order.Add('')
     foreach ($it in $list) { if (-not $order.Contains($it.Device)) { $order.Add($it.Device) } }
     $out = New-Object 'System.Collections.Generic.List[ClaudeNotifier.Ui.NotchItem]'
-    foreach ($dev in $order) { foreach ($it in $list) { if ($it.Device -eq $dev) { $out.Add($it) } } }
+    $user = @(Get-NotifierNotchOrder)
+    foreach ($dev in $order) {
+        $grp = @($list | Where-Object { $_.Device -eq $dev })
+        $i = 0
+        $keyed = foreach ($it in $grp) { $u = [Array]::IndexOf($user, [string]$it.Id); [pscustomobject]@{ It = $it; K = $(if ($u -ge 0) { $u } else { 100000 + $i }) }; $i++ }
+        foreach ($k in @($keyed | Sort-Object K)) { $out.Add($k.It) }
+    }
+    $script:NotchLastIds = @($out | ForEach-Object { $_.Id })
     return , $out.ToArray()
 }
 
@@ -380,6 +415,42 @@ function Update-NotifierMascotFlags {
     [ClaudeNotifier.Ui.MascotSound]::Enabled = [bool]$Config.notch.sounds
     [ClaudeNotifier.Ui.MascotSound]::Muted = [bool](Test-NotifierQuietTime -Config $Config)
     [ClaudeNotifier.Ui.MascotPlay]::Seasonal = [bool]$Config.notch.seasonal
+    if ('ClaudeNotifier.Ui.NotchHost' -as [type]) {
+        $scale = @{ compact = 0.85; normal = 1.0; large = 1.2 }[[string]$Config.notch.size]
+        if (-not $scale) { $scale = 1.0 }
+        [ClaudeNotifier.Ui.NotchHost]::SetLook((Test-NotifierNotchLight -Config $Config), [float]$scale)
+    }
+}
+
+function Test-NotifierNotchLight {
+    <# .SYNOPSIS Светлая шторка? Настройка light — да; auto — как приложения Windows (AppsUseLightTheme). #>
+    param($Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
+    switch ([string]$Config.notch.theme) {
+        'light' { return $true }
+        'auto' {
+            try { return ([int](Get-ItemPropertyValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop) -eq 1) } catch { return $false }
+        }
+    }
+    return $false
+}
+
+function Install-NotifierMascotSounds {
+    <#
+    .SYNOPSIS
+    Набор звуков «Маскот» для уведомлений: мягкие колокольчики (готово — вверх, запрос — три ноты, ошибка — вниз,
+    лимит — низкий двойной) — WAV в DataRoot\sounds, рисуются один раз. Возвращает @{ тип = путь }.
+    #>
+    param([string]$DataRoot = $script:TrayDataRoot)
+    $out = @{}
+    if (-not ('ClaudeNotifier.Ui.MascotSound' -as [type])) { return $out }
+    $dir = Join-Path $DataRoot 'sounds'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    foreach ($t in @('done', 'permission', 'error', 'limit')) {
+        $p = Join-Path $dir "mascot-$t-v1.wav"
+        if (-not (Test-Path -LiteralPath $p)) { [IO.File]::WriteAllBytes($p, [ClaudeNotifier.Ui.MascotSound]::EventWave($t)) }
+        $out[$t] = $p
+    }
+    return $out
 }
 
 function Get-NotifierEventReaction {
@@ -480,6 +551,7 @@ function Update-NotifierNotch {
     Push-NotifierNotchLimits -SoundOff ([bool]$config.quiet.enabled)
     $script:NotchSessions = $Sessions
     if ($script:NotchExpanded -and $script:NotchPage -eq 'devices') { Push-NotifierNotchPage -Page devices }
+    if ($script:NotchExpanded -and $script:NotchPage -eq 'history') { Push-NotifierNotchPage -Page history }
     if ($script:NotchExpanded -and $script:NotchPage -eq 'answer' -and $script:NotchAnswerId) { Push-NotifierNotchAnswer -Id $script:NotchAnswerId }
 }
 
@@ -544,14 +616,17 @@ function Get-NotifierNotchSettingsRows {
     try { if ([ClaudeNotifier.Ui.SysStats]::Cpu -ge 0 -and [ClaudeNotifier.Ui.SysStats]::CpuTemp -lt 0) { $statsSub = "Температура ЦП $([char]0x2014) запустите LibreHardwareMonitor" } } catch { }
     $rows += New-NotifierNotchRow switch 'notch.stats' 'Загрузка ПК' $statsSub -On ([bool]$c.notch.stats)
     $rows += New-NotifierNotchRow switch 'notch.attention' 'Привлекать внимание' 'Шторка зовёт, когда Claude ждёт вас' -On ([bool]$c.notch.attention)
-    $rows += New-NotifierNotchRow switch 'notch.sounds' 'Звуки маскота' "Мурлычет, ойкает, зевает $([char]0x2014) тихо" -On ([bool]$c.notch.sounds)
-    $rows += New-NotifierNotchRow switch 'notch.seasonal' 'Наряды' 'Ночной колпак, Новый год, Хэллоуин' -On ([bool]$c.notch.seasonal)
+    $rows += New-NotifierNotchRow switch 'notch.inline' 'Уведомления в шторке' 'Пока вы за ПК — без всплывающих окон Windows' -On ([bool]$c.notch.inline)
+    $rows += New-NotifierNotchRow choice 'notch.theme' 'Тема шторки' 'Тёмная, светлая или как в Windows' -Value (Get-NotifierSelectLabel 'notch.theme' -Config $c)
+    $rows += New-NotifierNotchRow choice 'notch.size' 'Размер шторки' 'Компактная, обычная или крупная' -Value (Get-NotifierSelectLabel 'notch.size' -Config $c)
     $rows += New-NotifierNotchRow choice 'notch.digest' 'Сводка дня' "Задачи, время и расход $([char]0x2014) вечером" -Value (Get-NotifierSelectLabel 'notch.digest' -Config $c)
     $rows += New-NotifierNotchRow choice 'hotkey' 'Горячая клавиша' (Format-NotifierHotKeySubtitle) -Value (Get-NotifierSelectLabel 'hotkey' -Config $c)
     $rows += New-NotifierNotchRow switch 'notch' 'Шторка вместо окна' 'Выключить — прежнее окно «Сеансы»' -On $true
     $rows += New-NotifierNotchRow header -Title 'Маскоты'
     $rows += New-NotifierNotchRow choice 'mascot:' 'Этот ПК' 'Сеансы Claude на этом компьютере' -Value (Get-NotifierSelectLabel 'mascot:' -Config $c)
     $rows += New-NotifierNotchRow button 'mascotPreview' 'Анимации' 'Все движения маскота этого ПК по очереди' -Value 'Показать'
+    $rows += New-NotifierNotchRow switch 'notch.sounds' 'Звуки маскота' "Мурлычет, ойкает, зевает $([char]0x2014) тихо" -On ([bool]$c.notch.sounds)
+    $rows += New-NotifierNotchRow switch 'notch.seasonal' 'Наряды' 'Ночной колпак, Новый год, Хэллоуин' -On ([bool]$c.notch.seasonal)
     $devices = @()
     if ($script:Net -and $script:Net.Network) { $devices = @($script:Net.Network.devices | Where-Object { $_ }) }
     foreach ($d in $devices) {
@@ -641,6 +716,70 @@ function Get-NotifierNotchStatsRows {
     return $rows   # строки по одной в конвейер: вызывающие оборачивают в @()
 }
 
+function Get-NotifierNotchHistoryRows {
+    <#
+    .SYNOPSIS
+    Вкладка «История»: события за сегодня, новые сверху — что случилось (готово, запрос, ошибка, лимит), в каком
+    сеансе, когда. Щелчок по строке — открыть этот сеанс на главной.
+    #>
+    param([datetime]$Now = [DateTime]::Now, [string]$DataRoot = $script:TrayDataRoot, [int]$Max = 60)
+    $rows = @()
+    $dot = @{ done = 'waiting'; permission = 'permission'; error = 'error'; limit = 'alert' }
+    $label = @{ done = 'Готово'; permission = 'Запрос'; error = 'Ошибка'; limit = 'Лимит' }
+    $today = @()
+    foreach ($e in @(Get-NotifierHistory -DataRoot $DataRoot)) {
+        if ($null -eq $e) { continue }
+        $ts = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse([string]$e.ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$ts)) { continue }
+        $local = $ts.ToLocalTime()
+        if ($local.Date -ne $Now.Date) { continue }
+        $today += [pscustomobject]@{ E = $e; At = $local }
+    }
+    if ($today.Count -eq 0) { return (New-NotifierNotchRow note -Title 'Сегодня событий пока не было: здесь появится всё, о чём шторка уведомляла.') }
+    $rows += New-NotifierNotchRow header -Title "Сегодня $([char]0x00B7) $($today.Count)"
+    foreach ($x in @($today | Sort-Object At -Descending | Select-Object -First $Max)) {
+        $e = $x.E; $type = [string]$e.type
+        $sid = if ($e.PSObject.Properties['session_id']) { [string]$e.session_id } else { '' }
+        $sub = ([string]$e.preview).Trim() -replace '\s+', ' '
+        if ($sub.Length -gt 110) { $sub = $sub.Substring(0, 109) + [char]0x2026 }
+        $kind = if ($label.ContainsKey($type)) { $label[$type] } else { $type }
+        if ($sub -eq '') { $sub = $kind } else { $sub = "$kind $([char]0x00B7) $sub" }
+        $r = New-NotifierNotchRow link "hist:$sid" ([string]$e.title) $sub -Value $x.At.ToString('HH:mm')
+        $r.Dot = if ($dot.ContainsKey($type)) { $dot[$type] } else { '' }
+        $rows += $r
+    }
+    return $rows
+}
+
+$script:NotchOrder = $null
+
+function Get-NotifierNotchOrder {
+    <# .SYNOPSIS Порядок плашек, заданный перетаскиванием (id сеансов), из notch-order.json. #>
+    param([string]$DataRoot = $script:TrayDataRoot)
+    if ($null -eq $script:NotchOrder) {
+        $script:NotchOrder = @()
+        $p = Join-Path $DataRoot 'notch-order.json'
+        if (Test-Path -LiteralPath $p) {
+            # Сначала в переменную: ConvertFrom-Json в PowerShell 5.1 отдаёт массив конвейеру одним объектом.
+            try { $ids = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)) -ErrorAction Stop; $script:NotchOrder = @($ids | ForEach-Object { [string]$_ }) } catch { }
+        }
+    }
+    return , @($script:NotchOrder)
+}
+
+function Save-NotifierNotchOrder {
+    <# .SYNOPSIS Плашку Id перенесли перед Before ('' — в конец): новый порядок по текущим сеансам — в notch-order.json. #>
+    param([Parameter(Mandatory = $true)][string]$Id, [AllowEmptyString()][string]$Before = '', [string[]]$Current = @($script:NotchLastIds), [string]$DataRoot = $script:TrayDataRoot)
+    $list = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($x in $Current) { if ($x -and $x -ne $Id -and -not $list.Contains($x)) { $list.Add($x) } }
+    $at = if ($Before) { $list.IndexOf($Before) } else { -1 }
+    if ($at -lt 0) { $list.Add($Id) } else { $list.Insert($at, $Id) }
+    $script:NotchOrder = @($list.ToArray())
+    try { [IO.File]::WriteAllText((Join-Path $DataRoot 'notch-order.json'), (ConvertTo-Json -InputObject @($script:NotchOrder) -Compress), (New-Object Text.UTF8Encoding $false)) }
+    catch { Write-NotifierLog -Level WARN -Message "notch: порядок не сохранён: $($_.Exception.Message)" -DataRoot $DataRoot }
+    return , @($script:NotchOrder)
+}
+
 function Push-NotifierNotchPage {
     <# .SYNOPSIS Строки страницы — в шторку. «Главная» и «Ответ» строк не требуют. #>
     param([string]$Page = $script:NotchPage)
@@ -649,6 +788,7 @@ function Push-NotifierNotchPage {
     switch ($Page) {
         'settings' { $rows = @(Get-NotifierNotchSettingsRows) }
         'devices' { $rows = @(Get-NotifierNotchDevicesRows -Sessions @($script:NotchSessions)) }
+        'history' { $rows = @(Get-NotifierNotchHistoryRows) }
         'stats' {
             $rows = @(Get-NotifierNotchStatsRows)
             # Пересчёт — если итога ещё нет или он старше 10 минут (иначе готовый итог снова запускал бы пересчёт).
@@ -713,7 +853,7 @@ function Invoke-NotifierNotchSetting {
             Set-NotifierOptionValue -Name notch -Field attention -Value $on
             if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetAttention($on) }
         }
-        '^notch\.(sounds|seasonal)$' {
+        '^notch\.(sounds|seasonal|inline)$' {
             Set-NotifierOptionValue -Name notch -Field $Matches[1] -Value (-not [bool]$c.notch[$Matches[1]])
             Update-NotifierMascotFlags
         }
@@ -864,6 +1004,16 @@ function Get-NotifierSelectOptions {
             $cur = if ($c.notch.digest) { [string][int]$c.notch.digestHour } else { 'off' }
             Get-NumberSelectOptions -Values 17, 18, 19, 20, 21, 22 -Current $cur -Off 'off' -Format { "В $($args[0]):00" }
         }
+        '^notch\.theme$' {
+            New-SelectOption 'dark' 'Тёмная' ([string]$c.notch.theme -eq 'dark')
+            New-SelectOption 'light' 'Светлая' ([string]$c.notch.theme -eq 'light')
+            New-SelectOption 'auto' 'Как в Windows' ([string]$c.notch.theme -eq 'auto')
+        }
+        '^notch\.size$' {
+            New-SelectOption 'compact' 'Компактная' ([string]$c.notch.size -eq 'compact')
+            New-SelectOption 'normal' 'Обычная' ([string]$c.notch.size -eq 'normal')
+            New-SelectOption 'large' 'Крупная' ([string]$c.notch.size -eq 'large')
+        }
         '^update\.channel$' {
             New-SelectOption 'release' 'Выпуски' ([string]$c.update.channel -eq 'release')
             New-SelectOption 'main' 'Ветка main' ([string]$c.update.channel -eq 'main')
@@ -897,6 +1047,8 @@ function Get-NotifierSelectOptions {
         '^sound\.(done|permission|error|limit)$' {
             $cur = [string]$c.events[$Matches[1]].sound
             New-SelectOption '' 'Системный' ($cur -eq '')
+            $ms = $null; try { $ms = (Install-NotifierMascotSounds)[$Matches[1]] } catch { }
+            if ($ms) { New-SelectOption $ms 'Маскот' ($cur -ne '' -and [string]::Equals($cur, $ms, [StringComparison]::OrdinalIgnoreCase)) }
             $media = Join-Path $env:SystemRoot 'Media'
             $known = $false
             foreach ($n in $script:NotchSounds) {
@@ -973,6 +1125,11 @@ function Set-NotifierSelectValue {
         '^notch\.digest$' {
             if ($Value -eq 'off') { Set-NotifierOptionValue -Name notch -Field digest -Value $false }
             else { Set-NotifierOptionValue -Name notch -Field digest -Value $true; Set-NotifierOptionValue -Name notch -Field digestHour -Value ([int]$Value) }
+        }
+        '^notch\.(theme|size)$' {
+            Set-NotifierOptionValue -Name notch -Field $Matches[1] -Value $Value
+            Update-NotifierMascotFlags
+            Set-NotifierNotchPlacement -Force
         }
         '^update\.channel$' {
             Set-NotifierOptionValue -Name update -Field channel -Value $Value
@@ -1092,7 +1249,8 @@ function Export-NotifierSettings {
     <#
     .SYNOPSIS
     Настройки (config.json) — в файл для другого ПК. chainStatusLine не переносится: это команда этого ПК.
-    Нет config.json — пишутся настройки по умолчанию.
+    Нет config.json — пишутся настройки по умолчанию. Заодно переносятся дружба с маскотом (friendship.json) и
+    порядок плашек шторки (notch-order.json) — в поле '$extras'.
     #>
     param([Parameter(Mandatory = $true)][string]$Path, [string]$DataRoot = $script:TrayDataRoot)
     $src = Join-Path $DataRoot 'config.json'
@@ -1100,6 +1258,19 @@ function Export-NotifierSettings {
     if (Test-Path -LiteralPath $src -PathType Leaf) { $obj = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($src, [Text.Encoding]::UTF8)) -ErrorAction Stop }
     if ($obj.PSObject.Properties['chainStatusLine']) { $obj.PSObject.Properties.Remove('chainStatusLine') }
     $obj | Add-Member -NotePropertyName '$claudeNotifier' -NotePropertyValue 'settings' -Force   # метка: это файл наших настроек
+    $extras = [ordered]@{}
+    foreach ($pair in @(@('friendship', 'friendship.json'), @('notchOrder', 'notch-order.json'))) {
+        $f = Join-Path $DataRoot $pair[1]
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }
+        try {
+            $val = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($f, [Text.Encoding]::UTF8)) -ErrorAction Stop
+            # Массив из ConvertFrom-Json в PowerShell 5.1 обёрнут: ConvertTo-Json записал бы его как {"value":…,"Count":…}.
+            if ($val -is [array]) { $val = [object[]]@($val | ForEach-Object { $_ }) }
+            $extras[$pair[0]] = $val
+        }
+        catch { }
+    }
+    if ($extras.Count -gt 0) { $obj | Add-Member -NotePropertyName '$extras' -NotePropertyValue ([pscustomobject]$extras) -Force }
     [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $obj -Depth 8), (New-Object System.Text.UTF8Encoding $false))
 }
 
@@ -1118,6 +1289,8 @@ function Import-NotifierSettings {
     }
     $obj.PSObject.Properties.Remove('$claudeNotifier')
     if ($obj.PSObject.Properties['chainStatusLine']) { $obj.PSObject.Properties.Remove('chainStatusLine') }
+    $extras = $null
+    if ($obj.PSObject.Properties['$extras']) { $extras = $obj.'$extras'; $obj.PSObject.Properties.Remove('$extras') }
     $dst = Join-Path $DataRoot 'config.json'
     if (Test-Path -LiteralPath $dst -PathType Leaf) {
         try {
@@ -1130,6 +1303,26 @@ function Import-NotifierSettings {
     $tmp = "$dst.tmp-$PID"
     [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $obj -Depth 8), (New-Object System.Text.UTF8Encoding $false))
     Move-Item -LiteralPath $tmp -Destination $dst -Force
+    # Дружба с маскотом и порядок плашек (если они есть в файле). Неверные — пропускаются.
+    if ($extras -is [System.Management.Automation.PSCustomObject]) {
+        $utf8 = New-Object System.Text.UTF8Encoding $false
+        $fr = $extras.PSObject.Properties['friendship']
+        if ($fr -and $fr.Value -is [System.Management.Automation.PSCustomObject] -and $fr.Value.PSObject.Properties['affection']) {
+            $aff = 0.0
+            if ([double]::TryParse([string]$fr.Value.affection, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$aff)) {
+                $last = [int64]0
+                if ($fr.Value.PSObject.Properties['lastPet']) { [void][int64]::TryParse([string]$fr.Value.lastPet, [ref]$last) }
+                $json = ConvertTo-Json -InputObject ([ordered]@{ affection = [Math]::Round([Math]::Max(0.0, [Math]::Min(100.0, $aff)), 2); lastPet = $last }) -Compress
+                [IO.File]::WriteAllText((Join-Path $DataRoot 'friendship.json'), $json, $utf8)
+            }
+        }
+        $ord = $extras.PSObject.Properties['notchOrder']
+        if ($ord) {
+            $ids = @(@($ord.Value) | Where-Object { $_ -is [string] -and $_ -ne '' -and $_.Length -le 200 } | Select-Object -First 200)
+            [IO.File]::WriteAllText((Join-Path $DataRoot 'notch-order.json'), (ConvertTo-Json -InputObject @($ids) -Compress), $utf8)
+            $script:NotchOrder = $null   # перечитать
+        }
+    }
     return ''
 }
 
@@ -1153,6 +1346,7 @@ function Import-NotifierSettingsDialog {
         if ($err) { [void](Show-NotifierDialog -Owner $null -Title 'Настройки не загружены' -Message $err -Primary 'Понятно'); return }
         # Применить сразу: маскоты, место шторки, горячая клавиша, списки сеансов.
         Set-NotifierMascot
+        Restore-NotifierFriendship
         Set-NotifierNotchPlacement -Force
         try { [void](Register-NotifierHotKey) } catch { }
         $script:SessionsDirty = $true
@@ -1199,6 +1393,16 @@ function Invoke-NotifierNotchCommand {
                 if ((Invoke-NotifierSessionFocus -Session $session) -ne 'unknown') { Close-NotifierNotch }
             }
             'friend' { Save-NotifierFriendship -Value ([string]$Event.Action) }   # маскота погладили — дружба
+            'order' { [void](Save-NotifierNotchOrder -Id ([string]$Event.Id) -Before ([string]$Event.Action)) }
+            'text' {
+                # Ответ текстом из поля шторки: на вопрос с вариантами — свой вариант, после «Готово» — сообщение.
+                if ($null -eq $card) { return }
+                $acts = @($card.Actions | ForEach-Object { ($_ -split '\|')[0] })
+                $kind = if ($acts -contains 'answer-custom') { 'answer-text' } elseif ($acts -contains 'reply-custom') { 'reply-text' } else { '' }
+                if ($kind -eq '') { return }
+                [void](Invoke-NotifierCardAction -Item $card -ActionId $kind -Text ([string]$Event.Action))
+                [void](Invoke-NotifierSessionsRefresh)
+            }
             'action' {
                 if ($null -eq $card) { return }
                 $script:DialogOpen = $true
@@ -1224,6 +1428,13 @@ function Invoke-NotifierNotchCommand {
             }
             'row' {
                 $id = [string]$Event.Id
+                if ($id -like 'hist:*') {
+                    # Событие из истории — открыть его сеанс на главной (если он ещё в списке).
+                    $sid = $id.Substring(5)
+                    if ($sid -and $script:NotchCards.ContainsKey($sid)) { [ClaudeNotifier.Ui.NotchHost]::Select($sid) }
+                    $script:NotchPage = 'home'
+                    return
+                }
                 if ($id -eq 'data') { Start-Process explorer.exe $script:TrayDataRoot }
                 elseif ($id -eq 'export') { Export-NotifierSettingsDialog }
                 elseif ($id -eq 'import') { Import-NotifierSettingsDialog }

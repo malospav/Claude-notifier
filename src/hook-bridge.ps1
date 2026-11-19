@@ -19,8 +19,12 @@ Import-Module (Join-Path $script:BridgeRoot 'lib\Config.psm1')
 Import-Module (Join-Path $script:BridgeRoot 'lib\Event.psm1')
 Import-Module (Join-Path $script:BridgeRoot 'lib\Ipc.psm1')
 Import-Module (Join-Path $script:BridgeRoot 'lib\Window.psm1')
-Import-Module (Join-Path $script:BridgeRoot 'lib\Transcript.psm1')
-Import-Module (Join-Path $script:BridgeRoot 'lib\Requests.psm1')
+# Журнал (статистика после ответа) Event.psm1 загружает сам, когда он нужен; запросы — только хукам ответов.
+# Мост запускается на каждое событие: лишний модуль — лишние десятки миллисекунд.
+if ($MyInvocation.InvocationName -eq '.' -or @('permreq', 'replywait') -contains $Kind) {
+    Import-Module (Join-Path $script:BridgeRoot 'lib\Requests.psm1')
+}
+if ($MyInvocation.InvocationName -eq '.') { Import-Module (Join-Path $script:BridgeRoot 'lib\Transcript.psm1') }
 
 function Read-HookInput {
     # Весь stdin как UTF-8; если stdin не перенаправлен (ручной запуск), — пустая строка.
@@ -79,7 +83,7 @@ function Invoke-NotifierPermissionHook {
         $wait = $config.approvals.waitSeconds
         if ($env:CLAUDE_CODE_ENTRYPOINT -ne 'claude-desktop') { $wait = $config.approvals.cliWaitSeconds }
         if ($wait -le 0) { return '' }
-        $hook = ConvertFrom-Json -InputObject $InputJson -ErrorAction Stop
+        $hook = ConvertFrom-NotifierJson -InputObject $InputJson
         $req = New-NotifierPermissionRequest -HookInput $hook -WaitSeconds $wait -DataRoot $DataRoot
         $event = ConvertTo-NotifierEvent -HookKind permreq -Json $InputJson -Config $config -DataRoot $DataRoot
         if ($null -eq $event) { return '' }
@@ -114,7 +118,7 @@ function Invoke-NotifierReplyHook {
         $config = Get-NotifierConfig -DataRoot $DataRoot
         if (-not $config.quickReplies.enabled) { return $null }
         if (Test-NotifierNestedClaude) { return $null }   # служебный Claude (сводка и т. п.) — быстрый ответ не ждём
-        $hook = ConvertFrom-Json -InputObject $InputJson -ErrorAction Stop
+        $hook = ConvertFrom-NotifierJson -InputObject $InputJson
         $sid = [string]$hook.session_id
         if ($sid -eq '') { return $null }
         $wait = New-NotifierReplyWait -SessionId $sid -Minutes $config.quickReplies.minutes -DataRoot $DataRoot

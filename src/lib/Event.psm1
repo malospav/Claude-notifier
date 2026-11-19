@@ -84,7 +84,7 @@ function ConvertTo-NotifierEvent {
         return $null
     }
     try {
-        $hook = $Json | ConvertFrom-Json -ErrorAction Stop
+        $hook = ConvertFrom-NotifierJson -InputObject $Json   # быстрый разбор: мост запускается на каждое событие
     }
     catch {
         Write-NotifierLog -Level WARN -Message "Event: вход хука '$HookKind' не разобран как JSON" -DataRoot $DataRoot
@@ -149,7 +149,7 @@ function Add-NotifierEventDetails {
     #>
     param($Event, [string]$Kind, [string]$InputJson, $Config, [string]$DataRoot)
     try {
-        $hook = ConvertFrom-Json -InputObject $InputJson -ErrorAction Stop
+        $hook = ConvertFrom-NotifierJson -InputObject $InputJson
         $tp = $hook.PSObject.Properties['transcript_path']
         # Только локальный журнал: путь вида \\хост\… (или //хост/… с Mac) заставил бы трей обратиться к чужому
         # серверу и отдать ему NTLM-хэш. Журнал Claude Code — всегда .jsonl на локальном диске.
@@ -158,6 +158,7 @@ function Add-NotifierEventDetails {
         if ($tp -and $tp.Value -is [string] -and $tp.Value -ne '') { $Event | Add-Member -NotePropertyName transcript -NotePropertyValue $tp.Value -Force }
         if ($Kind -eq 'stop' -or $Kind -eq 'stopfailure') {
             if ($tp -and $tp.Value -is [string]) {
+                if (-not (Get-Command Get-NotifierTranscriptStats -ErrorAction SilentlyContinue)) { Import-Module (Join-Path $PSScriptRoot 'Transcript.psm1') }
                 $stats = Get-NotifierTranscriptStats -Path $tp.Value -StateDir (Join-Path $DataRoot 'stats')
                 if ($stats) { $Event | Add-Member -NotePropertyName stats -NotePropertyValue ([pscustomobject]$stats) -Force }
             }

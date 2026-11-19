@@ -67,4 +67,32 @@ function Write-NotifierLog {
     }
 }
 
-Export-ModuleMember -Function Get-NotifierDataRoot, Write-NotifierLog
+function ConvertFrom-NotifierJson {
+    <#
+    .SYNOPSIS
+    JSON → объекты, как ConvertFrom-Json, но без загрузки тяжёлой сборки (~70 мс на первый вызов в PowerShell 5.1):
+    лёгкий разбор из ClaudeNotifier.JsonLite (Window.psm1), если тип уже загружен; иначе — ConvertFrom-Json.
+    Ошибка разбора — исключение (как у ConvertFrom-Json с -ErrorAction Stop).
+    #>
+    param([Parameter(ValueFromPipeline = $true)][AllowEmptyString()][string]$InputObject)
+    process {
+        if ('ClaudeNotifier.JsonLite' -as [type]) {
+            try { $v = [ClaudeNotifier.JsonLite]::Parse($InputObject) }
+            catch { throw (New-Object ArgumentException ("Неверный JSON: " + $_.Exception.InnerException.Message)) }
+            return , $v
+        }
+        return (ConvertFrom-Json -InputObject $InputObject -ErrorAction Stop)
+    }
+}
+
+function ConvertTo-NotifierJson {
+    <#
+    .SYNOPSIS
+    Объект → JSON одной строкой (как ConvertTo-Json -Compress), быстро: ClaudeNotifier.JsonLite, если загружен.
+    #>
+    param([AllowNull()]$InputObject, [int]$Depth = 8)
+    if ('ClaudeNotifier.JsonLite' -as [type]) { return [ClaudeNotifier.JsonLite]::Write($InputObject) }
+    return (ConvertTo-Json -InputObject $InputObject -Compress -Depth $Depth)
+}
+
+Export-ModuleMember -Function Get-NotifierDataRoot, Write-NotifierLog, ConvertFrom-NotifierJson, ConvertTo-NotifierJson
