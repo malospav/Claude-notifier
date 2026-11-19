@@ -78,8 +78,17 @@ Describe 's_001_05 · install.ps1' {
         (@(@($s.hooks.Stop)[0].hooks)[0].args)[-1] | Should -Match '/hook/stop$'
         (@(@($s.hooks.StopFailure)[0].hooks)[0].args)[-1] | Should -Match '/hook/stopfailure$'
         $ss = @(@($s.hooks.SessionStart)[0].hooks)[0]
-        $ss.command | Should -BeLike '*\WindowsPowerShell\v1.0\powershell.exe'
-        ($ss.args -join ' ') | Should -Be ("-NoProfile -NonInteractive -File " + (Join-Path $e.Data 'app\hook-bridge.ps1') + " sessionstart")
+        # SessionStart — быстрый мост claude-notifier-hook.exe, если Windows разрешает его запуск (нет Smart App Control),
+        # иначе PowerShell-мост.
+        $bridge = Join-Path $e.Data 'app\hook-bridge.ps1'
+        if ($ss.command -like '*\claude-notifier-hook.exe') {
+            $ss.command | Should -Be (Join-Path $e.Data 'app\claude-notifier-hook.exe')
+            ($ss.args -join ' ') | Should -Match ('^sessionstart --bridge ' + [regex]::Escape($bridge) + ' --port 47611 --secret \S+$')
+        }
+        else {
+            $ss.command | Should -BeLike '*\WindowsPowerShell\v1.0\powershell.exe'
+            ($ss.args -join ' ') | Should -Be ("-NoProfile -NonInteractive -File " + $bridge + " sessionstart")
+        }
         $null -eq @($s.hooks.Stop)[0].PSObject.Properties['matcher'] | Should -Be $true
     }
 
