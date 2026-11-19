@@ -143,26 +143,37 @@ Describe 's_008_01 · точка статуса в трее' {
         (Format-NotifierTrayTooltip -Sessions $many).Length | Should -BeLessThan 64
     }
 
-    It 'точка <State>: цвет в центре, прозрачный угол' -TestCases @(
+    It 'значок <State>: силуэт маскота, бейдж статуса справа снизу, прозрачный угол' -TestCases @(
         @{ State = 'permission'; Rgb = '255,159,10' },
         @{ State = 'error'; Rgb = '255,69,58' },
         @{ State = 'working'; Rgb = '10,132,255' },
         @{ State = 'waiting'; Rgb = '48,209,88' }
     ) {
         param($State, $Rgb)
+        [ClaudeNotifier.Ui.TrayDot]::LightTaskbarOverride = $false
         $bmp = [ClaudeNotifier.Ui.TrayDot]::Render($State, 32)
         try {
-            $c = $bmp.GetPixel(16, 16)
+            $c = $bmp.GetPixel(25, 25)   # центр бейджа
             ('{0},{1},{2}' -f $c.R, $c.G, $c.B) | Should -Be $Rgb
             $c.A | Should -Be 255
+            $h = $bmp.GetPixel(6, 14)    # лоб силуэта — белый на тёмной панели задач
+            "$($h.R),$($h.G),$($h.B),$($h.A)" | Should -Be '255,255,255,255'
             $bmp.GetPixel(0, 0).A | Should -Be 0
         }
-        finally { $bmp.Dispose() }
+        finally { $bmp.Dispose(); [ClaudeNotifier.Ui.TrayDot]::LightTaskbarOverride = $null }
     }
 
-    It '«нет сеансов»: пустое кольцо, центр прозрачный' {
+    It '«нет сеансов»: только приглушённый силуэт, без бейджа; на светлой панели задач — тёмный' {
+        [ClaudeNotifier.Ui.TrayDot]::LightTaskbarOverride = $false
         $bmp = [ClaudeNotifier.Ui.TrayDot]::Render('none', 32)
-        try { $bmp.GetPixel(16, 16).A | Should -Be 0 } finally { $bmp.Dispose() }
+        try {
+            $c = $bmp.GetPixel(25, 25)
+            ($c.R -eq $c.G -and $c.G -lt 200) | Should -Be $true   # серый силуэт, не цветной бейдж
+        }
+        finally { $bmp.Dispose() }
+        [ClaudeNotifier.Ui.TrayDot]::LightTaskbarOverride = $true
+        $bmp = [ClaudeNotifier.Ui.TrayDot]::Render('working', 32)
+        try { $bmp.GetPixel(6, 14).R | Should -BeLessThan 60 } finally { $bmp.Dispose(); [ClaudeNotifier.Ui.TrayDot]::LightTaskbarOverride = $null }
     }
 
     It 'иконка трея меняется со статусом; иконки кэшируются' {

@@ -24,52 +24,77 @@ namespace ClaudeNotifier.Ui {
             }
         }
 
-        public static Bitmap Render(string state, int size) {
-            Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-            using (Graphics g = Graphics.FromImage(bmp)) {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.Clear(Color.Transparent);
-                float d = size * 0.625f;
-                float c = size / 2f;
-                Color col = ColorFor(state);
-                if (state == "alert") {
-                    // Второй кадр мигания «запрос давно ждёт»: точка во всю иконку с ореолом.
-                    float big = size * 0.94f, core = size * 0.72f;
-                    using (SolidBrush halo = new SolidBrush(Color.FromArgb(110, col))) g.FillEllipse(halo, c - big / 2, c - big / 2, big, big);
-                    using (SolidBrush b = new SolidBrush(col)) g.FillEllipse(b, c - core / 2, c - core / 2, core, core);
-                    return bmp;
-                }
-                bool hollow = !(state == "permission" || state == "error" || state == "working" || state == "waiting");
-                if (hollow) {
-                    using (Pen p = new Pen(col, Math.Max(1.5f, size / 9f))) g.DrawEllipse(p, c - d / 2, c - d / 2, d, d);
-                } else {
-                    using (SolidBrush b = new SolidBrush(col)) g.FillEllipse(b, c - d / 2, c - d / 2, d, d);
-                    using (Pen p = new Pen(Color.FromArgb(70, 0, 0, 0), Math.Max(1f, size / 20f))) g.DrawEllipse(p, c - d / 2, c - d / 2, d, d);
-                }
+        // Значок в трее (в духе значков Windows 11): силуэт маскота — голова сфинкса с ушами и глазами-прорезями,
+        // белый на тёмной панели задач и тёмный на светлой; статус — цветной бейдж в правом нижнем углу с прозрачным
+        // зазором вокруг; сколько сеансов ждут вас — число в бейдже. Нет сеансов — только силуэт, приглушённый.
+        // Кадр мигания «запрос давно ждёт» (alert) — силуэт окрашен цветом запроса, бейдж крупнее.
+        public static bool? LightTaskbarOverride;   // тесты: светлая (true) / тёмная (false) панель задач
+
+        public static bool LightTaskbar {
+            get {
+                if (LightTaskbarOverride.HasValue) return LightTaskbarOverride.Value;
+                try {
+                    using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")) {
+                        object v = k != null ? k.GetValue("SystemUsesLightTheme") : null;
+                        return v is int && (int)v == 1;
+                    }
+                } catch { return false; }
             }
-            return bmp;
         }
+
+        public static Bitmap Render(string state, int size) { return Render(state, size, 0); }
 
         public static Icon Create(string state, int size) {
             using (Bitmap bmp = Render(state, size)) return Native.ToIcon(bmp);
         }
 
-        // Точка с числом: сколько сеансов ждут вас (больше 9 — «9+»). Точка во всю иконку, цифра белая.
+        // Голова сфинкса в квадрате size×size: лицо и уши заливаются по отдельности (одним контуром встречные
+        // направления обхода вырезали бы полосу между ушами).
+        static void FillHead(Graphics g, Brush b, float size) {
+            float u = size / 16f;
+            g.FillEllipse(b, 1.2f * u, 4.8f * u, 13.6f * u, 10.4f * u);   // лицо — широкий овал снизу
+            g.FillPolygon(b, new PointF[] { new PointF(1.4f * u, 9.4f * u), new PointF(2.0f * u, 0.8f * u), new PointF(7.4f * u, 5.4f * u) });     // уши
+            g.FillPolygon(b, new PointF[] { new PointF(14.6f * u, 9.4f * u), new PointF(14.0f * u, 0.8f * u), new PointF(8.6f * u, 5.4f * u) });
+        }
+
         public static Bitmap Render(string state, int size, int count) {
-            if (count < 2) return Render(state, size);
             Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(bmp)) {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
                 g.Clear(Color.Transparent);
-                float d = size * 0.96f, c = size / 2f;
-                using (SolidBrush b = new SolidBrush(ColorFor(state))) g.FillEllipse(b, c - d / 2, c - d / 2, d, d);
-                string text = count > 9 ? "9+" : count.ToString();
-                using (Font f = new Font("Segoe UI", size * (text.Length > 1 ? 0.5f : 0.66f), FontStyle.Bold, GraphicsUnit.Pixel))
-                using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString(text, f, Brushes.White, new RectangleF(0, size * 0.03f, size, size), sf);
+                bool light = LightTaskbar;
+                bool idle = !(state == "permission" || state == "error" || state == "working" || state == "waiting" || state == "stalled" || state == "alert");
+                // Цвета непрозрачные: полупрозрачные части силуэта, наложенные друг на друга, давали бы швы.
+                Color glyph = light ? (idle ? Theme.Hex(0x8A8A8E) : Theme.Hex(0x1C1C1E)) : (idle ? Theme.Hex(0x98989D) : Color.White);
+                Color col = ColorFor(state);
+                if (state == "alert") glyph = col;
+                float u = size / 16f;
+                using (SolidBrush b = new SolidBrush(glyph)) FillHead(g, b, size);
+                // Глаза — прорези (прозрачные), миндалевидные.
+                g.CompositingMode = CompositingMode.SourceCopy;
+                using (SolidBrush clear = new SolidBrush(Color.Transparent)) {
+                    g.FillEllipse(clear, 4.0f * u, 8.6f * u, 2.7f * u, 2.1f * u);
+                    g.FillEllipse(clear, 9.3f * u, 8.6f * u, 2.7f * u, 2.1f * u);
+                }
+                // Нет сеансов — без бейджа; мигание «запрос ждёт» — сам силуэт цветом запроса.
+                if (idle || state == "alert") { g.CompositingMode = CompositingMode.SourceOver; return bmp; }
+                // Бейдж статуса: справа снизу, с прозрачным зазором вокруг (как системные значки).
+                bool number = count >= 2;
+                float r = (number ? 4.4f : 3.2f) * u, gap = 1.0f * u;
+                float cx = size - r - 0.3f * u, cy = size - r - 0.3f * u;
+                using (SolidBrush clear = new SolidBrush(Color.Transparent)) g.FillEllipse(clear, cx - r - gap, cy - r - gap, (r + gap) * 2, (r + gap) * 2);
+                g.CompositingMode = CompositingMode.SourceOver;
+                using (SolidBrush b = new SolidBrush(col)) g.FillEllipse(b, cx - r, cy - r, r * 2, r * 2);
+                if (number) {
+                    string text = count > 9 ? (size >= 24 ? "9+" : "9") : count.ToString();
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    float fs = r * (text.Length > 1 ? 1.05f : 1.45f);
+                    using (Font f = new Font("Segoe UI", fs, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (StringFormat sf = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                    using (SolidBrush tb = new SolidBrush(state == "permission" || state == "waiting" ? Color.FromArgb(255, 20, 20, 22) : Color.White))
+                        g.DrawString(text, f, tb, new RectangleF(cx - r, cy - r + r * 0.08f, r * 2, r * 2), sf);
+                }
             }
             return bmp;
         }

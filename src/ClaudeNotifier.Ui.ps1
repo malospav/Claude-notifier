@@ -31,7 +31,10 @@ function Get-NotifierDotIcon {
     <# .SYNOPSIS Иконка-точка для статуса (кэшируется на время работы трея). #>
     param([Parameter(Mandatory = $true)][string]$State, [int]$Count = 0)
     if ($Count -lt 2) { $Count = 0 }
-    $key = "$State|$Count"
+    # Силуэт — белый на тёмной панели задач и тёмный на светлой: тема — часть ключа (сменили тему — новый значок).
+    $light = $false
+    try { [void](Import-NotifierUi); $light = [bool][ClaudeNotifier.Ui.TrayDot]::LightTaskbar } catch { }
+    $key = "$State|$Count|$light"
     if (-not $script:DotIcons.ContainsKey($key)) {
         [void](Import-NotifierUi)
         $size = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width
