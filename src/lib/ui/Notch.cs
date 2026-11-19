@@ -27,6 +27,7 @@ namespace ClaudeNotifier.Ui {
         public string Group = "";        // подпись группы в списке «Другие» («Этот ПК», «MacBook Air»)
         public long WaitSince;           // ждёт вас (запрос, ошибка, вопрос в ответе) с этого момента, UTC ticks; 0 — не ждёт
         public string Ask = "";          // что спрашивают — для бегущей строки («Закоммитить и отправить?»)
+        public string Hint = "";         // подсказка над главным маскотом: что делает сейчас (действие, сколько работает, контекст)
         public object Tag;
     }
 
@@ -54,7 +55,7 @@ namespace ClaudeNotifier.Ui {
         public NotchEventArgs(string kind, string id, string action, Point location) { Kind = kind; Id = id; Action = action; Location = location; }
     }
 
-    public sealed class NotchView : Control {
+    public sealed partial class NotchView : Control {
         // Текст шторки рисуется со сдвигом и обрезкой Graphics (содержимое смещено внутри окна и обрезается
         // растущей фигурой). Обычный TextRenderer то и другое игнорирует — текст «отставал» от фонов.
         static class TextRenderer {
@@ -145,6 +146,8 @@ namespace ClaudeNotifier.Ui {
                     if (v != statsShown) { statsShown = v; statsNew = true; }
                 }
                 if (!painted) { Invalidate(); return; }
+                // Главный маскот летит, его гладят, тыкнули, разбудили — перерисовать целиком.
+                if (PlayTick()) { Invalidate(); return; }
                 // Внимание: свечение и бегущая строка меняются каждый кадр — свёрнутую (она маленькая) целиком;
                 // главный маскот вырос — свёрнутой нужна другая высота.
                 if (!Expanded && Attention) {
@@ -269,10 +272,15 @@ namespace ClaudeNotifier.Ui {
         public bool Away { get { return !Expanded && AwaySeconds > 0 && Native.InputIdleSeconds() >= AwaySeconds; } }
         // Пауза анимации (экран заблокирован, компьютер засыпает) — ставит NotchHost.
         public static volatile bool Paused;
-        void PaintFace(Graphics g, RectangleF r, NotchItem it, bool look) {
+        void PaintFace(Graphics g, RectangleF r, NotchItem it, bool look) { PaintFace(g, r, it, look, false); }
+        void PaintFace(Graphics g, RectangleF r, NotchItem it, bool look, bool main) {
             RectangleF fr = r; fr.Offset(origin.X, origin.Y);
             faceRects.Add(fr);
-            if (it == null) { Mascot.Paint(g, r, "none", T, 0, Animate, null); return; }
+            if (it == null) {
+                if (main) PaintPlayFace(g, r, null, new CatMood(), 0);
+                else Mascot.Paint(g, r, "none", T, 0, Animate, null);
+                return;
+            }
             int seed = (it.Id.GetHashCode() & 0x7fff) % 97;
             CatMood md = MoodFor(it, r, look);
             // Маскот зовёт: раз в CallEverySeconds сеанс, который ждёт вас, подпрыгивает и «стучит» по шторке
@@ -287,6 +295,7 @@ namespace ClaudeNotifier.Ui {
                     md.AhaAge = (float)(ph % 0.8);
                 }
             }
+            if (main) { PaintPlayFace(g, r, it, md, seed); return; }
             Mascot.Paint(g, r, it.State, T, seed, Animate, md, it.Device);
         }
 
@@ -577,15 +586,17 @@ namespace ClaudeNotifier.Ui {
             // Маскот растёт, пока сеанс ждёт вас дольше GrowAfterSeconds: «выходит вперёд» (шторка при этом выше).
             float grow = GrowK(main);
             float fh = Math.Min(h * 0.86f, theme.S(30) * (1f + 0.35f * grow)), fw = fh * 1.3f;
-            PaintFace(g, new RectangleF(pad, (h - fh) / 2, fw, fh), main, false);
+            PaintFace(g, new RectangleF(pad, (h - fh) / 2, fw, fh), main, false, true);
             float sh = Math.Min(h * 0.6f, theme.S(23)), sw = sh * 1.3f, gap = theme.S(2);
             // Посередине — загрузка ПК или бегущая строка с вопросом; маленькие персонажи справа на них не заходят (лишние — «+N»).
             float statsRight = 0;
             statsRect = Rectangle.Empty;
             NotchItem asker = TickerItem();
-            Rectangle sr = Rectangle.Empty;
-            if (asker != null) sr = PaintTicker(g, h, pad + (int)fw + theme.S(12), asker);
-            else if (ShowStats) sr = PaintStats(g, h);
+            Rectangle sr = PaintQuick(g, h, pad + (int)fw + theme.S(12));   // кнопки решения у маскота — вместо всего посередине
+            if (sr.Width == 0) {
+                if (asker != null) sr = PaintTicker(g, h, pad + (int)fw + theme.S(12), asker);
+                else if (ShowStats) sr = PaintStats(g, h);
+            }
             if (sr.Width > 0) {
                 statsRight = sr.Right + theme.S(10);
                 statsRect = new Rectangle(sr.X + origin.X, sr.Y + origin.Y, sr.Width, sr.Height);
@@ -942,14 +953,14 @@ namespace ClaudeNotifier.Ui {
                 Hit(r, "answer");   // щелчок по карточке — полный ответ и варианты ответа
             }
             if (it == null) {
-                PaintFace(g, new RectangleF(r.X + theme.S(18), r.Y + (r.Height - theme.S(64)) / 2f, theme.S(84), theme.S(64)), null, false);
+                PaintFace(g, new RectangleF(r.X + theme.S(18), r.Y + (r.Height - theme.S(64)) / 2f, theme.S(84), theme.S(64)), null, false, true);
                 TextRenderer.DrawText(g, "Сеансов нет", fTitle, new Rectangle(r.X + theme.S(120), r.Y, r.Width - theme.S(130), r.Height / 2), Color.White, TextFormatFlags.Bottom | TextFormatFlags.NoPrefix);
                 TextRenderer.DrawText(g, "Начните работу в Claude Code — сеанс появится здесь.", fSmall, new Rectangle(r.X + theme.S(120), r.Y + r.Height / 2 + theme.S(4), r.Width - theme.S(130), r.Height / 2), theme.Muted, TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
                 return;
             }
             int fw = theme.S(96), fh = theme.S(74);
             if (it.Actions.Length > 0 && r.Height < theme.S(150)) { fw = theme.S(66); fh = theme.S(50); }
-            PaintFace(g, new RectangleF(r.X + theme.S(16), r.Y + theme.S(16), fw, fh), it, true);
+            PaintFace(g, new RectangleF(r.X + theme.S(16), r.Y + theme.S(16), fw, fh), it, true, true);
             int tx = r.X + theme.S(16) + fw + theme.S(16), tw = r.Right - tx - theme.S(44);
             int y = r.Y + theme.S(14);
             int titleW = Math.Min(tw, TextRenderer.MeasureText(it.Title, fTitle).Width);
@@ -1212,9 +1223,15 @@ namespace ClaudeNotifier.Ui {
             return null;
         }
 
+        protected override void OnMouseDown(MouseEventArgs e) {
+            base.OnMouseDown(e);
+            PlayMouseDown(e, HitAt(e.Location));
+        }
+
         protected override void OnMouseMove(MouseEventArgs e) {
             base.OnMouseMove(e);
             string h = HitAt(e.Location);
+            if (PlayMouseMove(e, h)) return;   // тянут маскота
             if (h != hover) { hover = h; Cursor = h != null ? Cursors.Hand : Cursors.Default; Invalidate(); }
             UpdateTip(e.Location);
         }
@@ -1230,6 +1247,7 @@ namespace ClaudeNotifier.Ui {
 
         protected override void OnMouseUp(MouseEventArgs e) {
             base.OnMouseUp(e);
+            if (PlayMouseUp(e)) return;   // бросили маскота или щёлкнули по нему
             string hit = HitAt(e.Location);
             if (e.Button == MouseButtons.Right) {
                 // Правый щелчок по сеансу (плашка или большая карточка) — меню сеанса в трее.
@@ -1262,6 +1280,8 @@ namespace ClaudeNotifier.Ui {
                 if (h != null) h(this, new NotchEventArgs("page", id, page, p));
                 return;
             }
+            if (hit == "mascot") { MascotClick(); return; }
+            if (hit.StartsWith("qact:")) { QuickAnswer(hit.Substring(5), p); return; }
             if (hit.StartsWith("item:")) { SelectedId = hit.Substring(5); Invalidate(); return; }
             if (hit.StartsWith("remove:")) { if (h != null) h(this, new NotchEventArgs("remove", hit.Substring(7), null, p)); return; }
             if (hit == "expand" || hit == "close") {
@@ -1455,6 +1475,8 @@ namespace ClaudeNotifier.Ui {
             Theme t = View.Theme;
             int w = t.S(View.ShowStats || View.HasAsk ? 400 : 240), h = t.S(View.Grown ? 48 : 38);
             if (View.PeekActive) w = Math.Max(w, View.PeekWidth);
+            int qw = View.QuickWidth;   // кнопки решения у маскота
+            if (qw > 0) w = Math.Max(w, t.S(16 + 39 + 12 + 16 + 60) + qw);
             return new Size(Math.Min(w, Math.Max(t.S(240), ScreenBounds.Width - t.S(40))), h);
         }
 

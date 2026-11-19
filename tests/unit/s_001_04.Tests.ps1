@@ -194,7 +194,9 @@ Describe 's_001_04 · процесс bridge целиком' {
             }
             $avg = ($times | Select-Object -Skip 1 | Measure-Object -Average).Average   # первый запуск — прогрев кэша
             Write-Host "      bridge ms: $($times -join ', '); avg(5) = $([int]$avg)"
-            $avg | Should -BeLessThan 500
+            # Общие машины GitHub Actions медленнее и неровнее рабочего ПК: там порог мягче (запуск powershell ~0,5 с).
+            $limit = if ($env:GITHUB_ACTIONS -eq 'true') { 1500 } else { 500 }
+            $avg | Should -BeLessThan $limit
             $queue.Count | Should -Be 6
         }
         finally { [void](Stop-NotifierPipeServer -Server $server) }

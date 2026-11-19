@@ -21,6 +21,14 @@ namespace ClaudeNotifier.Ui {
         public bool HasLook;
         public float LookX, LookY;
         public float LookW = 1f;          // 0..1 — насколько маскот сейчас смотрит на курсор (плавно растёт и спадает)
+        // Взаимодействие с главным маскотом (шторка): гладят (0..1), зевает, обиделся (подкинули слишком сильно),
+        // скучает (давно не заходили).
+        public bool Play;                  // это главный маскот шторки: рисовать реакции поверх (MascotPlay)
+        public float Pet;
+        public bool Yawn, Grumpy, Sad;
+        public float PokeAge = -1f;        // секунд назад «тыкнули» — фирменное движение по требованию
+        public float Startle;              // 1 → 0: проснулся от щелчка («!», подскок)
+        public float Wave;                 // 0..1: машет лапкой (любит вас)
     }
 
     // Выбранный маскот шторки (настройка «Маскот»): все векторные. Прежний объёмный «sphynx» — теперь плоский сфинкс.
@@ -61,7 +69,17 @@ namespace ClaudeNotifier.Ui {
         }
 
         public static void PaintKind(Graphics g, RectangleF r, string kind, string state, float t, int seed, bool animate, CatMood mood) {
-            switch (Normalize(kind)) {
+            kind = Normalize(kind);
+            if (mood == null || !mood.Play) { PaintBody(g, r, kind, state, t, seed, animate, mood); return; }
+            // Главный маскот: «тык» запускает фирменное движение, реакции — поверх фигуры.
+            MascotSig.Poke = animate ? mood.PokeAge : -1f;
+            try { PaintBody(g, MascotPlay.Body(r, kind, mood, t), kind, state, t, seed, animate, mood); }
+            finally { MascotSig.Poke = -1f; }
+            MascotPlay.Overlay(g, r, kind, mood, t);
+        }
+
+        static void PaintBody(Graphics g, RectangleF r, string kind, string state, float t, int seed, bool animate, CatMood mood) {
+            switch (kind) {
                 case "flame": Flame.Paint(g, r, state, t, seed, animate, mood); break;
                 case "boxcat": FlatPals.BoxCat(g, r, state, t, seed, animate, mood); break;
                 case "penguin": FlatPals.Penguin(g, r, state, t, seed, animate, mood); break;
@@ -239,11 +257,33 @@ namespace ClaudeNotifier.Ui {
             s.Eyes = s.Sleep || s.Stalled ? "closed" : s.Err ? "x" : s.Aha > 0.05f ? "happy" : s.Deep ? "squint" : s.Perm ? "round" : blink ? "closed" : "open";
             s.Bubble = s.Working && s.Aha <= 0.05f ? "dots" : (s.Sleep || s.Stalled) ? "z" : null;
             s.Spark = Math.Max(s.Aha, s.Perm ? 0.6f + 0.4f * (float)Math.Abs(Math.Sin(t * 4.2f + s.Ph)) * s.A : 0f);
+            // Взаимодействие: гладят — жмурится от удовольствия; зевает; обиделся; скучает.
+            if (!s.Sleep) { s.Eyes = MoodEyes(mood, s.Eyes); s.MouthOverride = MoodMouth(mood, null); }
             return s;
         }
 
+        // Глаза и ротик от взаимодействия (общие для всех маскотов, в т.ч. со своей мордочкой): гладят — жмурится
+        // и улыбается; зевает; обиделся — прищур и кривой рот; скучает — глаза закрыты, ротик ровный.
+        public static string MoodEyes(CatMood m, string eyes) {
+            if (m == null) return eyes;
+            if (m.Pet > 0.3f) return "happy";
+            if (m.Yawn) return "squint";
+            if (m.Grumpy) return "squint";
+            if (m.Sad) return "closed";
+            return eyes;
+        }
+        public static string MoodMouth(CatMood m, string mouth) {
+            if (m == null) return mouth;
+            if (m.Pet > 0.3f) return "up";
+            if (m.Yawn) return "o";
+            if (m.Grumpy) return "wavy";
+            if (m.Sad) return "flat";
+            return mouth;
+        }
+
+        public string MouthOverride;
         // Ротик по статусу; Idle — свой у маскота, когда он просто ждёт ответа.
-        public string Mouth(string idle) { return Sleep || Stalled ? "flat" : Perm ? "o" : Err ? "wavy" : Aha > 0.05f || Working ? "up" : idle; }
+        public string Mouth(string idle) { if (MouthOverride != null) return MouthOverride; return Sleep || Stalled ? "flat" : Perm ? "o" : Err ? "wavy" : Aha > 0.05f || Working ? "up" : idle; }
 
         // Лёгкая подкраска по статусу, как у огонька: янтарный — ждёт решения, красноватый — ошибка, тусклый — спит.
         public Color Tint(Color c, float amount) {
@@ -404,6 +444,7 @@ namespace ClaudeNotifier.Ui {
             string eyes = sleep || stalled ? "closed" : err ? "x" : aha > 0.05f ? "happy" : deep ? "squint" : perm ? "round" : blink ? "closed" : "open";
             if (yk > 0.3f) eyes = "happy";
             else if (slowBlink) eyes = slow > 0.03f && slow < 0.11f ? "closed" : "squint";
+            if (!sleep) eyes = FlatState.MoodEyes(mood, eyes);
             FlatFx.Eyes(g, eL, eR, mo.X, u, eyes, ink, 1.3f);   // у сфинксов глаза крупные
             float nw = u * 0.075f, nh = u * 0.05f;
             using (GraphicsPath np = new GraphicsPath()) {
@@ -414,6 +455,7 @@ namespace ClaudeNotifier.Ui {
                 using (SolidBrush nb = new SolidBrush(nose)) g.FillPath(nb, np);
             }
             string mouth = sleep || stalled ? "flat" : perm ? "o" : err ? "wavy" : aha > 0.05f || working ? "up" : "cat";
+            if (!sleep) mouth = FlatState.MoodMouth(mood, mouth);
             if (yk > 0.3f) {
                 using (SolidBrush mb = new SolidBrush(Theme.Hex(0xC9566A))) { float mw = u * 0.10f * yk, mh = u * 0.12f * yk; g.FillEllipse(mb, mo.X - mw / 2, mo.Y + u * 0.01f - mh * 0.3f, mw, mh); }
                 using (SolidBrush tb = new SolidBrush(Theme.Hex(0xF2A0AE))) { float tw = u * 0.06f * yk, th = u * 0.04f * yk; g.FillEllipse(tb, mo.X - tw / 2, mo.Y + u * 0.01f + u * 0.12f * yk * 0.45f, tw, th); }
@@ -563,8 +605,11 @@ namespace ClaudeNotifier.Ui {
             PointF eL = P(-0.135f + fx, -0.36f + fy), eR = P(0.135f + fx, -0.36f + fy), mo = P(0f + fx * 0.8f, -0.25f + fy * 0.8f);
             bool blink = animate && ((t + seed * 1.3f) % 4.2f) < 0.14f;
             string eyes = sleep || stalled ? "closed" : err ? "x" : aha > 0.05f ? "happy" : deep ? "squint" : perm ? "round" : blink ? "closed" : "open";
+            if (!sleep) eyes = FlatState.MoodEyes(mood, eyes);
             FlatFx.Eyes(g, eL, eR, mo.X, u, eyes, ink, 1f);
-            FlatFx.Mouth(g, mo, u, sleep || stalled ? "flat" : perm ? "o" : err ? "wavy" : aha > 0.05f || working ? "up" : "smile", ink);
+            string fmouth = sleep || stalled ? "flat" : perm ? "o" : err ? "wavy" : aha > 0.05f || working ? "up" : "smile";
+            if (!sleep) fmouth = FlatState.MoodMouth(mood, fmouth);
+            FlatFx.Mouth(g, mo, u, fmouth, ink);
 
             // Чёрточки-искры у макушки: «Ага!» и запрос разрешения.
             float spark = Math.Max(aha, perm ? 0.6f + 0.4f * (float)Math.Abs(Math.Sin(t * 4.2f + ph)) * A : 0f);

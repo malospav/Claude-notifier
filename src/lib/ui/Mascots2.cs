@@ -14,7 +14,11 @@ namespace ClaudeNotifier.Ui {
     // со сдвигом по сеансу (seed), чтобы несколько маскотов не двигались хором. Идут, когда маскот работает или ждёт
     // ответа; при запросе, ошибке, остановке и во сне — нет (там свои реакции).
     internal static class MascotSig {
+        // Секунд с «тыка» по главному маскоту (ставит Mascot.PaintKind на время рисования); < 0 — не тыкали.
+        // Пока идёт движение (Dur), At отдаёт его ход в любом состоянии — фирменный номер по требованию.
+        [ThreadStatic] public static float Poke;
         public static float At(float t, int seed, float period, float dur, float salt, bool animate, string state) {
+            if (animate && Poke > 0 && Poke < dur) return Poke / dur;
             if (!animate || string.IsNullOrEmpty(state)) return -1f;
             if (state != "working" && state != "waiting") return -1f;
             double c = ((t + seed * 2.37 + salt) % period + period) % period;
@@ -678,6 +682,8 @@ namespace ClaudeNotifier.Ui {
             double clock = t * speed + seed * 1.37;
             float c = animate ? (float)(((clock % ShmalCycle) + ShmalCycle) % ShmalCycle) : 4.5f;
             long cycleNo = animate ? (long)Math.Floor(clock / ShmalCycle) : 0;
+            // «Тык» — затяжка с начала, прямо сейчас.
+            if (smoking && animate && mood != null && mood.PokeAge > 0 && mood.PokeAge < 3.4f) c = mood.PokeAge;
             bool inhale = smoking && c < 1.3f, hold = smoking && c >= 1.3f && c < 1.9f, exhale = smoking && c >= 1.9f && c < 3.4f;
             float puff = !smoking ? 0f : c < 1.3f ? Smooth01(c / 1.3f) : c < 1.9f ? 1f : c < 2.4f ? 1f - Smooth01((c - 1.9f) / 0.5f) : 0f;   // щёки
             float glow = s.Sleep ? 0f : !smoking ? 0.45f + 0.1f * s.Sin(1.2, 1) * s.A

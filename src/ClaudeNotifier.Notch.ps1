@@ -100,6 +100,35 @@ function Switch-NotifierMascot {
     Set-NotifierMascot
 }
 
+function Save-NotifierFriendship {
+    <#
+    .SYNOPSIS
+    Дружба с главным маскотом (шторка присылает «affection|lastPetTicks», когда его гладят) → friendship.json.
+    #>
+    param([string]$Value, [string]$DataRoot = $script:TrayDataRoot)
+    $p = @([string]$Value -split '\|')
+    $aff = 0.0; $ticks = [int64]0
+    if ($p.Count -lt 2 -or -not [double]::TryParse($p[0], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$aff) -or
+        -not [int64]::TryParse($p[1], [ref]$ticks)) { return }
+    $aff = [Math]::Max([double]0, [Math]::Min([double]100, $aff))
+    $json = ConvertTo-Json -InputObject ([ordered]@{ affection = [Math]::Round($aff, 2); lastPet = $ticks }) -Compress
+    try { [IO.File]::WriteAllText((Join-Path $DataRoot 'friendship.json'), $json, (New-Object Text.UTF8Encoding $false)) }
+    catch { Write-NotifierLog -Level WARN -Message "notch: дружба не сохранена: $($_.Exception.Message)" -DataRoot $DataRoot }
+}
+
+function Restore-NotifierFriendship {
+    <# .SYNOPSIS friendship.json → шторка (NotchView.Affection / LastPetTicks) при запуске. #>
+    param([string]$DataRoot = $script:TrayDataRoot)
+    $path = Join-Path $DataRoot 'friendship.json'
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    try {
+        $f = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop
+        [ClaudeNotifier.Ui.NotchView]::Affection = [Math]::Max([double]0, [Math]::Min([double]100, [double]$f.affection))
+        [ClaudeNotifier.Ui.NotchView]::LastPetTicks = [int64]$f.lastPet
+    }
+    catch { Write-NotifierLog -Level WARN -Message "notch: friendship.json не прочитан: $($_.Exception.Message)" -DataRoot $DataRoot }
+}
+
 function Format-NotifierNotchPosition([string]$Position) {
     switch ($Position) { 'left' { return 'Слева' } 'right' { return 'Справа' } default { return 'По центру' } }
 }
@@ -116,6 +145,7 @@ function Initialize-NotifierNotch {
         $script:NotchExpanded = $false
         return
     }
+    Restore-NotifierFriendship -DataRoot $DataRoot
     [ClaudeNotifier.Ui.NotchHost]::Start()
     [ClaudeNotifier.Ui.NotchHost]::SetShowStats([bool]$config.notch.stats)
     [ClaudeNotifier.Ui.NotchHost]::SetAttention([bool]$config.notch.attention)
@@ -196,8 +226,45 @@ function ConvertTo-NotifierNotchItem {
         if ($ask.Length -gt 90) { $ask = $ask.Substring(0, 89).TrimEnd() + [char]0x2026 }
         $it.Ask = $ask
     }
+    $it.Hint = Get-NotifierNotchHint -Session $Session -State $it.State -Title ([string]$Card.Title)
     $it.Tag = $Card
     return $it
+}
+
+function Get-NotifierNotchHint {
+    <#
+    .SYNOPSIS
+    Подсказка над главным маскотом шторки: что он делает сейчас — статус и сколько длится, последнее действие
+    Claude, заполненность контекста. Например: «claude-notifier: работает 12 мин / Сейчас: Edit: Notch.cs /
+    Контекст: 41 %».
+    #>
+    param($Session, [string]$State, [string]$Title = '', [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow)
+    $word = switch ($State) {
+        'working' { 'работает' } 'waiting' { 'ждёт ответа' } 'permission' { 'ждёт разрешения' }
+        'error' { 'ошибка' } 'stalled' { 'похоже, остановился' } default { 'отдыхает' }
+    }
+    $line = if ($Title) { "${Title}: $word" } else { $word }
+    $since = [DateTimeOffset]::MinValue
+    if ($Session -and $Session.PSObject.Properties['since'] -and
+        [DateTimeOffset]::TryParse([string]$Session.since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$since)) {
+        $min = [int][Math]::Floor(($Now - $since).TotalMinutes)
+        if ($min -lt 1) { $line += ' меньше минуты' }
+        elseif ($min -lt 60) { $line += " $min мин" }
+        else { $line += " $([int][Math]::Floor($min / 60)) ч $($min % 60) мин" }
+    }
+    $lines = @($line)
+    $st = $null
+    if ($Session -and $Session.PSObject.Properties['stats']) { $st = $Session.stats }
+    if ($st) {
+        if ($State -eq 'working' -and $st.PSObject.Properties['lastTool'] -and [string]$st.lastTool -ne '') {
+            $tool = [string]$st.lastTool
+            if ($tool.Length -gt 70) { $tool = $tool.Substring(0, 69) + [char]0x2026 }
+            $lines += "Сейчас: $tool"
+        }
+        if ($st.PSObject.Properties['window'] -and [int64]$st.window -gt 0 -and $st.PSObject.Properties['percent']) { $lines += "Контекст: $([int]$st.percent) %" }
+    }
+    if ($State -eq 'permission') { $lines += 'Щёлкните по маскоту — кнопки ответа прямо здесь' }
+    return ($lines -join "`n")
 }
 
 function Get-NotifierNotchItems {
@@ -956,6 +1023,7 @@ function Invoke-NotifierNotchCommand {
                 if ($null -eq $session -or ($session.PSObject.Properties['device'] -and [string]$session.device -ne '')) { return }
                 if ((Invoke-NotifierSessionFocus -Session $session) -ne 'unknown') { Close-NotifierNotch }
             }
+            'friend' { Save-NotifierFriendship -Value ([string]$Event.Action) }   # маскота погладили — дружба
             'action' {
                 if ($null -eq $card) { return }
                 $script:DialogOpen = $true

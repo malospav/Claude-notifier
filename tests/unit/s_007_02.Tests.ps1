@@ -93,8 +93,13 @@ Describe 's_007_02 · включение доступа и окно подклю
         (Get-NotifierNetwork -DataRoot $script:TrayDataRoot).enabled | Should -Be $false
     }
 
+    # Остановить сервер, запущенный тестом: иначе потоки слушателя не дают процессу тестов завершиться.
+    AfterEach { Stop-NotifierNetServer }
+
     It 'сервер не запускается → текст ошибки; при старте трея с enabled=true это не роняет трей' {
-        Mock Get-NotifierHttpPrefix { 'http://+:1/' }
+        # Отказ подставлен: под администратором (GitHub Actions) http://+:1/ на самом деле запускается.
+        Mock Test-NotifierTlsSetup { $null }
+        Mock Start-NotifierHttpServer { throw 'Отказано в доступе' }
         Start-NotifierNetServer | Should -Be $false
         $script:Net.Error | Should -Not -BeNullOrEmpty
         Save-NotifierNetwork -Network @{ enabled = $true; port = 1024; devices = @() } -DataRoot $script:TrayDataRoot
