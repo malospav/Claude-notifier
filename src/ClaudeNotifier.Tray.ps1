@@ -482,6 +482,34 @@ function Format-NotifierUpdateSubtitle {
     return $t
 }
 
+$script:TrayStartedAt = [datetime]::UtcNow
+
+function Invoke-NotifierUpdatedNotice {
+    <#
+    .SYNOPSIS
+    Первый запуск после обновления (скрипт обновления оставил DataRoot\update-done.txt с коммитом): шторка
+    показывает «Claude Notifier обновлён ✓» (без шторки — уведомление Windows). Один раз — файл удаляется.
+    #>
+    param([datetime]$Now = [DateTime]::UtcNow, [string]$DataRoot = $script:TrayDataRoot)
+    $f = Join-Path $DataRoot 'update-done.txt'
+    if (-not (Test-Path -LiteralPath $f)) { return }
+    $notch = $false
+    try { $notch = [bool](Test-NotifierNotchActive) } catch { }
+    if (-not $notch -and ($Now - $script:TrayStartedAt).TotalSeconds -lt 20) { return }   # шторка ещё запускается
+    $sha = ''
+    try { $sha = ([IO.File]::ReadAllText($f)).Trim() } catch { }
+    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+    $text = 'Claude Notifier обновлён ' + [char]0x2713
+    if ($sha -match '^[0-9a-f]{7}') { $text += " $([char]0x00B7) версия $($sha.Substring(0, 7))" }
+    Write-NotifierLog -Level INFO -Message "update: работает новая версия $($sha.Substring(0, [Math]::Min(12, $sha.Length)))" -DataRoot $DataRoot
+    $script:UpdateInfo = $null
+    if ($script:TrayNoOutput) { return }
+    Remove-Item -LiteralPath (Join-Path $DataRoot 'update-progress.json') -Force -ErrorAction SilentlyContinue
+    # Шторка раскрывается сама: коробка на финише, значок выпрыгивает, маскоты радуются — и сворачивается.
+    if ($notch) { [ClaudeNotifier.Ui.NotchHost]::ShowUpdate('done', 1.0, $(if ($sha -match '^[0-9a-f]{7}') { $sha.Substring(0, 7) } else { '' })) }
+    else { [void](Show-NotifierToast -Event ([pscustomobject]@{ type = 'done'; title = $text; preview = 'Обновление установлено, приложение перезапущено.' }) -DataRoot $DataRoot) }
+}
+
 function Invoke-NotifierUpdateNow {
     <#
     .SYNOPSIS
@@ -507,8 +535,46 @@ function Invoke-NotifierUpdateNow {
     }
     $zip = ''; $hash = ''
     if ($info.ContainsKey('ZipUrl')) { $zip = [string]$info.ZipUrl; $hash = [string]$info.HashUrl }
-    [void](Start-NotifierUpdateInstall -Repo $v.Repo -Sha $info.Sha -DataRoot $script:TrayDataRoot -ZipUrl $zip -HashUrl $hash)
-    return 'Обновление скачивается'
+    # Шторка есть — ход обновления в ней (сценка на странице «Обновление»), без отдельного окна.
+    $notch = $false
+    try { $notch = [bool](Test-NotifierNotchActive) } catch { }
+    Remove-Item -LiteralPath (Join-Path $script:TrayDataRoot 'update-progress.json') -Force -ErrorAction SilentlyContinue
+    if ($notch) { $script:UpdProgressShown = $true; [ClaudeNotifier.Ui.NotchHost]::ShowUpdate('download', -1, '') }
+    [void](Start-NotifierUpdateInstall -Repo $v.Repo -Sha $info.Sha -DataRoot $script:TrayDataRoot -ZipUrl $zip -HashUrl $hash -NoWindow:$notch)
+    if ($notch) { return '' }
+    return 'Обновление скачивается — ход виден в окошке справа внизу'
+}
+
+$script:UpdProgressStamp = ''
+$script:UpdProgressShown = $false
+
+function Invoke-NotifierUpdateProgressTick {
+    <#
+    .SYNOPSIS
+    Ход обновления (DataRoot\update-progress.json от скрипта обновления) — в сценку шторки: первый раз раскрывает её
+    на странице «Обновление», дальше только обновляет шаг и проценты. Читает файл, только когда он изменился.
+    «Готово» показывает новый трей (Invoke-NotifierUpdatedNotice); ошибку — и прежний, и перезапущенный трей.
+    #>
+    param([datetime]$Now = [DateTime]::UtcNow, [string]$DataRoot = $script:TrayDataRoot)
+    $f = Join-Path $DataRoot 'update-progress.json'
+    $fi = New-Object IO.FileInfo $f
+    if (-not $fi.Exists) { return }
+    if (Test-Path -LiteralPath (Join-Path $DataRoot 'update-done.txt')) { return }   # новая версия: «Готово» — отдельно
+    $stamp = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+    if ($stamp -eq $script:UpdProgressStamp) { return }
+    if (($Now - $fi.LastWriteTimeUtc).TotalSeconds -gt 90) { $script:UpdProgressStamp = $stamp; return }   # давнее
+    try { $p = [IO.File]::ReadAllText($f) | ConvertFrom-Json } catch { return }   # дописывается — в следующий раз
+    $script:UpdProgressStamp = $stamp
+    $phase = [string]$p.phase
+    if ($phase -eq 'done' -or $phase -eq '') { return }
+    if ($script:TrayNoOutput) { return }
+    $notch = $false
+    try { $notch = [bool](Test-NotifierNotchActive) } catch { }
+    if (-not $notch) { return }
+    $pct = -1.0; try { $pct = [double]$p.pct } catch { }
+    if ($script:UpdProgressShown -and $phase -ne 'error') { [ClaudeNotifier.Ui.NotchHost]::SetUpdateProgress($phase, $pct, [string]$p.detail) }
+    else { $script:UpdProgressShown = $true; [ClaudeNotifier.Ui.NotchHost]::ShowUpdate($phase, $pct, [string]$p.detail) }
+    if ($phase -eq 'error') { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; $script:UpdProgressShown = $false }
 }
 
 function Stop-NotifierTray {
@@ -796,6 +862,7 @@ function Start-NotifierTray {
                 }
                 try { Update-NotifierTrayBlink -Now $now } catch { }
                 try { Invoke-NotifierNotchCommands } catch { Write-NotifierLog -Level WARN -Message "tray: шторка: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+                try { Invoke-NotifierUpdateProgressTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: ход обновления: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 try { Invoke-NotifierToastButtons } catch { Write-NotifierLog -Level WARN -Message "tray: кнопка уведомления: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 # Редкие дела — не чаще раза в секунду (таймер при событиях тикает 10 раз в секунду).
                 if ($now -ge $script:SlowTickAt) {
@@ -805,6 +872,7 @@ function Start-NotifierTray {
                     try { Invoke-NotifierUpdateTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: обновление: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Invoke-NotifierHeldTick } catch { Write-NotifierLog -Level WARN -Message "tray: сводка: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Invoke-NotifierStartupCheck -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: самопроверка: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+                    try { Invoke-NotifierUpdatedNotice -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: после обновления: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Invoke-NotifierActivityTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: статистика: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                 }
                 # Раз в 5 с и сразу после событий: точка в трее и открытое окно.

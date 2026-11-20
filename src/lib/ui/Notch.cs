@@ -821,6 +821,8 @@ namespace ClaudeNotifier.Ui {
                 PaintAnswer(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
             } else if (Page == "settings") {
                 PaintSettings(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
+            } else if (Page == "update" && UpdateShowing) {
+                PaintUpdateProgress(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));   // сценка обновления (NotchUpdate.cs)
             } else {
                 PaintRows(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
             }
@@ -1215,6 +1217,7 @@ namespace ClaudeNotifier.Ui {
 
         public int ContentHeight(string page, int width) {
             if (page == "settings") return SettingsHeight(width);
+            if (page == "update" && UpdateShowing) return theme.S(250);
             int h = 0;
             foreach (NotchRow row in Rows(page)) h += RowHeight(row, width) + (row.Kind == "header" ? 0 : theme.S(6));
             return h;
@@ -1660,7 +1663,10 @@ namespace ClaudeNotifier.Ui {
             return new Rectangle(Left + (int)s.X, Top + (int)s.Y, (int)Math.Ceiling(s.Width), (int)Math.Ceiling(s.Height));
         }
 
-        public void SetExpanded(bool expanded, string page) {
+        public void SetExpanded(bool expanded, string page) { SetExpanded(expanded, page, true); }
+
+        // keyboard = false — раскрыть, не забирая клавиатуру у текущего окна (сценка обновления раскрывается сама).
+        public void SetExpanded(bool expanded, string page, bool keyboard) {
             bool changed = View.Expanded != expanded;
             View.Expanded = expanded;
             if (expanded) { expandedAt = DateTime.UtcNow; if (!string.IsNullOrEmpty(page)) View.Page = page; }
@@ -1671,8 +1677,11 @@ namespace ClaudeNotifier.Ui {
             if (changed && Visible && Motion.Enabled) View.Morphing = true;
             if (expanded) RaiseToTop();
             // Клавиатура: раскрыли — шторка принимает клавиши; свернули — фокус прежнему окну.
-            if (expanded && changed) TakeKeyboard();
-            if (!expanded) { ReleaseKeyboard(); View.EndTyping(); }
+            if (expanded && changed && keyboard) TakeKeyboard();
+            if (!expanded) {
+                ReleaseKeyboard(); View.EndTyping();
+                if (View.UpdPhase == "done" || View.UpdPhase == "error") View.UpdPhase = "";   // сценка обновления досмотрена
+            }
             SetTargetSize(s, true);
             View.Invalidate();
         }
@@ -1949,6 +1958,17 @@ namespace ClaudeNotifier.Ui {
         public static void Notice(string text, int ms) { Post(delegate (NotchForm f) { if (f.View.Expanded) f.View.Notice(text, ms); else f.View.StartPeek(text, null, ms); }); }
         public static void React(string id, string kind) { Post(delegate (NotchForm f) { f.View.React(id, kind); }); }
         public static void SetExpanded(bool expanded, string page) { Post(delegate (NotchForm f) { f.SetExpanded(expanded, page); }); }
+        // Обновление: ход — в сценке на странице «Обновление»; ShowUpdate ещё и раскрывает шторку на ней (без клавиатуры).
+        public static void SetUpdateProgress(string phase, double pct, string detail) {
+            Post(delegate (NotchForm f) { f.View.SetUpdateProgress(phase, pct, detail); f.Refit(); });
+        }
+        public static void ShowUpdate(string phase, double pct, string detail) {
+            Post(delegate (NotchForm f) {
+                f.View.SetUpdateProgress(phase, pct, detail);
+                if (!f.View.Expanded) f.SetExpanded(true, "update", false);
+                else { f.View.SetPage("update"); f.Refit(); }
+            });
+        }
         public static void Toggle(string page) { Post(delegate (NotchForm f) { f.SetExpanded(!f.View.Expanded, page); }); }
         public static void SetHold(bool hold) { Post(delegate (NotchForm f) { f.Hold = hold; }); }
         public static bool Expanded { get { return Running && Call<bool>(delegate (NotchForm f) { return f.View.Expanded; }); } }

@@ -32,9 +32,18 @@ Describe 's_017_01 · обновление с GitHub (ПК) и самообно�
         $sha = 'd' * 40
         $s = Get-NotifierUpdateScript -Repo 'o/r' -Sha $sha -DataRoot "C:\Users\O'Neil\.cn"
         $s | Should -Match ([regex]::Escape("https://codeload.github.com/o/r/zip/$sha"))
-        $s | Should -Match ([regex]::Escape("-Commit '$sha' -Repo 'o/r'"))
+        $s | Should -Match ([regex]::Escape("'-Commit', `$sha, '-Repo', `$repo"))   # отдельными аргументами: -File не снимает кавычки
+        $s | Should -Match ([regex]::Escape("'$sha', 'o/r')"))                       # коммит и репозиторий — в задание потока
+        $s | Should -Match 'ClaudeNotifier\.Update\.UpdateWindow'                     # окно обновления с состояниями
+        $s | Should -Match ([regex]::Escape('Set-Location -LiteralPath $env:TEMP'))   # не из папки приложения
+        $s | Should -Match 'Start-TrayAgain'   # установка упала — трей запускается снова
         $s | Should -Match ([regex]::Escape("'C:\Users\O''Neil\.cn'"))
         [void][scriptblock]::Create($s)   # скрипт разбирается без ошибок
+        $s | Should -Match ([regex]::Escape('$useWindow = $true'))
+        $s | Should -Match 'update-progress\.json'                                     # ход — для шторки
+        $n = Get-NotifierUpdateScript -Repo 'o/r' -Sha $sha -DataRoot 'C:\x' -NoWindow  # шторка есть — без окна
+        $n | Should -Match ([regex]::Escape('$useWindow = $false'))
+        [void][scriptblock]::Create($n)
         { Get-NotifierUpdateScript -Repo 'o/r; calc' -Sha $sha -DataRoot 'x' } | Should -Throw
         { Get-NotifierUpdateScript -Repo 'o/r' -Sha 'zzz' -DataRoot 'x' } | Should -Throw
     }

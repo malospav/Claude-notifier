@@ -319,6 +319,50 @@ Describe 's_018_05 · обновление из шторки и самопров
         $none[0].Kind | Should -Be 'note'
     }
 
+    It 'после обновления: новый трей один раз сообщает «обновлён» с версией' {
+        $root = New-Root 'updated'
+        [IO.File]::WriteAllText((Join-Path $root 'update-done.txt'), ('abcdef1' + ('0' * 33)))
+        Mock Test-NotifierNotchActive { $false }
+        Mock Show-NotifierToast { $true }
+        $script:TrayNoOutput = $false
+        $script:TrayStartedAt = [DateTime]::UtcNow.AddMinutes(-1)
+        Invoke-NotifierUpdatedNotice -DataRoot $root
+        Invoke-NotifierUpdatedNotice -DataRoot $root
+        Should -Invoke Show-NotifierToast -Times 1 -Exactly -ParameterFilter { $Event.title -match 'обновлён' -and $Event.title -match 'abcdef1' }
+        Test-Path (Join-Path $root 'update-done.txt') | Should -Be $false
+    }
+
+    It 'ход обновления — в шторку: файл читается при изменении; ошибка — один раз; давний и после установки — нет' {
+        $root = New-Root 'progress'
+        $f = Join-Path $root 'update-progress.json'
+        Mock Test-NotifierNotchActive { $true }
+        $script:TrayNoOutput = $false; $script:UpdProgressStamp = ''; $script:UpdProgressShown = $false
+        [IO.File]::WriteAllText($f, '{"phase":"download","pct":0.5,"detail":"10 КБ"}')
+        Invoke-NotifierUpdateProgressTick -DataRoot $root
+        $script:UpdProgressShown | Should -Be $true
+        Invoke-NotifierUpdateProgressTick -DataRoot $root   # файл не менялся — не читается
+        Should -Invoke Test-NotifierNotchActive -Times 1 -Exactly
+        [IO.File]::WriteAllText($f, '{"phase":"error","pct":-1,"detail":"нет связи"}')
+        Invoke-NotifierUpdateProgressTick -DataRoot $root
+        Should -Invoke Test-NotifierNotchActive -Times 2 -Exactly
+        Test-Path $f | Should -Be $false          # ошибка показана — файл убран
+        $script:UpdProgressShown | Should -Be $false
+        # Давний файл (прошлое обновление) — не показывается.
+        [IO.File]::WriteAllText($f, '{"phase":"install","pct":-1,"detail":""}')
+        [IO.File]::SetLastWriteTimeUtc($f, [DateTime]::UtcNow.AddMinutes(-5))
+        Invoke-NotifierUpdateProgressTick -DataRoot $root
+        # Установка прошла (update-done.txt) — «Готово» показывает Invoke-NotifierUpdatedNotice, не ход.
+        [IO.File]::WriteAllText($f, '{"phase":"restart","pct":-1,"detail":""}')
+        [IO.File]::WriteAllText((Join-Path $root 'update-done.txt'), ('a' * 40))
+        Invoke-NotifierUpdateProgressTick -DataRoot $root
+        Should -Invoke Test-NotifierNotchActive -Times 2 -Exactly
+        # Новый трей со шторкой: «обновлён» — сценкой в шторке, файл хода убирается.
+        $script:TrayStartedAt = [DateTime]::UtcNow.AddMinutes(-1)
+        Invoke-NotifierUpdatedNotice -DataRoot $root
+        Test-Path $f | Should -Be $false
+        Test-Path (Join-Path $root 'update-done.txt') | Should -Be $false
+    }
+
     It 'самопроверка при запуске: неполадки — одно сообщение, один раз' {
         Mock Get-NotifierDiagnostics { @(@{ Level = 'error'; Title = 'Приём событий'; Detail = 'порт занят' }, @{ Level = 'warn'; Title = 'Автозапуск'; Detail = 'x' }) }
         Mock Test-NotifierNotchActive { $false }

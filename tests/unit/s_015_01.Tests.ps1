@@ -185,6 +185,28 @@ Describe 's_015_01 · шторка вверху экрана' {
         finally { $f.Dispose() }
     }
 
+    It 'обновление в шторке: сценка на странице «Обновление» во всех шагах рисуется; досмотрели — пропадает' {
+        $f = New-Object ClaudeNotifier.Ui.NotchForm
+        try {
+            $v = $f.View
+            $v.UpdateShowing | Should -Be $false
+            foreach ($s in @(@('download', 0.3, '10 КБ'), @('verify', -1, ''), @('extract', -1, ''), @('install', -1, ''), @('restart', -1, ''), @('done', 1, 'abcdef1'), @('error', -1, 'нет связи'))) {
+                $v.SetUpdateProgress([string]$s[0], [double]$s[1], [string]$s[2])
+                $f.SetExpanded($true, 'update', $false)
+                $v.Page | Should -Be 'update'
+                $sz = $f.SizeFor(); $f.ClientSize = $sz
+                $bmp = New-Object System.Drawing.Bitmap $sz.Width, $sz.Height
+                $v.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $sz.Width, $sz.Height)))
+                $bmp.Dispose()
+            }
+            [ClaudeNotifier.Ui.NotchView]::UpdText('done', 'abcdef1') | Should -Match 'abcdef1'
+            $v.UpdPhase | Should -Be 'error'
+            $f.SetExpanded($false, $null)
+            $v.UpdateShowing | Should -Be $false   # ошибку досмотрели — при следующем раскрытии обычная страница
+        }
+        finally { $f.Dispose() }
+    }
+
     It 'поток шторки: запуск, данные из трея, щелчок в очередь, страница пересылается, остановка' {
         $script:TrayDataRoot = Join-Path $TestDrive 'host'
         New-Item -ItemType Directory $script:TrayDataRoot -Force | Out-Null

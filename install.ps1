@@ -66,7 +66,13 @@ try {
     if (Test-Path -LiteralPath $app) {
         for ($try = 1; ; $try++) {
             try { Remove-Item -LiteralPath $app -Recurse -Force; break }
-            catch { if ($try -ge 10) { throw }; Start-Sleep -Milliseconds 300 }   # процессы ещё выходят
+            catch {
+                if ($try -lt 10) { Start-Sleep -Milliseconds 300; continue }   # процессы ещё выходят
+                # Саму папку держит чужой процесс (например, его рабочая папка внутри app\) — убираем её
+                # содержимое и ставим поверх: иначе установка прервалась бы, а трей уже закрыт.
+                Get-ChildItem -LiteralPath $app -Force | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+                break
+            }
         }
     }
     New-Item -ItemType Directory -Path $app -Force | Out-Null
@@ -113,7 +119,7 @@ try {
     if ($migrated.Count -gt 0) { Write-Output "Перенесено из $($LegacyDataRoot): $($migrated -join ', ')" }
     if ($backup) { Write-Output "Резервная копия настроек: $backup" }
     if ($trayWasRunning) {
-        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+        Start-Process powershell.exe -WorkingDirectory $env:TEMP -WindowStyle Hidden -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
             '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $app 'ClaudeNotifier.Tray.ps1'))
         Write-Output 'Трей перезапущен с новой версией'
     }
@@ -121,5 +127,14 @@ try {
 }
 catch {
     Write-Error -ErrorAction Continue "Установка прервана: $($_.Exception.Message)"
+    # Трей уже закрыт — запустить снова (из того, что сейчас в app\), чтобы приложение не пропало.
+    try {
+        $trayScript = Join-Path (Join-Path $DataRoot 'app') 'ClaudeNotifier.Tray.ps1'
+        if ($trayWasRunning -and (Test-Path -LiteralPath $trayScript)) {
+            Start-Process powershell.exe -WorkingDirectory $env:TEMP -WindowStyle Hidden -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+                '-ExecutionPolicy', 'Bypass', '-File', $trayScript)
+        }
+    }
+    catch { }
     exit 1
 }
