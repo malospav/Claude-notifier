@@ -106,6 +106,8 @@ function Add-NotifierCardRequest {
             'plan' { $acts += 'allow|Утвердить|primary'; $acts += 'deny|Отклонить|destructive' }
             default {
                 $acts += 'allow|Разрешить|primary'
+                # «На 30 мин»: такие же запросы в этом проекте полчаса разрешаются сами (Bash — по началу команды, без цепочек).
+                if ($null -ne (Get-NotifierAutoAllowPrefix -ToolName ([string]$req.tool_name) -ToolInput $req.tool_input) -and [string]$Session.project -ne '') { $acts += 'allow30|На 30 мин|secondary' }
                 if ($req.canAlways) { $acts += 'always|Разрешать всегда|secondary' }
                 $acts += 'deny|Запретить|destructive'
             }
@@ -142,6 +144,17 @@ function Invoke-NotifierCardAction {
             if ($req -and (Write-NotifierDecision -RequestId $req.id -Behavior $ActionId -DataRoot $DataRoot)) {
                 [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $DataRoot)
                 $notice = @{ allow = 'Разрешено'; always = 'Разрешено — и впредь без вопросов'; deny = 'Запрещено' }[$ActionId]
+            }
+            else { $notice = 'Запрос уже решён в Claude' }
+        }
+        '^allow30$' {
+            # Разрешить и полчаса разрешать такие же запросы этого проекта без вопросов.
+            $rule = $null
+            if ($req) { $rule = Add-NotifierAutoAllowRule -Project ([string]$session.project) -ToolName ([string]$req.tool_name) -ToolInput $req.tool_input -Minutes 30 -DataRoot $DataRoot }
+            if ($req -and (Write-NotifierDecision -RequestId $req.id -Behavior allow -DataRoot $DataRoot)) {
+                [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $DataRoot)
+                $notice = if ($rule) { "Разрешено — и ещё 30 минут: $($rule.title)" } else { 'Разрешено' }
+                if ($rule) { Write-NotifierLog -Level INFO -Message "replies: правило на 30 мин — $($rule.title) ($($session.project))" -DataRoot $DataRoot }
             }
             else { $notice = 'Запрос уже решён в Claude' }
         }

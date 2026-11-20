@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Windows.Forms;
 
 namespace ClaudeNotifier.Ui {
     public sealed partial class NotchView {
@@ -49,6 +50,21 @@ namespace ClaudeNotifier.Ui {
             paint(rr);
             int a = (int)(255 * (1 - EaseOut(Math.Min(1f, k * 1.3f))));
             if (a > 2) using (SolidBrush veil = new SolidBrush(Color.FromArgb(a, Bg))) g.FillRectangle(veil, rr.X - 1, rr.Y - 1, rr.Width + 2, rr.Height + 2);
+        }
+
+        // Капсула-ссылка (изменения, очередь): значок, текст, подсветка при наведении. Возвращает занятую ширину.
+        int PaintLinkChip(Graphics g, int x, int y, int maxRight, string hit, string glyph, string text, Color accent) {
+            int h = theme.S(22), iw = theme.S(18);
+            int w = TextRenderer.MeasureText(text, fSmall).Width + iw + theme.S(14);
+            if (x + w > maxRight) return 0;
+            Rectangle r = new Rectangle(x, y, w, h);
+            float hot = Hot(hit);
+            Draw.Fill(g, r, h / 2f, Draw.Mix(Pal(0x232326), Pal(0x2E2E32), hot));
+            PaintRipple(g, hit, r, h / 2f);
+            TextRenderer.DrawText(g, glyph, fIconSmall, new Rectangle(x + theme.S(7), y, iw, h), accent, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, text, fSmall, new Rectangle(x + theme.S(7) + iw, y, w - iw - theme.S(7), h), Draw.Mix(Pal(0xC7C7CC), Fg, hot), TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            Hit(r, hit);
+            return w + theme.S(8);
         }
 
         // --- Пружины: значение с перелётом (вкладки) ---

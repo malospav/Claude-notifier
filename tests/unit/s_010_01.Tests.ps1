@@ -194,7 +194,7 @@ Describe 's_010_01 · трей: запросы в карточках' {
         $card = ConvertTo-NotifierSessionCard -Session (@(Get-NotifierSessions -DataRoot $script:TrayDataRoot)[0])
         $card.ForceExpand | Should -Be $true
         $card.RequestTitle | Should -Be 'Разрешить Bash?'
-        ($card.Actions -join ';') | Should -Be 'allow|Разрешить|primary;deny|Запретить|destructive'
+        ($card.Actions -join ';') | Should -Be 'allow|Разрешить|primary;allow30|На 30 мин|secondary;deny|Запретить|destructive'   # «На 30 мин» — разрешать такие полчаса
         Invoke-NotifierCardAction -Item $card -ActionId allow | Should -Be 'Разрешено'
         (Get-Content (Join-Path $script:TrayDataRoot "requests\perm-$($req.id).decision.json") -Raw | ConvertFrom-Json).behavior | Should -Be 'allow'
         (@(Get-NotifierSessions -DataRoot $script:TrayDataRoot) | Where-Object { $_.session_id -eq 'p' }).state | Should -Be 'working'

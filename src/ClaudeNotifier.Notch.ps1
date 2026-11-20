@@ -18,7 +18,7 @@ $script:NotchExpanded = $false
 $script:NotchPlacement = ''
 $script:NotchSessions = @()
 $script:NotchPages = @{ 0 = 'home'; 1 = 'devices'; 2 = 'settings'; 3 = 'stats' }   # вкладка прежнего окна → страница
-$script:NotchReplyActions = '^(allow|always|deny|answer:\d+|answer-custom|reply:\d+|reply-custom|focus)$'
+$script:NotchReplyActions = '^(allow|allow30|always|deny|answer:\d+|answer-custom|reply:\d+|reply-custom|focus)$'
 
 function Test-NotifierNotchActive {
     <# .SYNOPSIS Шторка работает (тогда она — главное окно вместо «Сеансов»). #>
@@ -210,6 +210,94 @@ function Restore-NotifierFriendship {
     catch { Write-NotifierLog -Level WARN -Message "notch: friendship.json не прочитан: $($_.Exception.Message)" -DataRoot $DataRoot }
 }
 
+function Get-NotifierLevelOf {
+    <#
+    .SYNOPSIS
+    Уровень маскота по числу выполненных задач: уровень L — от 2,5·L·(L−1) задач (2 — с 5, 3 — с 15, 4 — с 30, 5 — с 50…).
+    Возвращает @{ Level; Xp; Next } (Next — сколько задач нужно для следующего уровня).
+    #>
+    param([int]$Xp)
+    $level = 1
+    while ((2.5 * ($level + 1) * $level) -le $Xp -and $level -lt 99) { $level++ }
+    return @{ Level = $level; Xp = $Xp; Next = [int](2.5 * ($level + 1) * $level) }
+}
+
+function Get-NotifierMascotProgress {
+    <# .SYNOPSIS progress.json: сколько задач выполнено (xp). Впервые — по «Готово» из истории. #>
+    param([string]$DataRoot = $script:TrayDataRoot)
+    $path = Join-Path $DataRoot 'progress.json'
+    if (Test-Path -LiteralPath $path) {
+        try { $p = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop; return [int]$p.xp } catch { }
+    }
+    $xp = 0
+    try { $xp = @(Get-NotifierHistory -DataRoot $DataRoot | Where-Object { [string]$_.type -eq 'done' }).Count } catch { }
+    Save-NotifierMascotProgress -Xp $xp -DataRoot $DataRoot
+    return $xp
+}
+
+function Save-NotifierMascotProgress {
+    param([int]$Xp, [string]$DataRoot = $script:TrayDataRoot)
+    $json = ConvertTo-Json -InputObject ([ordered]@{ xp = $Xp; level = (Get-NotifierLevelOf -Xp $Xp).Level }) -Compress
+    try { [IO.File]::WriteAllText((Join-Path $DataRoot 'progress.json'), $json, (New-Object Text.UTF8Encoding $false)) }
+    catch { Write-NotifierLog -Level WARN -Message "notch: прогресс маскота не сохранён: $($_.Exception.Message)" -DataRoot $DataRoot }
+}
+
+function Restore-NotifierMascotLevel {
+    <# .SYNOPSIS Уровень маскота → шторка при запуске. #>
+    param([string]$DataRoot = $script:TrayDataRoot)
+    $l = Get-NotifierLevelOf -Xp (Get-NotifierMascotProgress -DataRoot $DataRoot)
+    if ('ClaudeNotifier.Ui.NotchHost' -as [type]) { [ClaudeNotifier.Ui.NotchHost]::SetLevel($l.Level, $l.Xp, $l.Next) }
+}
+
+$script:ErrorStreak = 0
+
+function Invoke-NotifierMascotEvent {
+    <#
+    .SYNOPSIS
+    Маскот и события сеансов:
+      • «Готово» — радуется; задача шла час и дольше — салют; каждая задача — опыт, новый уровень — салют и
+        «выдох» с тем, что открылось (бантик, корона…);
+      • ошибка — паникует; пятая ошибка подряд — приносит чай;
+      • лимит — нервничает.
+    #>
+    param([Parameter(Mandatory = $true)]$Event, $Before = $null, [string]$DataRoot = $script:TrayDataRoot)
+    $r = Get-NotifierEventReaction -Event $Event
+    if ($r -eq '') { return }
+    $sid = ''
+    if ($Event.PSObject.Properties['session_id'] -and $Event.session_id) { $sid = [string]$Event.session_id }
+    $notch = $false
+    try { $notch = [bool](Test-NotifierNotchActive) } catch { }
+    $levelUp = $null
+    if ([string]$Event.type -eq 'done') {
+        $script:ErrorStreak = 0
+        $sec = 0
+        if ($Event.PSObject.Properties['taskSeconds']) { $sec = [int64]$Event.taskSeconds }
+        elseif ($Before) { try { $sec = [int64](Get-NotifierTaskSeconds -Session $Before -Event $Event) } catch { } }
+        if ($sec -ge 3600) { $r = 'fireworks' }   # долгая задача готова — салют
+        $xp = (Get-NotifierMascotProgress -DataRoot $DataRoot) + 1
+        $was = (Get-NotifierLevelOf -Xp ($xp - 1)).Level
+        $now = Get-NotifierLevelOf -Xp $xp
+        Save-NotifierMascotProgress -Xp $xp -DataRoot $DataRoot
+        if ($notch) { [ClaudeNotifier.Ui.NotchHost]::SetLevel($now.Level, $now.Xp, $now.Next) }
+        if ($now.Level -gt $was) {
+            $unlock = ''
+            try { $unlock = [ClaudeNotifier.Ui.MascotStyle]::LevelUnlock($now.Level) } catch { }
+            $levelUp = "Маскот достиг уровня $($now.Level)!" + $(if ($unlock) { " Открыто: $unlock" } else { '' })
+            Write-NotifierLog -Level INFO -Message "notch: маскот — уровень $($now.Level) ($xp задач)" -DataRoot $DataRoot
+        }
+    }
+    elseif ([string]$Event.type -eq 'error') {
+        $script:ErrorStreak++
+        if ($script:ErrorStreak -eq 5) {
+            $r = 'tea'   # пять ошибок подряд — чай
+            if ($notch) { [ClaudeNotifier.Ui.NotchHost]::Notice("Пять ошибок подряд $([char]0x2014) маскот принёс чай. Может, передохнуть?", 6000) }
+        }
+    }
+    if (-not $notch) { return }
+    [ClaudeNotifier.Ui.NotchHost]::React($sid, $r)
+    if ($levelUp) { [ClaudeNotifier.Ui.NotchHost]::LevelUp($now.Level, $levelUp) }
+}
+
 function Format-NotifierNotchPosition([string]$Position) {
     switch ($Position) { 'left' { return 'Слева' } 'right' { return 'Справа' } default { return 'По центру' } }
 }
@@ -227,6 +315,7 @@ function Initialize-NotifierNotch {
         return
     }
     Restore-NotifierFriendship -DataRoot $DataRoot
+    try { Restore-NotifierMascotLevel -DataRoot $DataRoot } catch { }
     Update-NotifierMascotFlags -Config $config
     [ClaudeNotifier.Ui.NotchHost]::Start()
     [ClaudeNotifier.Ui.NotchHost]::SetShowStats([bool]$config.notch.stats)
@@ -312,6 +401,8 @@ function ConvertTo-NotifierNotchItem {
     $it.Pinned = [bool]$Card.Pinned
     $it.Project = if ($Session.PSObject.Properties['project']) { [string]$Session.project } else { '' }
     $it.Feed = [string[]]@(Get-NotifierNotchFeed -Session $Session)
+    # Очередь заданий, ожидание сброса лимита, изменения в файлах (ClaudeNotifier.Auto.ps1).
+    try { Add-NotifierNotchItemExtras -Item $it -Session $Session } catch { Write-NotifierLog -Level WARN -Message "notch: доп. сведения сеанса: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
     $it.Tag = $Card
     return $it
 }
@@ -460,9 +551,75 @@ function Get-NotifierNotchLimits {
         $detail = [string]$w.Detail
         if ($r.Stale -and $detail -ne 'окно обновилось') { $detail = 'данные от ' + $at.ToLocalTime().ToString('dd.MM HH:mm', [Globalization.CultureInfo]::InvariantCulture) }
         if ($detail -eq 'окно обновилось') { $detail = 'сброшен' }
+        # Прогноз: при таком темпе 5-часовой лимит кончится раньше сброса — когда.
+        if ($pair[1] -eq '5' -and -not $r.Stale -and $script:LimitForecast) {
+            $detail = 'кончится к ' + $script:LimitForecast.ToLocalTime().ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture) + $(if ($detail) { ", $detail" } else { '' })
+        }
         $r['Detail' + $pair[1]] = $detail
     }
     return $r
+}
+
+$script:UsageSamples = New-Object System.Collections.ArrayList   # замеры 5-часового окна: @{ At; P; Reset }
+$script:LimitForecast = $null                                     # когда кончится лимит (UTC) или $null
+$script:LimitWarnedReset = $null                                  # о каком окне уже предупредили
+
+function Get-NotifierLimitForecast {
+    <#
+    .SYNOPSIS
+    Прогноз 5-часового лимита по замерам расхода: скорость — по последнему часу того же окна (от 10 минут
+    наблюдения). Возвращает время (UTC), когда расход дойдёт до 100 %, если это раньше сброса окна; иначе $null.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Samples, [datetime]$Now = [DateTime]::UtcNow)
+    if ($Samples.Count -lt 2) { return $null }
+    $last = $Samples[$Samples.Count - 1]
+    $win = @($Samples | Where-Object { $_.Reset -eq $last.Reset -and ($last.At - $_.At).TotalMinutes -le 60 })
+    if ($win.Count -lt 2) { return $null }
+    $first = $win[0]
+    $mins = ($last.At - $first.At).TotalMinutes
+    if ($mins -lt 10) { return $null }
+    $slope = ([double]$last.P - [double]$first.P) / $mins   # % в минуту
+    if ($slope -le 0.02) { return $null }                    # почти не тратится — прогноз не нужен
+    if ([double]$last.P -ge 100) { return $null }
+    $eta = $last.At.AddMinutes((100 - [double]$last.P) / $slope)
+    if ($eta -lt $Now) { $eta = $Now }
+    $reset = [DateTimeOffset]::FromUnixTimeSeconds([int64]$last.Reset).UtcDateTime
+    if ($last.Reset -gt 0 -and $eta -ge $reset) { return $null }   # до сброса хватит
+    return $eta
+}
+
+function Invoke-NotifierLimitForecastTick {
+    <#
+    .SYNOPSIS
+    Раз в секунду (редкий тик трея): новый замер из usage.json → прогноз. Лимит кончится в ближайшие 30 минут —
+    одно предупреждение на окно (в шторке или уведомлением), если уведомления о лимитах включены.
+    #>
+    param([datetime]$Now = [DateTime]::UtcNow, [string]$DataRoot = $script:TrayDataRoot)
+    $usage = Get-NotifierUsage -DataRoot $DataRoot
+    if ($null -eq $usage -or -not $usage.PSObject.Properties['five_hour'] -or $null -eq $usage.five_hour) { return }
+    $at = [DateTimeOffset]::MinValue
+    if (-not ($usage.PSObject.Properties['at'] -and [DateTimeOffset]::TryParse([string]$usage.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$at))) { return }
+    $p = [double]$usage.five_hour.percent
+    $reset = [int64]0
+    if ($usage.five_hour.PSObject.Properties['resets_at'] -and $usage.five_hour.resets_at) { $reset = [int64]$usage.five_hour.resets_at }
+    $atUtc = $at.UtcDateTime
+    $n = $script:UsageSamples.Count
+    if ($n -eq 0 -or $script:UsageSamples[$n - 1].At -lt $atUtc) {
+        [void]$script:UsageSamples.Add(@{ At = $atUtc; P = $p; Reset = $reset })
+        while ($script:UsageSamples.Count -gt 0 -and ($atUtc - $script:UsageSamples[0].At).TotalMinutes -gt 90) { $script:UsageSamples.RemoveAt(0) }
+    }
+    $script:LimitForecast = Get-NotifierLimitForecast -Samples @($script:UsageSamples) -Now $Now
+    if ($null -eq $script:LimitForecast -or ($script:LimitForecast - $Now).TotalMinutes -gt 30 -or $script:LimitWarnedReset -eq $reset) { return }
+    $script:LimitWarnedReset = $reset
+    $config = Get-NotifierConfig -DataRoot $DataRoot
+    if (-not $config.events.limit.enabled -or $script:TrayNoOutput) { return }
+    $when = $script:LimitForecast.ToLocalTime().ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+    $text = "При таком темпе 5-часовой лимит закончится к $when"
+    Write-NotifierLog -Level INFO -Message "limits: прогноз $([char]0x2014) кончится к $when" -DataRoot $DataRoot
+    $notch = $false
+    try { $notch = [bool](Test-NotifierNotchActive) } catch { }
+    if ($notch) { [ClaudeNotifier.Ui.NotchHost]::Notice($text, 7000); [ClaudeNotifier.Ui.NotchHost]::React('', 'nervous') }
+    else { [void](Show-NotifierToast -Event ([pscustomobject]@{ type = 'limit'; title = 'Лимит скоро закончится'; preview = $text }) -DataRoot $DataRoot) }
 }
 
 function Update-NotifierMascotFlags {
@@ -475,6 +632,7 @@ function Update-NotifierMascotFlags {
     [ClaudeNotifier.Ui.MascotSound]::Enabled = [bool]$Config.notch.sounds
     [ClaudeNotifier.Ui.MascotSound]::Muted = [bool](Test-NotifierQuietTime -Config $Config)
     [ClaudeNotifier.Ui.MascotPlay]::Seasonal = [bool]$Config.notch.seasonal
+    [ClaudeNotifier.Ui.Mascot]::ByProject = [bool]$Config.notch.byProject   # свой маскот у каждого проекта
     if ('ClaudeNotifier.Ui.MascotColor' -as [type]) { [ClaudeNotifier.Ui.MascotColor]::Mode = [string]$Config.notch.color }
     if ('ClaudeNotifier.Ui.NotchHost' -as [type]) {
         $scale = @{ compact = 0.85; normal = 1.0; large = 1.2 }[[string]$Config.notch.size]
@@ -674,6 +832,8 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow switch 'quickReplies' 'Быстрые ответы' 'Отвечать после «Готово» без перехода в окно' -On ([bool]$c.quickReplies.enabled)
     $rows += New-NotifierNotchRow button 'replyTexts' 'Кнопки ответа' (@($c.quickReplies.texts) -join ' / ') -Value 'Изменить'
     $rows += New-NotifierNotchRow choice 'remind' 'Напоминание' 'Повторить, если запрос ждёт' -Value (Get-NotifierSelectLabel 'remind' -Config $c)
+    $rows += New-NotifierNotchRow switch 'notch.limitResume' 'Продолжать после лимита' 'После сброса лимита отправить «Продолжай»' -On ([bool]$c.notch.limitResume)
+    $rows += @(Get-NotifierNotchAutoAllowRows)   # действующие «разрешать такие 30 минут»
     $rows += New-NotifierNotchRow switch 'showPrompt' 'Показывать мой запрос' 'Начало запроса в подробностях сеанса' -On ([bool]$c.showPrompt)
     $rows += New-NotifierNotchRow header -Title 'Сеансы'
     $rows += New-NotifierNotchRow choice 'context' 'Контекст' 'Предупредить до автосжатия' -Value (Get-NotifierSelectLabel 'context' -Config $c)
@@ -699,6 +859,9 @@ function Get-NotifierNotchSettingsRows {
     $rows += New-NotifierNotchRow choice 'notch.color' 'Цвет маскота' 'Свой оттенок маскота этого ПК' -Value (Get-NotifierSelectLabel 'notch.color' -Config $c)
     $rows += New-NotifierNotchRow switch 'notch.sounds' 'Звуки маскота' "Мурлычет, ойкает, зевает $([char]0x2014) тихо" -On ([bool]$c.notch.sounds)
     $rows += New-NotifierNotchRow switch 'notch.seasonal' 'Наряды' 'Ночной колпак, Новый год, Хэллоуин' -On ([bool]$c.notch.seasonal)
+    $lv = Get-NotifierLevelOf -Xp (Get-NotifierMascotProgress)
+    $rows += New-NotifierNotchRow info 'level' 'Уровень маскота' "Растёт за выполненные задачи: бантик, искры, корона, звёзды" -Value "$($lv.Level) · $($lv.Xp)/$($lv.Next) задач"
+    $rows += New-NotifierNotchRow switch 'notch.byProject' 'Свой маскот у проекта' 'Сразу видно, какой проект зовёт' -On ([bool]$c.notch.byProject)
     $devices = @()
     if ($script:Net -and $script:Net.Network) { $devices = @($script:Net.Network.devices | Where-Object { $_ }) }
     foreach ($d in $devices) {
@@ -757,10 +920,14 @@ function Get-NotifierNotchDevicesRows {
 
 function Get-NotifierNotchStatsRows {
     <# .SYNOPSIS Страница «Статистика»: итог недели, столбцы по дням, проекты за сегодня и за неделю. #>
+    # Таймлайн дня и отчёт за неделю — сразу, не дожидаясь подсчёта статистики (ClaudeNotifier.Auto.ps1).
+    $head = @()
+    try { $tl = New-NotifierTimelineRow; if ($tl) { $head += $tl } } catch { Write-NotifierLog -Level WARN -Message "notch: таймлайн: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
+    $head += New-NotifierNotchRow link 'report' 'Отчёт за неделю' 'Что сделано за прошлую неделю' -Value 'Показать'
     $s = $script:ActivitySummary
-    if ($null -eq $s) { return (New-NotifierNotchRow note -Title 'Считаю статистику по журналам Claude Code на этом ПК…') }
+    if ($null -eq $s) { return @($head + (New-NotifierNotchRow note -Title 'Считаю статистику по журналам Claude Code на этом ПК…')) }
     $dot = " $([char]0x00B7) "
-    $rows = @()
+    $rows = @($head)
     $title = "За 7 дней: $(Format-NotifierTokensShort ([int64]$s.Total.tokens)) токенов${dot}$(Format-NotifierDuration ([int64]$s.Total.seconds))"
     if ($s.Total.PSObject.Properties['cost'] -and [double]$s.Total.cost -gt 0) { $title += "${dot}$([char]0x2248) $(Format-NotifierCost ([double]$s.Total.cost))" }
     $rows += New-NotifierNotchRow info -Title $title -Subtitle "Запросов $([int]$s.Total.prompts)${dot}проектов $(@($s.Week).Count)${dot}обновлено в $($s.Updated.ToString('HH:mm'))"
@@ -940,6 +1107,7 @@ function Push-NotifierNotchPage {
         'devices' { $rows = @(Get-NotifierNotchDevicesRows -Sessions @($script:NotchSessions)) }
         'history' { $rows = @(Get-NotifierNotchHistoryRows) }
         'update' { $rows = @(Get-NotifierNotchUpdateRows) }
+        { $_ -in @('changes', 'queue', 'report') } { $rows = @(Get-NotifierNotchAutoRows -Page $Page -SessionId $script:NotchAnswerId) }   # ClaudeNotifier.Auto.ps1
         'stats' {
             $rows = @(Get-NotifierNotchStatsRows)
             # Пересчёт — если итога ещё нет или он старше 10 минут (иначе готовый итог снова запускал бы пересчёт).
@@ -1004,7 +1172,7 @@ function Invoke-NotifierNotchSetting {
             Set-NotifierOptionValue -Name notch -Field attention -Value $on
             if (Test-NotifierNotchActive) { [ClaudeNotifier.Ui.NotchHost]::SetAttention($on) }
         }
-        '^notch\.(sounds|seasonal|inline)$' {
+        '^notch\.(sounds|seasonal|inline|byProject|limitResume)$' {
             Set-NotifierOptionValue -Name notch -Field $Matches[1] -Value (-not [bool]$c.notch[$Matches[1]])
             Update-NotifierMascotFlags
         }
@@ -1544,6 +1712,7 @@ function Invoke-NotifierNotchCommand {
             'page' {
                 $script:NotchPage = [string]$Event.Action
                 if ($script:NotchPage -eq 'answer') { $script:NotchAnswerId = [string]$Event.Id; Push-NotifierNotchAnswer -Id $script:NotchAnswerId }
+                elseif (@('changes', 'queue') -contains $script:NotchPage) { $script:NotchAnswerId = [string]$Event.Id; Push-NotifierNotchPage -Page $script:NotchPage }
                 else { Push-NotifierNotchPage -Page $script:NotchPage }
             }
             'sound' { Switch-NotifierQuiet }   # кнопка-динамик: «Без звука» всегда / выкл (расписание остаётся)
@@ -1558,7 +1727,13 @@ function Invoke-NotifierNotchCommand {
                 if ($null -eq $card) { return }
                 $acts = @($card.Actions | ForEach-Object { ($_ -split '\|')[0] })
                 $kind = if ($acts -contains 'answer-custom') { 'answer-text' } elseif ($acts -contains 'reply-custom') { 'reply-text' } else { '' }
-                if ($kind -eq '') { return }
+                if ($kind -eq '') {
+                    # Сеанс занят — задание в очередь: уйдёт, когда Claude закончит (ClaudeNotifier.Auto.ps1).
+                    $n = Add-NotifierQueuedTask -SessionId ([string]$Event.Id) -Text ([string]$Event.Action)
+                    if ($n -gt 0) { [ClaudeNotifier.Ui.NotchHost]::Notice("В очереди: $n — уйдёт, когда Claude освободится", 4000) }
+                    [void](Invoke-NotifierSessionsRefresh)
+                    return
+                }
                 [void](Invoke-NotifierCardAction -Item $card -ActionId $kind -Text ([string]$Event.Action))
                 [void](Invoke-NotifierSessionsRefresh)
             }
@@ -1626,6 +1801,7 @@ function Invoke-NotifierNotchCommand {
                     $script:NotchPage = 'home'
                     return
                 }
+                if (Invoke-NotifierAutoRow -Id $id -Action ([string]$Event.Action)) { return }   # изменения, очередь, правила (Auto.ps1)
                 if ($id -eq 'data') { Start-Process explorer.exe $script:TrayDataRoot }
                 elseif ($id -eq 'export') { Export-NotifierSettingsDialog }
                 elseif ($id -eq 'import') { Import-NotifierSettingsDialog }

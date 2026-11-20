@@ -25,13 +25,43 @@ namespace ClaudeNotifier.Ui {
         // Украшения дружбы и настроения дня поверх головы. top — на макушке уже что-то есть (колпак, гирлянда).
         internal static void Paint(Graphics g, float hx, float htop, float hw, float hface, float u, CatMood m, float t, bool top) {
             if (m == null || !m.Play) return;
-            bool crown = m.Friend >= CrownAt && !top;
+            float friend = Math.Max(m.Friend, LevelFriend(m.Level));   // дружба или уровень — что выше
+            bool crown = friend >= CrownAt && !top;
             bool party = m.DayMood == "cheer" && !top && !crown;
             if (crown) Crown(g, hx, htop, hw, u, t);
-            else if (m.Friend >= BowAt) Bow(g, hx - hw * 0.78f, htop + u * 0.07f, u, t);
+            else if (friend >= BowAt) Bow(g, hx - hw * 0.78f, htop + u * 0.07f, u, t);
             if (party) PartyHat(g, hx, htop, hw, u, t);
             if (m.DayMood == "tea") Tea(g, hx + hw + u * 0.2f, hface + u * 0.36f, u, t);
-            if (m.Pet > 0.02f && m.Friend >= SparkAt) Sparks(g, hx, htop, hw, hface, u, t, m.Pet);
+            if (m.Pet > 0.02f && friend >= SparkAt) Sparks(g, hx, htop, hw, hface, u, t, m.Pet);
+            if (m.Level >= 8) Halo(g, hx, htop, hw, u, t, m.Level >= 10 ? 5 : 3);   // звёздочки над головой
+        }
+
+        // Уровень маскота → украшения, как у дружбы: 2 — бантик, 4 — искры, 6 — корона, 8 — звёздочки, 10 — больше звёзд.
+        public static float LevelFriend(int level) { return level >= 6 ? CrownAt : level >= 4 ? SparkAt : level >= 2 ? BowAt : 0f; }
+
+        // Что открылось на этом уровне (' — ничего нового).
+        public static string LevelUnlock(int level) {
+            switch (level) {
+                case 2: return "бантик";
+                case 4: return "искры, когда гладите";
+                case 6: return "корона";
+                case 8: return "звёздочки над головой";
+                case 10: return "звёздный хоровод";
+                default: return "";
+            }
+        }
+
+        // Звёздочки кружат над головой (уровень 8+).
+        static void Halo(Graphics g, float hx, float htop, float hw, float u, float t, int n) {
+            float rx = Math.Max(hw, u * 0.22f) * 1.15f, ry = u * 0.07f, cy = htop - u * 0.2f;
+            for (int i = 0; i < n; i++) {
+                double a = t * 1.6 + i * Math.PI * 2 / n;
+                float x = hx + (float)Math.Cos(a) * rx, y = cy + (float)Math.Sin(a) * ry, s = u * (0.07f + 0.02f * (float)Math.Sin(a));
+                int al = A(150 + 100 * (float)Math.Sin(a));   // сзади тусклее
+                PointF[] p = new PointF[8];
+                for (int k = 0; k < 8; k++) { double b = k * Math.PI / 4 + t; float rr = k % 2 == 0 ? s : s * 0.4f; p[k] = new PointF(x + (float)Math.Cos(b) * rr, y + (float)Math.Sin(b) * rr); }
+                using (SolidBrush br = new SolidBrush(Color.FromArgb(al, 255, 214, 10))) g.FillPolygon(br, p);
+            }
         }
 
         static void Bow(Graphics g, float x, float y, float u, float t) {

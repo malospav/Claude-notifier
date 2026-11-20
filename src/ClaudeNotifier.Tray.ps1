@@ -45,6 +45,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib\Event.psm1')        # события
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Diagnostics.ps1') # «Проверить работу»: хуки, приём событий, сеть, устройства, журнал
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Notch.ps1')       # шторка вверху экрана: персонажи сеансов, раскрытая панель
 . (Join-Path $PSScriptRoot 'ClaudeNotifier.Quiet.ps1')       # умная тишина, голос, правила проектов
+. (Join-Path $PSScriptRoot 'ClaudeNotifier.Auto.ps1')        # очередь заданий, продолжение после лимита, правила разрешений, изменения
 # Загружен для тестов (dot-source) — занятость не проверяется: результат не должен зависеть от того, что открыто на экране.
 $script:BusyProbe = $MyInvocation.InvocationName -ne '.'
 
@@ -254,7 +255,8 @@ function Invoke-NotifierEventBatch {
                 if (-not $notifyOnly) { $sessions = Update-NotifierSessionList -Sessions $sessions -Event $event }
             }
             catch { Write-NotifierLog -Level ERROR -Message "tray: статус сеанса не обновлён: $($_.Exception.Message)" -DataRoot $DataRoot }
-            try { Send-NotifierNotchReaction -Event $event } catch { }   # задача готова — маскот радуется, ошибка — паникует
+            try { Invoke-NotifierMascotEvent -Event $event -Before $before -DataRoot $DataRoot } catch { }   # маскот: радость, салют, чай, опыт и уровни
+            try { Invoke-NotifierAutoEvent -Event $event -DataRoot $DataRoot } catch { Write-NotifierLog -Level WARN -Message "tray: автоматика: $($_.Exception.Message)" -DataRoot $DataRoot }   # таймлайн, лимит
             $wasRequest = $event.type -eq 'request'
             if ($wasRequest) { $event.type = 'permission' }   # уведомление, звук и история — как «Нужно разрешение»
             elseif ($duplicate -and -not ($event.PSObject.Properties['reminder'] -and $event.reminder)) { $shown++; continue }   # дубль уведомления Claude о том же запросе
@@ -867,6 +869,8 @@ function Start-NotifierTray {
                 # Редкие дела — не чаще раза в секунду (таймер при событиях тикает 10 раз в секунду).
                 if ($now -ge $script:SlowTickAt) {
                     $script:SlowTickAt = $now.AddMilliseconds(950)
+                    try { Invoke-NotifierAutoTick -Now $now } catch { }   # очередь, продолжение после лимита, отчёт недели
+                    try { Invoke-NotifierLimitForecastTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: прогноз лимита: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Invoke-NotifierUsageTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: расход: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Update-NotifierLiveContext -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: контекст: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Invoke-NotifierUpdateTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: обновление: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }

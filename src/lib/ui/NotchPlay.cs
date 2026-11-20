@@ -32,9 +32,32 @@ namespace ClaudeNotifier.Ui {
         // Реакции на события сеансов: id сеанса ("" — главный маскот) → вид реакции и когда.
         readonly Dictionary<string, KeyValuePair<string, DateTime>> reactions = new Dictionary<string, KeyValuePair<string, DateTime>>();
 
+        // Уровень маскота (трей считает по выполненным задачам) и сколько задач до следующего.
+        public static volatile int MascotLevel = 1;
+        public static volatile int LevelXp, LevelNext;
+        // Задач нет столько секунд — маскот иногда играет сам с собой (тесты уменьшают).
+        public static double IdleAfterSeconds = 90, IdleEvery = 40, IdleLength = 6;
+        DateTime lastBusyAt = DateTime.UtcNow;
+
+        // Играет ли главный маскот с мячиком сейчас: секунд с начала игры или -1.
+        float IdlePlayPhase() {
+            if (!Animate || dragging || flying || Since(lastBusyAt) < IdleAfterSeconds || items.Count == 0) return -1f;
+            double ph = (Since(lastBusyAt) - IdleAfterSeconds) % IdleEvery;
+            return ph < IdleLength ? (float)ph : -1f;
+        }
+
+        // Новый уровень: салют, «выдох» с тем, что открылось.
+        public void LevelUp(int level, string text) {
+            MascotLevel = level;
+            React("", "fireworks");
+            MascotSound.Play("boop", playKind);
+            if (Expanded) Notice(text, 6000); else StartPeek(text, null, 6000);
+            WakePlay();
+        }
+
         // Задача готова — joy, ошибка — panic, лимит — nervous. id пустой или неизвестный — главный маскот.
         public void React(string id, string kind) {
-            if (kind != "joy" && kind != "panic" && kind != "nervous") return;
+            if (kind != "joy" && kind != "panic" && kind != "nervous" && kind != "fireworks" && kind != "tea") return;
             string key = "";
             foreach (NotchItem x in items) if (x.Id == id) key = id;
             reactions[key] = new KeyValuePair<string, DateTime>(kind, DateTime.UtcNow);
@@ -89,6 +112,7 @@ namespace ClaudeNotifier.Ui {
         string PlayState(NotchItem it) {
             string st = it != null ? it.State : "none";
             if (Asleep(it) && Woken) return "waiting";
+            if (IdlePlayPhase() >= 0 && (it == null || it.State == "waiting")) return "waiting";   // играет — не спит
             return st;
         }
 
@@ -101,6 +125,16 @@ namespace ClaudeNotifier.Ui {
             md.Pet = pet;
             md.Friend = (float)Affection;
             md.DayMood = DayMood;
+            md.Level = MascotLevel;
+            // Задач нет — играет с мячиком: следит за ним глазами, на каждом касании чуть приседает.
+            float idle = it == null || it.State == "waiting" || Asleep(it) ? IdlePlayPhase() : -1f;
+            if (idle >= 0 && !md.Grumpy) {
+                md.IdlePlay = idle;
+                float p = (idle % 0.9f) / 0.9f, hop = 4f * p * (1 - p);
+                md.HasLook = true; md.LookW = 1f;
+                md.LookX = (float)Math.Cos(idle * 1.7) * 0.5f; md.LookY = 0.3f + 0.7f * hop;
+                if (hop < 0.15f) md.SquashY *= 1f - 0.06f * (1f - hop / 0.15f);
+            }
             double poke = Since(pokeAt);
             if (poke < 3.4) md.PokeAge = (float)poke;
             double wake = Since(wakeAt);
@@ -136,7 +170,7 @@ namespace ClaudeNotifier.Ui {
         // Рисует главного маскота: бросок (сдвиг и поворот), место для щелчка, подсказка.
         void PaintPlayFace(Graphics g, RectangleF r, NotchItem it, CatMood md, int seed) {
             playId = it != null ? it.Id : "";
-            playKind = Mascot.For(it != null ? it.Device : null);
+            playKind = Mascot.ForItem(it != null ? it.Device : null, it != null ? it.Project : null);
             playHome = r;
             PlayMood(it, md, r);
             RectangleF at = r;
@@ -158,7 +192,7 @@ namespace ClaudeNotifier.Ui {
         string PlayTip(NotchItem it) {
             string s = it == null ? "Сеансов нет — спит" : !string.IsNullOrEmpty(it.Hint) ? it.Hint : it.StateText;
             int hearts = (int)Math.Round(Math.Max(0, Math.Min(100, Affection)) / 20);
-            string friend = "Дружба: " + new string('♥', hearts) + new string('♡', 5 - hearts);
+            string friend = "Дружба: " + new string('♥', hearts) + new string('♡', 5 - hearts) + " · уровень " + MascotLevel + (LevelNext > 0 ? " (" + LevelXp + "/" + LevelNext + " задач)" : "");
             if (Missing) friend += " — скучает, погладьте";
             return (s ?? "") + "\n" + friend;
         }
@@ -281,6 +315,8 @@ namespace ClaudeNotifier.Ui {
             float dt = (float)Math.Max(0, Math.Min(0.1, (now - playClock).TotalSeconds));
             playClock = now;
             bool busy = dragging || flying;
+            foreach (NotchItem x in items) if (x.State == "working" || x.State == "permission") { lastBusyAt = now; break; }
+            if (IdlePlayPhase() >= 0) busy = true;   // играет с мячиком — каждый кадр
             if (flying) {
                 tossOff = new PointF(tossOff.X + tossVel.X * dt, tossOff.Y + tossVel.Y * dt);
                 tossVel = new PointF(tossVel.X * (float)Math.Exp(-dt * 2.2), tossVel.Y * (float)Math.Exp(-dt * 2.2) + theme.S(900) * dt);   // трение и тяжесть

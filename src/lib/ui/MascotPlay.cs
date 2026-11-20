@@ -1,4 +1,4 @@
-﻿// claude-notifier: реакции главного маскота шторки на вас — поверх любого маскота.
+// claude-notifier: реакции главного маскота шторки на вас — поверх любого маскота.
 // Гладят — летят сердечки, у каждого свой вкус (котики мурлычут, огонёк вспыхивает, призрак краснеет, пчёлка
 // кружит); разбудили — «!»; подкинули слишком сильно — злится (значок злости и пар); давно не заходили — скучает
 // (тучка с каплями); любит вас — иногда машет лапкой. Глаза и ротик меняет FlatState (MoodEyes / MoodMouth).
@@ -19,7 +19,7 @@ namespace ClaudeNotifier.Ui {
         // Сжатие при прыжках: радость — шлёпается при касании и вытягивается в воздухе; испуг — приседает и подскакивает.
         public static float ReactSquash(CatMood m) {
             float k = 1f;
-            if (m.Reacting && m.React == "joy") {
+            if (m.Reacting && (m.React == "joy" || m.React == "fireworks")) {
                 float a = m.ReactAge, h = (float)Math.Abs(Math.Sin(a * Math.PI * 2.4)), fade = 1f - a / 2.5f;
                 k *= 1f + fade * (h < 0.2f ? -0.16f * (1f - h / 0.2f) : 0.10f * (h - 0.2f) / 0.8f);
             }
@@ -35,8 +35,9 @@ namespace ClaudeNotifier.Ui {
             float u = r.Height;
             if (m.Reacting) {
                 float a = m.ReactAge;
-                if (m.React == "joy") r.Offset(0, -u * 0.20f * (float)Math.Abs(Math.Sin(a * Math.PI * 2.4)) * (1 - a / 2.5f));   // прыгает от радости
+                if (m.React == "joy" || m.React == "fireworks") r.Offset(0, -u * 0.20f * (float)Math.Abs(Math.Sin(a * Math.PI * 2.4)) * (1 - a / 2.5f));   // прыгает от радости
                 else if (m.React == "panic") r.Offset((float)Math.Sin(t * 55) * u * 0.03f, 0);                                   // трясётся
+                else if (m.React == "tea") { }                                                                                  // спокойно пьёт чай
                 else r.Offset((float)Math.Sin(t * 28) * u * 0.012f, 0);                                                         // мелко дрожит
             }
             if (m.Pet > 0.05f) {
@@ -74,6 +75,7 @@ namespace ClaudeNotifier.Ui {
                 if (m.Sad) Cloud(g, new PointF(h.X, h.Top - h.U * 0.14f), h.U, t);
                 if (m.Wave > 0.02f) Wave(g, new PointF(h.X + h.W + h.U * 0.05f, h.Face + h.U * 0.16f), h.U, m.Wave, t, PawColor(kind));
                 if (m.Reacting) Reaction(g, m.React, m.ReactAge, t, h);
+                if (m.IdlePlay >= 0) Ball(g, m.IdlePlay, t, h);
             } finally { g.Restore(gs); g.SmoothingMode = sm; }
         }
 
@@ -163,6 +165,10 @@ namespace ClaudeNotifier.Ui {
                     using (SolidBrush b = new SolidBrush(Color.FromArgb(A(255 * fade * life), c))) g.FillRectangle(b, -w / 2, -ch / 2, w, ch);
                     g.Restore(st);
                 }
+            } else if (react == "fireworks") {
+                Fireworks(g, age, t, h);
+            } else if (react == "tea") {
+                TeaBreak(g, age, t, h);
             } else if (react == "panic") {
                 float sh = (float)Math.Sin(t * 30) * u * 0.02f;
                 using (SolidBrush b = new SolidBrush(Color.FromArgb(A(240 * fade), 250, 236, 228)))
@@ -178,6 +184,80 @@ namespace ClaudeNotifier.Ui {
             } else {
                 Sweat(g, cx + h.W + u * 0.04f, h.Top + u * (0.10f + 0.15f * (age % 1.2f) / 1.2f), u, fade);
             }
+        }
+
+        // Салют (долгая задача готова): три залпа над головой — ракета взлетает, раскрывается шаром искр с хвостами.
+        static void Fireworks(Graphics g, float age, float t, Head h) {
+            float u = h.U;
+            Color[] cols = { Color.FromArgb(255, 214, 10), Color.FromArgb(255, 105, 140), Color.FromArgb(100, 210, 255), Color.FromArgb(48, 209, 88), Color.FromArgb(191, 90, 242) };
+            for (int s = 0; s < 3; s++) {
+                float a = age - s * 0.55f;
+                if (a < 0 || a > 1.6f) continue;
+                float bx = h.X + (s - 1) * u * 0.5f, by = h.Top - u * (0.28f + 0.08f * (s % 2));
+                Color c = cols[(s * 2) % cols.Length];
+                if (a < 0.35f) {   // ракета взлетает
+                    float k = a / 0.35f, y = h.Top + (by - h.Top) * k;
+                    using (Pen p = new Pen(Color.FromArgb(A(220 * (1 - k * 0.5f)), 255, 230, 160), Math.Max(1f, u * 0.02f))) g.DrawLine(p, bx, y, bx, y + u * 0.12f);
+                    continue;
+                }
+                float e = (a - 0.35f) / 1.25f, rad = u * 0.3f * (1 - (1 - e) * (1 - e)), fade = 1 - e;
+                for (int i = 0; i < 14; i++) {
+                    double ang = i * Math.PI * 2 / 14 + s;
+                    float x = bx + (float)Math.Cos(ang) * rad, y = by + (float)Math.Sin(ang) * rad + u * 0.25f * e * e;
+                    float tx = bx + (float)Math.Cos(ang) * rad * 0.72f, ty = by + (float)Math.Sin(ang) * rad * 0.72f + u * 0.22f * e * e;
+                    using (Pen p = new Pen(Color.FromArgb(A(200 * fade), cols[(i + s) % cols.Length]), Math.Max(1f, u * 0.018f))) { p.StartCap = p.EndCap = LineCap.Round; g.DrawLine(p, tx, ty, x, y); }
+                    float d = u * 0.03f * (0.6f + 0.4f * (float)Math.Sin(t * 20 + i));
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(A(255 * fade), 255, 250, 220))) g.FillEllipse(b, x - d / 2, y - d / 2, d, d);
+                }
+                if (e < 0.25f) using (SolidBrush b = new SolidBrush(Color.FromArgb(A(180 * (1 - e / 0.25f)), c))) g.FillEllipse(b, bx - u * 0.08f, by - u * 0.08f, u * 0.16f, u * 0.16f);   // вспышка
+            }
+        }
+
+        // Чай (пять ошибок подряд): чашка приезжает к мордочке, над ней вьётся пар, рядом сердечко — «передохни».
+        static void TeaBreak(Graphics g, float age, float t, Head h) {
+            float u = h.U, k = MascotMotion.EaseOutBack(Math.Min(1f, age / 0.5f)), fade = Math.Min(1f, (2.5f - age) / 0.4f);
+            float x = h.X + h.W + u * (0.55f - 0.35f * k), y = h.Face + u * 0.30f;
+            int al = A(255 * fade);
+            using (SolidBrush cup = new SolidBrush(Color.FromArgb(al, 245, 240, 232)))
+            using (SolidBrush tea = new SolidBrush(Color.FromArgb(al, 176, 110, 60)))
+            using (Pen rim = new Pen(Color.FromArgb(al, 150, 140, 130), Math.Max(1f, u * 0.015f))) {
+                float w = u * 0.22f, hh = u * 0.16f;
+                using (GraphicsPath p = new GraphicsPath()) {
+                    p.AddLine(x - w / 2, y, x + w / 2, y);
+                    p.AddBezier(x + w / 2, y, x + w / 2, y + hh * 0.8f, x + w * 0.3f, y + hh, x, y + hh);
+                    p.AddBezier(x, y + hh, x - w * 0.3f, y + hh, x - w / 2, y + hh * 0.8f, x - w / 2, y);
+                    g.FillPath(cup, p); g.DrawPath(rim, p);
+                }
+                g.FillEllipse(tea, x - w / 2 + u * 0.01f, y - u * 0.025f, w - u * 0.02f, u * 0.05f);
+                g.DrawArc(rim, x + w / 2 - u * 0.03f, y + hh * 0.15f, u * 0.09f, u * 0.09f, -90, 180);   // ручка
+                for (int i = 0; i < 3; i++) {   // пар
+                    float ph = (float)(((t * 0.8 + i / 3.0) % 1.0 + 1.0) % 1.0);
+                    float sx = x + (i - 1) * u * 0.05f + (float)Math.Sin(ph * 6 + i) * u * 0.02f, sy = y - u * (0.04f + 0.22f * ph);
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(A(120 * fade * (1 - ph)), 255, 255, 255))) g.FillEllipse(b, sx - u * 0.02f, sy - u * 0.02f, u * 0.04f, u * 0.04f);
+                }
+            }
+            if (age > 0.6f) MascotSig.Heart(g, new PointF(h.X - h.W - u * 0.06f, h.Face - u * (0.1f + 0.08f * (float)Math.Sin(t * 3))), u * 0.08f, Color.FromArgb(A(220 * fade), 255, 105, 140));
+        }
+
+        // Играет сам с собой (задач нет): подбрасывает мячик головой, мячик крутится, в конце укатывается.
+        static void Ball(Graphics g, float play, float t, Head h) {
+            float u = h.U;
+            float fade = Math.Min(1f, Math.Min(play / 0.4f, (6f - play) / 0.5f));
+            if (fade <= 0) return;
+            float cyc = 0.9f, p = (play % cyc) / cyc;
+            float hop = 4f * p * (1 - p);   // парабола: касание головы — внизу
+            float x = h.X + (float)Math.Sin(play * 1.7) * h.W * 0.6f, y = h.Top - u * 0.08f - hop * u * 0.42f;
+            float d = u * 0.16f;
+            // Тень мячика на макушке.
+            using (SolidBrush sh = new SolidBrush(Color.FromArgb(A(40 * fade * (1 - hop)), 0, 0, 0))) g.FillEllipse(sh, x - d * 0.4f, h.Top - u * 0.03f, d * 0.8f, d * 0.2f);
+            GraphicsState st = g.Save();
+            g.TranslateTransform(x, y); g.RotateTransform(play * 360f);
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(A(255 * fade), 255, 69, 58))) g.FillEllipse(b, -d / 2, -d / 2, d, d);
+            using (SolidBrush w = new SolidBrush(Color.FromArgb(A(255 * fade), 255, 255, 255))) {
+                g.FillPie(w, -d / 2, -d / 2, d, d, 0, 60);
+                g.FillPie(w, -d / 2, -d / 2, d, d, 180, 60);
+            }
+            g.Restore(st);
         }
 
         // Облачко пыли у ног при приземлении: два клубка расходятся в стороны и тают.

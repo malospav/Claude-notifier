@@ -1,4 +1,4 @@
-﻿// claude-notifier: клавиатура в раскрытой шторке.
+// claude-notifier: клавиатура в раскрытой шторке.
 // Раскрыли шторку (щелчком или горячей клавишей) — она получает фокус клавиатуры; свернули — фокус возвращается
 // окну, где вы были. Клавиши:
 //   1–9 — кнопки ответа выбранного сеанса; ← → ↑ ↓ — другой сеанс; Enter — полный ответ / отправить текст;
@@ -39,7 +39,14 @@ namespace ClaudeNotifier.Ui {
         bool CanTextReply(NotchItem it) {
             if (it == null) return false;
             foreach (string a in it.Actions) { string id = a.Split('|')[0]; if (id == "reply-custom" || id == "answer-custom") return true; }
-            return false;
+            return it.CanQueue;   // занят — текст уйдёт в очередь
+        }
+
+        // Ответить сразу нельзя, но можно в очередь (сеанс работает).
+        bool QueueOnly(NotchItem it) {
+            if (it == null || !it.CanQueue) return false;
+            foreach (string a in it.Actions) { string id = a.Split('|')[0]; if (id == "reply-custom" || id == "answer-custom") return false; }
+            return true;
         }
 
         // Клавиша. true — обработана (символ тогда не вводится).
@@ -149,8 +156,9 @@ namespace ClaudeNotifier.Ui {
             if (replyOn) using (System.Drawing.Drawing2D.GraphicsPath p = Draw.Round(new RectangleF(f.X + 0.5f, f.Y + 0.5f, f.Width - 1, f.Height - 1), f.Height / 2f))
                 using (Pen ring = new Pen(Color.FromArgb(160, theme.Accent), Math.Max(1f, theme.S(1.2f)))) g.DrawPath(ring, p);
             Rectangle tr = new Rectangle(f.X + theme.S(14), f.Y, f.Width - theme.S(28), f.Height);
-            if (sent) TextRenderer.DrawText(g, "✓ Отправлено", fBold, tr, Pal(0x30D158), TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
-            else if (reply.Length == 0) TextRenderer.DrawText(g, replyOn ? "Напишите ответ и нажмите Enter" : "Ответить текстом…", fBody, tr, theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            bool queue = QueueOnly(Selected);
+            if (sent) TextRenderer.DrawText(g, queue ? "✓ В очереди" : "✓ Отправлено", fBold, tr, Pal(0x30D158), TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            else if (reply.Length == 0) TextRenderer.DrawText(g, queue ? (replyOn ? "Следующее задание — уйдёт, когда Claude закончит (Enter)" : "Добавить задание в очередь…") : replyOn ? "Напишите ответ и нажмите Enter" : "Ответить текстом…", fBody, tr, theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             else {
                 // Длинный текст — видно конец (где печатают).
                 string shown = reply;

@@ -54,7 +54,7 @@ function Get-NotifierDefaultConfig {
         update          = @{ enabled = $true; channel = 'release' }   # раз в 6 ч проверять обновление на GitHub (app\version.json); channel — release (последний выпуск, иначе main) | main
         budget          = @{ enabled = $false; daily = 20 }        # расход за сегодня (примерно, по ценам API) дошёл до суммы, $ — одно уведомление в день
         inactive        = @{ enabled = $true; hours = 2 }          # «Ждёт ответа» дольше стольких часов — в свёрнутую строку «Неактивные»
-        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'flatsphynx'; mascots = @{}; stats = $true; attention = $true; sounds = $true; seasonal = $true; digest = $true; digestHour = 18; inline = $true; theme = 'dark'; size = 'normal'; color = 'none' }   # theme — dark | light | auto (как в Windows); size — compact | normal | large   # inline — пока вы за ПК, уведомления показывает шторка (без всплывающих окон Windows)   # sounds — звуки маскота; seasonal — наряды (ночной колпак, праздники); digest — сводка дня во «выдохе» шторки после digestHour   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
+        notch           = @{ enabled = $true; screen = ''; position = 'center'; mascot = 'flatsphynx'; mascots = @{}; stats = $true; attention = $true; sounds = $true; seasonal = $true; byProject = $false; limitResume = $true; digest = $true; digestHour = 18; inline = $true; theme = 'dark'; size = 'normal'; color = 'none' }   # theme — dark | light | auto (как в Windows); size — compact | normal | large   # inline — пока вы за ПК, уведомления показывает шторка (без всплывающих окон Windows)   # sounds — звуки маскота; seasonal — наряды (ночной колпак, праздники); digest — сводка дня во «выдохе» шторки после digestHour   # stats — загрузка ПК (ЦП, ГП, память) посередине свёрнутой шторки   # mascot — flatsphynx | flame | boxcat | penguin | kitty | ghost | mochi | dino | frog | reaper | onigiri | cupcat | fox | leaf | bee; mascots — свой у сеансов с других устройств: { id устройства: маскот }   # шторка вверху экрана; screen — имя монитора ('' — второй), position — left | center | right
         quiet           = @{ enabled = $false; schedule = '' }     # звук выключен (кнопка в шторке); schedule — ещё и по расписанию «HH:mm-HH:mm» ('' — нет)
         smartQuiet      = @{ enabled = $true }                     # игра на весь экран, презентация, звонок — уведомления копятся и приходят сводкой
         voice           = @{ enabled = $false; idle = 5 }          # вас нет за ПК дольше idle минут — ещё и голосом Windows
@@ -359,7 +359,7 @@ function Get-NotifierConfigUncached {
             if ($att.value -is [bool]) { $config.notch.attention = $att.value }
             else { Write-NotifierLog -Level WARN -Message "config.json: 'notch.attention' должно быть true/false" -DataRoot $DataRoot }
         }
-        foreach ($flag in @('sounds', 'seasonal', 'digest', 'inline')) {
+        foreach ($flag in @('sounds', 'seasonal', 'digest', 'inline', 'byProject', 'limitResume')) {
             $fv = Get-JsonProperty $notch.value $flag
             if (-not $fv.found) { continue }
             if ($fv.value -is [bool]) { $config.notch[$flag] = $fv.value }

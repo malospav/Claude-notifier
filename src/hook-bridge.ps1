@@ -84,6 +84,18 @@ function Invoke-NotifierPermissionHook {
         if ($env:CLAUDE_CODE_ENTRYPOINT -ne 'claude-desktop') { $wait = $config.approvals.cliWaitSeconds }
         if ($wait -le 0) { return '' }
         $hook = ConvertFrom-NotifierJson -InputObject $InputJson
+        # Разрешение по шаблону («Разрешать такие 30 минут»): подходит под правило — разрешаем сразу, без показа.
+        $toolName = ''; $toolInput = $null; $cwd = ''
+        if ($hook.PSObject.Properties['tool_name']) { $toolName = [string]$hook.tool_name }
+        if ($hook.PSObject.Properties['tool_input']) { $toolInput = $hook.tool_input }
+        if ($hook.PSObject.Properties['cwd']) { $cwd = [string]$hook.cwd }
+        $proj = ''
+        if ($cwd.TrimEnd('\', '/')) { $proj = @($cwd.TrimEnd('\', '/') -split '[\\/]')[-1] }   # как Get-ProjectName (Event.psm1)
+        $rule = Test-NotifierAutoAllow -Project $proj -ToolName $toolName -ToolInput $toolInput -DataRoot $DataRoot
+        if ($rule) {
+            Write-NotifierLog -Level INFO -Message "bridge: $toolName разрешён по шаблону «$($rule.title)» ($proj)" -DataRoot $DataRoot
+            return (ConvertTo-NotifierDecisionOutput -Request ([pscustomobject]@{ kind = 'tool'; tool_input = $toolInput; suggestions = $null }) -Decision @{ behavior = 'allow' })
+        }
         $req = New-NotifierPermissionRequest -HookInput $hook -WaitSeconds $wait -DataRoot $DataRoot
         $event = ConvertTo-NotifierEvent -HookKind permreq -Json $InputJson -Config $config -DataRoot $DataRoot
         if ($null -eq $event) { return '' }

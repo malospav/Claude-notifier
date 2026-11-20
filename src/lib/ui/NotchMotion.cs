@@ -1,4 +1,4 @@
-﻿// claude-notifier: движение маскотов в шторке — у каждого свои пружины (сжатие, запаздывание верха, подъём).
+// claude-notifier: движение маскотов в шторке — у каждого свои пружины (сжатие, запаздывание верха, подъём).
 //  • Смена статуса — плавный переход 0,35 с (старый вид тает, новый проявляется) и мягкий «шлепок» пружиной.
 //  • Новый сеанс — маскот выпрыгивает снизу с перелётом, остальные удивлённо смотрят; закрытый — машет и уходит
 //    вниз, соседи машут ему вслед.
@@ -21,7 +21,7 @@ namespace ClaudeNotifier.Ui {
             public DateTime Born = DateTime.MinValue, StateAt = DateTime.MinValue, LeftAt = DateTime.MinValue, AhaKick = DateTime.MinValue;
             public RectangleF Rect;
             public float LastX = float.NaN;
-            public string Device;
+            public string Device, Project;
             public int Seed;
         }
 
@@ -68,7 +68,7 @@ namespace ClaudeNotifier.Ui {
                     fm.OldState = fm.State; fm.State = it.State; fm.StateAt = now;
                     fm.Squash.Kick(-2.4f);   // шлепок: присел и отпружинил
                 }
-                fm.Device = it.Device;
+                fm.Device = it.Device; fm.Project = it.Project;
             }
             bool gone = false;
             foreach (string k in new List<string>(motions.Keys)) {
@@ -199,7 +199,7 @@ namespace ClaudeNotifier.Ui {
         bool tinting;
 
         void DrawMascot(Graphics g, RectangleF r, NotchItem it, string state, int seed, CatMood md, FaceMotion fm) {
-            string dev = it != null ? it.Device : null;
+            string dev = it != null ? it.Device : null, proj = it != null ? it.Project : null;
             // Свой цвет маскота этого ПК: рисуем в картинку и переносим через матрицу цвета.
             if (!tinting && MascotColor.Active && string.IsNullOrEmpty(dev) && r.Width >= 4) {
                 RectangleF tb = RectangleF.Inflate(r, r.Width * 0.6f, r.Height * 0.8f);
@@ -216,7 +216,7 @@ namespace ClaudeNotifier.Ui {
                 return;
             }
             double since = fm != null && fm.OldState != null ? Since(fm.StateAt) : double.MaxValue;
-            if (!Animate || since >= BlendSeconds || fm.OldState == state || r.Width < 4) { Mascot.Paint(g, r, state, T, seed, Animate, md, dev); return; }
+            if (!Animate || since >= BlendSeconds || fm.OldState == state || r.Width < 4) { Mascot.PaintItem(g, r, state, T, seed, Animate, md, dev, proj); return; }
             float k = MascotMotion.Smooth((float)(since / BlendSeconds));
             RectangleF big = RectangleF.Inflate(r, r.Width * 0.45f, r.Height * 0.6f);
             int bx = (int)Math.Floor(big.X), byy = (int)Math.Floor(big.Y), w = (int)Math.Ceiling(big.Width) + 2, h = (int)Math.Ceiling(big.Height) + 2;
@@ -226,7 +226,7 @@ namespace ClaudeNotifier.Ui {
                     using (Graphics gg = Graphics.FromImage(p.Key)) {
                         gg.SmoothingMode = SmoothingMode.AntiAlias;
                         gg.TranslateTransform(-bx, -byy);
-                        Mascot.Paint(gg, r, p.Value, T, seed, Animate, md, dev);
+                        Mascot.PaintItem(gg, r, p.Value, T, seed, Animate, md, dev, proj);
                     }
                 }
                 Blit(g, a, bx, byy, 1f - k);
@@ -250,7 +250,7 @@ namespace ClaudeNotifier.Ui {
                 CatMood md = new CatMood();
                 md.React = "wave"; md.ReactAge = 0.6f + k; md.Wave = 1f - k;
                 md.Lift = -0.9f * MascotMotion.Smooth(k); md.SquashY = 1f + 0.15f * (float)Math.Sin(Math.PI * k);
-                Mascot.Paint(g, fm.Rect, fm.State, T, fm.Seed, Animate, md, fm.Device);
+                Mascot.PaintItem(g, fm.Rect, fm.State, T, fm.Seed, Animate, md, fm.Device, fm.Project);
             }
         }
 

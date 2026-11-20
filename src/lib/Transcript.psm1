@@ -32,6 +32,10 @@ $script:RxCache5m = [regex]'"ephemeral_5m_input_tokens":(\d+)'
 $script:RxCache1h = [regex]'"ephemeral_1h_input_tokens":(\d+)'
 $script:KeepFileList = 15
 $script:EditTools = @('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+# Сколько строк добавлено и убрано правками (оценка по тексту правки: new_string — добавлено, old_string — убрано).
+$script:RxOldStr = [regex]'"old_string":"((?:[^"\\]|\\.)*)"'
+$script:RxNewStr = [regex]'"(?:new_string|new_source)":"((?:[^"\\]|\\.)*)"'
+$script:RxContent = [regex]'"content":"((?:[^"\\]|\\.)*)"'
 $script:ShellTools = @('Bash', 'PowerShell')
 $script:MaxFiles = 500
 $script:KeepCommands = 5
@@ -39,7 +43,7 @@ $script:ChunkBytes = 4MB   # сколько журнала читается в �
 
 function New-TranscriptState {
     # feed — лента последних событий: @{ ts; k = you|claude|tool; text; id (у инструмента); ms (сколько шёл) }.
-    return [ordered]@{ v = 5; feed = @(); offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
+    return [ordered]@{ v = 6; diff = @{}; feed = @(); offset = [int64]0; started = ''; output = [int64]0; context = [int64]0; tools = 0; prompts = 0; lastId = ''; lastOut = [int64]0
         model = ''; maxCtx = [int64]0; compactions = 0; files = @(); toolCounts = @{}; commands = @(); lastActivity = ''; apiError = ''; apiErrorText = ''
         cost = [double]0; mIn = [int64]0; mRead = [int64]0; m5 = [int64]0; m1 = [int64]0; mModel = ''; mFast = $false; cwd = ''; cwdOk = $false; dirKey = ''; lastTool = ''; sub = $false }
 }
@@ -90,6 +94,16 @@ function Add-ToolUses($State, [string]$Line, [string]$Ts = '', [switch]$Feed) {
             if ($f.Success) {
                 $path = ConvertFrom-JsonString $f.Groups[1].Value
                 if (@($State.files) -notcontains $path -and @($State.files).Count -lt $script:MaxFiles) { $State.files = @($State.files) + $path }
+                # Строки: Write — всё содержимое добавлено; Edit / MultiEdit / NotebookEdit — новый текст и старый.
+                $add = 0; $del = 0
+                if ($name -eq 'Write') { $cw = $script:RxContent.Match($seg); if ($cw.Success) { $add = Get-EscapedLineCount $cw.Groups[1].Value } }
+                else {
+                    foreach ($mm in $script:RxNewStr.Matches($seg)) { $add += Get-EscapedLineCount $mm.Groups[1].Value }
+                    foreach ($mm in $script:RxOldStr.Matches($seg)) { $del += Get-EscapedLineCount $mm.Groups[1].Value }
+                }
+                if (-not ($State.diff -is [hashtable])) { $State.diff = @{} }
+                if ($State.diff.ContainsKey($path)) { $old = $State.diff[$path]; $State.diff[$path] = @(([int]$old[0] + $add), ([int]$old[1] + $del)) }
+                elseif ($State.diff.Count -lt $script:MaxFiles) { $State.diff[$path] = @($add, $del) }
             }
         }
         elseif ($script:ShellTools -contains $name) {
@@ -101,6 +115,14 @@ function Add-ToolUses($State, [string]$Line, [string]$Ts = '', [switch]$Feed) {
             }
         }
     }
+}
+
+function Get-EscapedLineCount([string]$Escaped) {
+    # Строк в тексте из JSON (переводы строк — «\n»): пустой — 0; перевод в конце не считается новой строкой.
+    if ($Escaped -eq '') { return 0 }
+    $n = ([regex]::Matches($Escaped, '(?<!\\)\\n')).Count
+    if ($Escaped.EndsWith('\n')) { return [Math]::Max(1, $n) }
+    return $n + 1
 }
 
 function Add-FeedItem($State, [string]$Ts, [string]$Kind, [string]$Text, [string]$Id = '') {
@@ -275,7 +297,7 @@ function Get-NotifierTranscriptStats {
     if (Test-Path -LiteralPath $statePath) {
         try {
             $saved = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8)) -ErrorAction Stop
-            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 5) { throw 'old state' }   # прежний формат: перечитать журнал целиком
+            if (-not $saved.PSObject.Properties['v'] -or [int]$saved.v -ne 6) { throw 'old state' }   # прежний формат: перечитать журнал целиком
             foreach ($k in @($state.Keys)) { if ($saved.PSObject.Properties[$k]) { $state[$k] = $saved.$k } }
             $state.offset = [int64]$state.offset; $state.output = [int64]$state.output; $state.lastOut = [int64]$state.lastOut; $state.context = [int64]$state.context
             $state.maxCtx = [int64]$state.maxCtx
@@ -288,6 +310,9 @@ function Get-NotifierTranscriptStats {
             if ($state.toolCounts -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $state.toolCounts.PSObject.Properties) { $counts[$p.Name] = [int]$p.Value } }
             elseif ($state.toolCounts -is [hashtable]) { $counts = $state.toolCounts }
             $state.toolCounts = $counts
+            $diff = @{}
+            if ($state.diff -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $state.diff.PSObject.Properties) { $diff[$p.Name] = @([int]@($p.Value)[0], [int]@($p.Value)[1]) } }
+            $state.diff = $diff
         }
         catch { $state = New-TranscriptState }
     }
@@ -352,8 +377,36 @@ function Get-NotifierTranscriptStats {
         recentFiles = @(@($state.files) | Select-Object -Last 3 | ForEach-Object { [IO.Path]::GetFileName($_) })
         topTools    = $top
         commands    = @(@($state.commands) | Select-Object -Last 3)
+        added       = [int](@($state.diff.Values) | ForEach-Object { [int]$_[0] } | Measure-Object -Sum).Sum
+        removed     = [int](@($state.diff.Values) | ForEach-Object { [int]$_[1] } | Measure-Object -Sum).Sum
+        changed     = [int]$state.diff.Count
         feed        = @(@($state.feed) | ForEach-Object { [pscustomobject][ordered]@{ ts = [string]$_.ts; k = [string]$_.k; text = [string]$_.text; ms = [int64]$_.ms } })
     }
+}
+
+function Get-NotifierTranscriptChanges {
+    <#
+    .SYNOPSIS
+    Изменённые сеансом файлы (по сохранённым итогам журнала, без нового разбора): новые сверху,
+    [{ path; add; del }]. Пусто — журнала нет или он ещё не разобран.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Path, [Parameter(Mandatory = $true)][string]$StateDir, [int]$Max = 60)
+    if ([string]::IsNullOrEmpty($Path)) { return @() }
+    $statePath = Get-StatePath $Path $StateDir
+    if (-not (Test-Path -LiteralPath $statePath)) { return @() }
+    try { $s = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8)) -ErrorAction Stop } catch { return @() }
+    if (-not $s.PSObject.Properties['diff'] -or $null -eq $s.diff) { return @() }
+    $out = @()
+    $files = @(@($s.files) | Where-Object { $_ -is [string] })
+    [array]::Reverse($files)
+    foreach ($f in $files) {
+        $d = $s.diff.PSObject.Properties[$f]
+        if ($null -eq $d) { continue }
+        $out += [pscustomobject][ordered]@{ path = $f; add = [int]@($d.Value)[0]; del = [int]@($d.Value)[1] }
+        if ($out.Count -ge $Max) { break }
+    }
+    return $out
 }
 
 function Format-NotifierTokens {
@@ -621,4 +674,4 @@ function Format-NotifierApiError {
     return $Text
 }
 
-Export-ModuleMember -Function Test-NotifierHelperTranscript, Get-NotifierLastAnswer,Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierDuration, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError
+Export-ModuleMember -Function Get-NotifierTranscriptChanges, Test-NotifierHelperTranscript, Get-NotifierLastAnswer,Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierDuration, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError

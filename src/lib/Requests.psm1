@@ -372,4 +372,120 @@ function Remove-NotifierReplyWait {
     Remove-Item -LiteralPath (Join-Path $dir "reply-$(ConvertTo-SafeName $SessionId).json") -Force -ErrorAction SilentlyContinue
 }
 
-Export-ModuleMember -Function Get-NotifierRequestSummary, New-NotifierPermissionRequest, ConvertTo-NotifierDecisionOutput, Wait-NotifierDecision, New-NotifierReplyWait, Wait-NotifierReply, Get-NotifierPendingRequests, Write-NotifierDecision, Write-NotifierReply, Remove-NotifierReplyWait, Get-NotifierRemoteDecision, Remove-NotifierRequest, Get-NotifierRemoteReply
+# --- Разрешение по шаблону: «Разрешать такие 30 минут» ---
+# DataRoot\autoallow.json — [{ project; tool; prefix; until (ISO UTC); title }]. Хук разрешения (hook-bridge) проверяет
+# правила до показа запроса: подходит — разрешает сам. Для Bash шаблон — начало команды (первые два слова,
+# «npm test»), и команда с цепочками (&&, ||, ;, |, перенаправления, подстановки) под шаблон не попадает никогда.
+
+function Get-NotifierAutoAllowPrefix {
+    <#
+    .SYNOPSIS
+    Шаблон для правила из запроса: Bash — первые два слова команды; WebFetch — домен; правка файлов и прочее —
+    '' (любой вызов этого инструмента в проекте). $null — для такого запроса правило не делается (Bash с цепочкой).
+    #>
+    param([string]$ToolName, $ToolInput)
+    if ($ToolName -eq 'Bash') {
+        $cmd = ''
+        if ($ToolInput -and $ToolInput.PSObject.Properties['command']) { $cmd = ([string]$ToolInput.command).Trim() }
+        if ($cmd -eq '' -or (Test-NotifierShellChain $cmd)) { return $null }
+        $words = @($cmd -split '\s+' | Where-Object { $_ -ne '' })
+        return (@($words | Select-Object -First 2) -join ' ')
+    }
+    if ($ToolName -eq 'WebFetch') {
+        $u = $null
+        if ($ToolInput -and $ToolInput.PSObject.Properties['url'] -and [Uri]::TryCreate([string]$ToolInput.url, [UriKind]::Absolute, [ref]$u)) { return $u.Host }
+        return $null
+    }
+    return ''
+}
+
+function Test-NotifierShellChain([string]$Command) {
+    <# .SYNOPSIS В команде есть цепочка, перенаправление или подстановка — такую по шаблону не разрешаем. #>
+    return [bool]($Command -match '&&|\|\||[;|`<>]|\$\(|\r|\n')
+}
+
+function Get-NotifierAutoAllowRules {
+    <# .SYNOPSIS Действующие правила (истёкшие отброшены). #>
+    [CmdletBinding()]
+    param([string]$DataRoot, [datetime]$Now = [DateTime]::UtcNow)
+    $path = Join-Path $DataRoot 'autoallow.json'
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    # PowerShell 5.1 отдаёт JSON-массив одним объектом — разворачиваем конвейером.
+    try { $list = @(ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop | ForEach-Object { $_ }) } catch { return @() }
+    $out = @()
+    foreach ($r in $list) {
+        if ($null -eq $r) { continue }
+        $until = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse([string]$r.until, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$until)) { continue }
+        if ($until.UtcDateTime -le $Now) { continue }
+        $out += $r
+    }
+    return $out
+}
+
+function Save-NotifierAutoAllowRules {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][object[]]$Rules, [string]$DataRoot)
+    $json = if ($Rules.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject @($Rules) -Depth 4 -Compress }
+    if (-not $json.StartsWith('[')) { $json = "[$json]" }
+    [IO.File]::WriteAllText((Join-Path $DataRoot 'autoallow.json'), $json, (New-Object Text.UTF8Encoding $false))
+}
+
+function Add-NotifierAutoAllowRule {
+    <#
+    .SYNOPSIS
+    Новое правило «разрешать такие» на Minutes минут (то же правило — продлевается). Возвращает правило или $null.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Project, [Parameter(Mandatory = $true)][string]$ToolName, $ToolInput, [int]$Minutes = 30,
+        [string]$DataRoot, [datetime]$Now = [DateTime]::UtcNow)
+    $prefix = Get-NotifierAutoAllowPrefix -ToolName $ToolName -ToolInput $ToolInput
+    if ($null -eq $prefix -or $Project -eq '') { return $null }
+    $title = if ($prefix) { "$ToolName $([char]0x00B7) $prefix" } else { "$ToolName $([char]0x00B7) любые" }
+    $rule = [pscustomobject][ordered]@{ project = $Project; tool = $ToolName; prefix = $prefix; until = $Now.AddMinutes($Minutes).ToString('o'); title = $title }
+    $rules = @(Get-NotifierAutoAllowRules -DataRoot $DataRoot -Now $Now | Where-Object { -not ($_.project -eq $Project -and $_.tool -eq $ToolName -and [string]$_.prefix -eq $prefix) })
+    $rules += $rule
+    Save-NotifierAutoAllowRules -Rules $rules -DataRoot $DataRoot
+    return $rule
+}
+
+function Remove-NotifierAutoAllowRule {
+    <# .SYNOPSIS Убрать правило по номеру (как в Get-NotifierAutoAllowRules). #>
+    [CmdletBinding()]
+    param([int]$Index, [string]$DataRoot)
+    $rules = @(Get-NotifierAutoAllowRules -DataRoot $DataRoot)
+    if ($Index -lt 0 -or $Index -ge $rules.Count) { return }
+    $keep = @(); for ($i = 0; $i -lt $rules.Count; $i++) { if ($i -ne $Index) { $keep += $rules[$i] } }
+    Save-NotifierAutoAllowRules -Rules $keep -DataRoot $DataRoot
+}
+
+function Test-NotifierAutoAllow {
+    <#
+    .SYNOPSIS
+    Подходит ли запрос под действующее правило: тот же проект и инструмент; Bash — команда начинается с шаблона
+    (целым словом) и без цепочек; WebFetch — тот же домен. Возвращает правило или $null.
+    #>
+    [CmdletBinding()]
+    param([string]$Project, [string]$ToolName, $ToolInput, [string]$DataRoot, [datetime]$Now = [DateTime]::UtcNow)
+    if ($Project -eq '' -or $ToolName -eq '') { return $null }
+    foreach ($r in @(Get-NotifierAutoAllowRules -DataRoot $DataRoot -Now $Now)) {
+        if ([string]$r.project -ne $Project -or [string]$r.tool -ne $ToolName) { continue }
+        $prefix = [string]$r.prefix
+        if ($ToolName -eq 'Bash') {
+            $cmd = ''
+            if ($ToolInput -and $ToolInput.PSObject.Properties['command']) { $cmd = ([string]$ToolInput.command).Trim() }
+            if ($cmd -eq '' -or (Test-NotifierShellChain $cmd) -or $prefix -eq '') { continue }
+            if ($cmd -eq $prefix -or $cmd.StartsWith($prefix + ' ')) { return $r }
+            continue
+        }
+        if ($ToolName -eq 'WebFetch') {
+            $u = $null
+            if ($ToolInput -and $ToolInput.PSObject.Properties['url'] -and [Uri]::TryCreate([string]$ToolInput.url, [UriKind]::Absolute, [ref]$u) -and $u.Host -eq $prefix) { return $r }
+            continue
+        }
+        return $r
+    }
+    return $null
+}
+
+Export-ModuleMember -Function Get-NotifierAutoAllowPrefix, Test-NotifierShellChain, Get-NotifierAutoAllowRules, Add-NotifierAutoAllowRule, Remove-NotifierAutoAllowRule, Test-NotifierAutoAllow, Get-NotifierRequestSummary, New-NotifierPermissionRequest, ConvertTo-NotifierDecisionOutput, Wait-NotifierDecision, New-NotifierReplyWait, Wait-NotifierReply, Get-NotifierPendingRequests, Write-NotifierDecision, Write-NotifierReply, Remove-NotifierReplyWait, Get-NotifierRemoteDecision, Remove-NotifierRequest, Get-NotifierRemoteReply

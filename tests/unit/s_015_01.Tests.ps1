@@ -88,7 +88,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         $items = Get-NotifierNotchItems -Sessions @((New-S 'w' 'working' 'api'), (New-S 'p' 'permission'))
         $items.Count | Should -Be 2
         $items[0].Id | Should -Be 'p'   # ждущие решения — первыми
-        $items[0].Actions -join ';' | Should -Be 'allow|Разрешить|primary;always|Всегда|secondary;deny|Запретить|destructive'
+        $items[0].Actions -join ';' | Should -Be 'allow|Разрешить|primary;allow30|На 30 мин|secondary;always|Всегда|secondary;deny|Запретить|destructive'
         $items[0].RequestTitle | Should -Be 'Bash: npm i'
         $items[1].Actions.Length | Should -Be 0   # «Изменённые файлы» и «Папка проекта» — не в шторке
         # Сеансы других устройств — группой после сеансов этого ПК (у группы — имя устройства)
@@ -432,7 +432,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         ($rows | Where-Object { $_.Key -eq 'net' }).Kind | Should -Be 'switch'
         ($rows | Where-Object { $_.Key -eq 'connect' }).Kind | Should -Be 'button'
         $script:ActivitySummary = $null
-        (@(Get-NotifierNotchStatsRows))[0].Kind | Should -Be 'note'
+        (@(Get-NotifierNotchStatsRows))[-1].Kind | Should -Be 'note'   # сначала таймлайн дня и «Отчёт за неделю», потом — «Считаю…»
         $pd = Join-Path $TestDrive 'projects\C--dev-shop'
         New-Item -ItemType Directory $pd -Force | Out-Null
         $t = [DateTime]::UtcNow.AddMinutes(-5).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'")

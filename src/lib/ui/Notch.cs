@@ -31,6 +31,9 @@ namespace ClaudeNotifier.Ui {
         public bool Pinned;              // закреплён — звёздочка, всегда первым
         public string Project = "";      // проект (папка) — «Разрешить все» для запросов одного проекта
         public string[] Feed = new string[0];   // лента сеанса: "you|claude|tool" + "|HH:mm|текст"
+        public bool CanQueue;            // сеанс этого ПК занят — задание можно поставить в очередь (поле ответа)
+        public int Queued;               // заданий в очереди
+        public string Changes = "";      // изменения в файлах: «3 файла · +120 −14» (' — не менял)
         public object Tag;
     }
 
@@ -834,6 +837,8 @@ namespace ClaudeNotifier.Ui {
                 PaintAnswer(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
             } else if (Page == "settings") {
                 PaintSettings(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));
+            } else if (Page == "report") {
+                PaintReport(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));   // отчёт недели: маскот вручает листок
             } else if (Page == "update" && UpdateShowing) {
                 PaintUpdateProgress(g, new Rectangle(pad, top, W - pad * 2, H - top - pad));   // сценка обновления (NotchUpdate.cs)
             } else {
@@ -1075,9 +1080,13 @@ namespace ClaudeNotifier.Ui {
                 }
                 bx += PaintAllowAll(g, it, bx, by, bhh, r.Right - theme.S(12));
             } else {
-                string open = "Полный ответ  \u203A";
+                string open = !string.IsNullOrEmpty(it.Changes) || it.Queued > 0 ? "Ответ  \u203A" : "Полный ответ  \u203A";   // есть капсулы — короче
                 Rectangle or = new Rectangle(tx, r.Bottom - theme.S(32), TextRenderer.MeasureText(open, fBold).Width, theme.S(22));
                 TextRenderer.DrawText(g, open, fBold, or, hover == "answer" ? Fg : Pal(0xD1D1D6), TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                // Изменения в файлах и очередь заданий — капсулы-ссылки рядом.
+                int cx = or.Right + theme.S(14);
+                if (!string.IsNullOrEmpty(it.Changes)) cx += PaintLinkChip(g, cx, or.Y, r.Right - theme.S(12), "page:changes", "\uE70F", it.Changes, Pal(0x30D158));
+                if (it.Queued > 0) PaintLinkChip(g, cx, or.Y, r.Right - theme.S(12), "page:queue", "\uE8FD", "Очередь: " + it.Queued, theme.Accent);
             }
             Rectangle arrow = new Rectangle(r.Right - theme.S(36), r.Y + theme.S(10), theme.S(26), theme.S(26));
             Draw.Fill(g, arrow, arrow.Height / 2f, Draw.Mix(Pal(0x2C2C2E), Pal(0x3A3A3C), Hot("open")));
@@ -1197,6 +1206,7 @@ namespace ClaudeNotifier.Ui {
             switch (row.Kind) {
                 case "header": return theme.S(30);
                 case "chart": return theme.S(156);
+                case "timeline": return theme.S(92) + Math.Max(1, row.Labels.Length) * theme.S(24);
                 case "note": return Math.Min(theme.S(60), TextRenderer.MeasureText(row.Title, fSmall, new Size(width - theme.S(8), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height + theme.S(10));
                 default:
                     if (string.IsNullOrEmpty(row.Subtitle)) return theme.S(44);
@@ -1281,6 +1291,7 @@ namespace ClaudeNotifier.Ui {
             Draw.Fill(g, r, theme.S(14), Draw.Mix(Draw.Mix(Pal(0x161618), Pal(0x222225), Hot(hitId)), Pal(0x111113), Press(hitId)));
             PaintRipple(g, hitId, r, theme.S(14));
             if (row.Kind == "chart") { PaintChart(g, row, r); return; }
+            if (row.Kind == "timeline") { PaintTimeline(g, row, r); return; }   // NotchJuice.cs
             int pad = theme.S(14), rightW = 0;
             // Правая часть: тумблер, выбор, кнопка, значение или действия устройства.
             if (row.Kind == "switch") {
@@ -1974,10 +1985,20 @@ namespace ClaudeNotifier.Ui {
         public static void SetUpdate(bool on) { Post(delegate (NotchForm f) { if (f.View.UpdateAvailable != on) { f.View.UpdateAvailable = on; f.View.Invalidate(); } }); }
         public static void Notice(string text, int ms) { Post(delegate (NotchForm f) { if (f.View.Expanded) f.View.Notice(text, ms); else f.View.StartPeek(text, null, ms); }); }
         public static void React(string id, string kind) { Post(delegate (NotchForm f) { f.View.React(id, kind); }); }
+        // Уровень маскота: сколько задач выполнено (xp) и сколько нужно до следующего (next); LevelUp — салют и «выдох».
+        public static void SetLevel(int level, int xp, int next) { NotchView.MascotLevel = Math.Max(1, level); NotchView.LevelXp = xp; NotchView.LevelNext = next; }
+        public static void LevelUp(int level, string text) { Post(delegate (NotchForm f) { f.View.LevelUp(level, text); }); }
         public static void SetExpanded(bool expanded, string page) { Post(delegate (NotchForm f) { f.SetExpanded(expanded, page); }); }
         // Обновление: ход — в сценке на странице «Обновление»; ShowUpdate ещё и раскрывает шторку на ней (без клавиатуры).
         public static void SetUpdateProgress(string phase, double pct, string detail) {
             Post(delegate (NotchForm f) { f.View.SetUpdateProgress(phase, pct, detail); f.Refit(); });
+        }
+        // Раскрыть шторку на странице (без клавиатуры) или перейти на неё, если уже раскрыта.
+        public static void ShowPage(string page) {
+            Post(delegate (NotchForm f) {
+                if (!f.View.Expanded) f.SetExpanded(true, page, false);
+                else { f.View.SetPage(page); f.Refit(); }
+            });
         }
         public static void ShowUpdate(string phase, double pct, string detail) {
             Post(delegate (NotchForm f) {
