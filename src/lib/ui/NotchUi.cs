@@ -191,6 +191,7 @@ namespace ClaudeNotifier.Ui {
             float inset = p * Math.Max(1f, br.Height * 0.05f);
             RectangleF r = new RectangleF(br.X + inset, br.Y + inset, br.Width - inset * 2, br.Height - inset * 2);
             Draw.Fill(g, r, r.Height / 2f, fill);
+            PaintRipple(g, id, r, r.Height / 2f);   // волна от нажатия (NotchJuice.cs)
             Color tc = style == "destructive" && !sent ? Pal(0xFF6961) : Fg;
             // С галочкой не помещается — одна галочка.
             string label = text;
@@ -201,8 +202,9 @@ namespace ClaudeNotifier.Ui {
         // Тумблер: ползунок едет, цвет перетекает; при нажатии ползунок чуть вытягивается (как в iOS).
         void PaintSwitch(Graphics g, Rectangle t, string key, bool on, string hitId) {
             float k = Anim("sw:" + key, on ? 1f : 0f, 16f), p = Press(hitId);
+            PaintSwitchFlash(g, t, key, on);   // включили — зелёное кольцо расходится
             Draw.Fill(g, t, t.Height / 2f, Draw.Mix(Pal(0x39393D), Pal(0x30D158), k));
-            float kd = t.Height - theme.S(4), stretch = kd * 0.18f * p;
+            float kd = t.Height - theme.S(4), stretch = kd * Math.Max(0.18f * p, 0.38f * SwitchTravel(k));   // «желе» в пути
             float x0 = t.X + theme.S(2), x1 = t.Right - theme.S(2) - kd - stretch;
             float kx = x0 + (x1 - x0) * k;
             Draw.Fill(g, new RectangleF(kx, t.Y + theme.S(2), kd + stretch, kd), kd / 2, Color.FromArgb(255, 255, 255));

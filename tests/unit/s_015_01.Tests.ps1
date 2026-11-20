@@ -185,6 +185,27 @@ Describe 's_015_01 · шторка вверху экрана' {
         finally { $f.Dispose() }
     }
 
+    It 'живые переходы: смена страницы запускает каскад строк, кадры посреди анимаций рисуются' {
+        $f = New-Object ClaudeNotifier.Ui.NotchForm
+        try {
+            $v = $f.View
+            $r = New-Object ClaudeNotifier.Ui.NotchRow; $r.Kind = 'switch'; $r.Key = 'quiet'; $r.Title = 'Без звука'
+            $v.SetRows('settings', [ClaudeNotifier.Ui.NotchRow[]]@($r))
+            $f.SetExpanded($true, 'home', $false)
+            $v.ClickArea('page:settings', [System.Drawing.Point]::Empty)
+            ($v.PageShownSeconds -lt 1) | Should -Be $true
+            $v.ClickArea('set:quiet', [System.Drawing.Point]::Empty)
+            $sz = $f.SizeFor(); $f.ClientSize = $sz
+            foreach ($i in 1..3) {
+                $bmp = New-Object System.Drawing.Bitmap $sz.Width, $sz.Height
+                $v.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $sz.Width, $sz.Height)))
+                $bmp.Dispose()
+            }
+            ($v.HitIds() -contains 'set:quiet') | Should -Be $true
+        }
+        finally { $f.Dispose() }
+    }
+
     It 'обновление в шторке: сценка на странице «Обновление» во всех шагах рисуется; досмотрели — пропадает' {
         $f = New-Object ClaudeNotifier.Ui.NotchForm
         try {

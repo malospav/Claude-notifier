@@ -321,6 +321,7 @@ namespace ClaudeNotifier.Ui {
             if (Page == page) return;
             SnapPage();   // снимок старой страницы — он растает поверх новой
             Page = page;
+            MarkPageShown(false);   // строки новой страницы въезжают каскадом
             EventHandler h = PageChanged; if (h != null) h(this, EventArgs.Empty);
             Invalidate();
         }
@@ -768,16 +769,24 @@ namespace ClaudeNotifier.Ui {
                 TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             RectangleF bar = new RectangleF(r.X, by, r.Width, barH);
             Draw.Fill(g, bar, barH / 2f, Pal(0x2C2C2E));
-            if (v > 0) Draw.Fill(g, new RectangleF(bar.X, bar.Y, Math.Max(barH, bar.Width * v / 100f), barH), barH / 2f, c);
+            if (v > 0) {
+                RectangleF fill = new RectangleF(bar.X, bar.Y, Math.Max(barH, bar.Width * v / 100f), barH);
+                Draw.Fill(g, fill, barH / 2f, c);
+                PaintLimitShine(g, fill);   // после раскрытия по полоске пробегает блик
+            }
             Hit(r, "page:stats-limits");
         }
 
-        void IconButtonAt(Graphics g, Rectangle r, string glyph, string id, bool active, string tip) {
+        void IconButtonAt(Graphics g, Rectangle r, string glyph, string id, bool active, string tip) { IconButtonAt(g, r, glyph, id, active, tip, true); }
+
+        // activeBg = false — подложку выбранной рисует общая скользящая капсула (вкладки).
+        void IconButtonAt(Graphics g, Rectangle r, string glyph, string id, bool active, string tip, bool activeBg) {
             float h = Hot(id), p = Press(id), a = Anim("tab:" + id, active ? 1f : 0f, 18f);
             float inset = p * theme.S(1.5f);
             RectangleF rr = new RectangleF(r.X + inset, r.Y + inset, r.Width - inset * 2, r.Height - inset * 2);
-            Color bg = Draw.Mix(Draw.Mix(Bg, Pal(0x1C1C1E), h), Pal(0x2C2C2E), a);
-            if (h > 0.01f || a > 0.01f) Draw.Fill(g, rr, rr.Height / 2f, bg);
+            float ab = activeBg ? a : 0f, hh = activeBg ? h : h * (1f - a);   // у выбранной вкладки подложка — капсула
+            if (hh > 0.01f || ab > 0.01f) Draw.Fill(g, rr, rr.Height / 2f, Draw.Mix(Draw.Mix(Bg, Pal(0x1C1C1E), hh), Pal(0x2C2C2E), ab));
+            PaintRipple(g, id, rr, rr.Height / 2f);
             TextRenderer.DrawText(g, glyph, fIcon, r, Draw.Mix(Pal(0xB0B0B5), Fg, Math.Max(a, h * 0.6f)),
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             Hit(r, id);
@@ -788,7 +797,11 @@ namespace ClaudeNotifier.Ui {
             int y0 = theme.S(10), x = pad;
             // Страницы — слева; справа — звук и «закрыть»; между ними — полоски оставшихся лимитов.
             string[,] tabs = { { "home", "\uE80F" }, { "history", "\uE81C" }, { "stats", "\uE9D2" }, { "devices", "\uE772" }, { "settings", "\uE713" } };
-            for (int i = 0; i < tabs.GetLength(0); i++) { IconButtonAt(g, new Rectangle(x, y0, bs, bs), tabs[i, 1], "page:" + tabs[i, 0], Page == tabs[i, 0] || (Page == "answer" && tabs[i, 0] == "home"), null); x += bs + gap; }
+            // Выбранная вкладка — одна капсула, переезжает на пружине (NotchJuice.cs).
+            int activeX = -1;
+            for (int i = 0; i < tabs.GetLength(0); i++) if (Page == tabs[i, 0] || (Page == "answer" && tabs[i, 0] == "home")) activeX = x + i * (bs + gap);
+            PaintTabIndicator(g, activeX >= 0 ? activeX : x, y0, bs, activeX >= 0);
+            for (int i = 0; i < tabs.GetLength(0); i++) { IconButtonAt(g, new Rectangle(x, y0, bs, bs), tabs[i, 1], "page:" + tabs[i, 0], Page == tabs[i, 0] || (Page == "answer" && tabs[i, 0] == "home"), null, false); x += bs + gap; }
             int rx = W - pad;
             rx -= bs; IconButtonAt(g, new Rectangle(rx, y0, bs, bs), "\uE711", "close", false, null);
             rx -= bs + gap; IconButtonAt(g, new Rectangle(rx, y0, bs, bs), SoundOff ? "\uE74F" : "\uE767", "sound", false, null);
@@ -913,20 +926,21 @@ namespace ClaudeNotifier.Ui {
             int scroll = Scroll;
             Region old = g.Clip;
             g.SetClip(grid, CombineMode.Intersect);
-            int colW = (grid.Width - theme.S(8)) / 2, y = grid.Y - scroll, idx = 0;
+            int colW = (grid.Width - theme.S(8)) / 2, y = grid.Y - scroll, idx = 0, line = 0;
             while (idx < s.Rows.Count) {
                 NotchRow a = s.Rows[idx];
                 if (FullWidth(a)) {
                     int fh = RowHeight(a, grid.Width);
-                    PaintRow(g, a, new Rectangle(grid.X, y, grid.Width, fh), grid);
-                    y += fh + theme.S(8); idx++; continue;
+                    PaintEntering(g, new Rectangle(grid.X, y, grid.Width, fh), line * 2, delegate (Rectangle rr) { PaintRow(g, a, rr, grid); });
+                    y += fh + theme.S(8); idx++; line++; continue;
                 }
                 NotchRow b = idx + 1 < s.Rows.Count && !FullWidth(s.Rows[idx + 1]) ? s.Rows[idx + 1] : null;
                 int rh = RowHeight(a, colW);
                 if (b != null) rh = Math.Max(rh, RowHeight(b, colW));
-                PaintRow(g, a, new Rectangle(grid.X, y, colW, rh), grid);
-                if (b != null) PaintRow(g, b, new Rectangle(grid.X + colW + theme.S(8), y, colW, rh), grid);
-                y += rh + theme.S(8); idx += b != null ? 2 : 1;
+                // Каскадом, правая колонка — чуть позже левой.
+                PaintEntering(g, new Rectangle(grid.X, y, colW, rh), line * 2, delegate (Rectangle rr) { PaintRow(g, a, rr, grid); });
+                if (b != null) PaintEntering(g, new Rectangle(grid.X + colW + theme.S(8), y, colW, rh), line * 2 + 1, delegate (Rectangle rr) { PaintRow(g, b, rr, grid); });
+                y += rh + theme.S(8); idx += b != null ? 2 : 1; line++;
             }
             g.Clip = old; old.Dispose();   // g.Clip отдаёт копию — без Dispose регион GDI+ копится на каждом кадре
             if (contentHeight > grid.Height + theme.S(3) && !Resizing) {   // запас: округление в 1–2 px не включает полосу
@@ -1232,10 +1246,11 @@ namespace ClaudeNotifier.Ui {
             g.SetClip(area, CombineMode.Intersect);   // сужаем, а не заменяем: при сворачивании строки режутся формой шторки
             int y = area.Y - scroll;
             if (rows.Length == 0) TextRenderer.DrawText(g, "Загружаю…", fBody, area, theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            int vi = 0;
             foreach (NotchRow row in rows) {
                 int h = RowHeight(row, area.Width);
                 Rectangle r = new Rectangle(area.X, y, area.Width, h);
-                if (r.Bottom >= area.Y && r.Top <= area.Bottom) PaintRow(g, row, r, area);
+                if (r.Bottom >= area.Y && r.Top <= area.Bottom) { NotchRow cur = row; PaintEntering(g, r, vi++, delegate (Rectangle rr) { PaintRow(g, cur, rr, area); }); }   // въезжают каскадом
                 y += h + (row.Kind == "header" ? 0 : theme.S(6));
             }
             g.Clip = old; old.Dispose();   // g.Clip отдаёт копию — без Dispose регион GDI+ копится на каждом кадре
@@ -1264,6 +1279,7 @@ namespace ClaudeNotifier.Ui {
             string hitId = row.Kind == "switch" || row.Kind == "choice" ? "set:" + row.Key : (row.Kind == "button" || row.Kind == "link" ? "row:" + row.Key : null);
             bool hot = hitId != null && hover == hitId;
             Draw.Fill(g, r, theme.S(14), Draw.Mix(Draw.Mix(Pal(0x161618), Pal(0x222225), Hot(hitId)), Pal(0x111113), Press(hitId)));
+            PaintRipple(g, hitId, r, theme.S(14));
             if (row.Kind == "chart") { PaintChart(g, row, r); return; }
             int pad = theme.S(14), rightW = 0;
             // Правая часть: тумблер, выбор, кнопка, значение или действия устройства.
@@ -1349,7 +1365,7 @@ namespace ClaudeNotifier.Ui {
             for (int i = 0; i < n; i++) {
                 float cx = r.X + pad + slot * i + slot / 2;
                 float h = max > 0 ? (float)((bottom - top) * row.Values[i] / max) : 0;
-                h = Math.Max(row.Values[i] > 0 ? theme.S(4) : theme.S(2), h);
+                h = Math.Max(row.Values[i] > 0 ? theme.S(4) : theme.S(2), h) * BarGrow(i);   // вырастают по очереди
                 bool hi = i == row.Highlight;
                 Draw.Fill(g, new RectangleF(cx - bw / 2, bottom - h, bw, h), theme.S(5), hi ? theme.Accent : Pal(0x3A3A3C));
                 if (i < row.ValueLabels.Length && row.Values[i] > 0)
@@ -1367,7 +1383,7 @@ namespace ClaudeNotifier.Ui {
         protected override void OnMouseDown(MouseEventArgs e) {
             base.OnMouseDown(e);
             string h0 = HitAt(e.Location);
-            if (e.Button == MouseButtons.Left && h0 != "mascot") { pressed = h0; WakeUi(); Invalidate(); }
+            if (e.Button == MouseButtons.Left && h0 != "mascot") { pressed = h0; AddRipple(h0, e.Location); WakeUi(); Invalidate(); }
             ChipMouseDown(e, h0);
             PlayMouseDown(e, h0);
         }
@@ -1419,7 +1435,7 @@ namespace ClaudeNotifier.Ui {
             string id = sel != null ? sel.Id : "";
             EventHandler<NotchEventArgs> h = Command;
             if (hit.StartsWith("section:")) {
-                int si; if (int.TryParse(hit.Substring(8), out si)) { if (si != SettingsSection) SnapPage(); SettingsSection = si; ResetScroll("settings"); Invalidate(); }
+                int si; if (int.TryParse(hit.Substring(8), out si)) { if (si != SettingsSection) { SnapPage(); MarkPageShown(false); } SettingsSection = si; ResetScroll("settings"); Invalidate(); }
                 return;
             }
             if (hit.StartsWith("page:")) {
@@ -1678,6 +1694,7 @@ namespace ClaudeNotifier.Ui {
             if (expanded) RaiseToTop();
             // Клавиатура: раскрыли — шторка принимает клавиши; свернули — фокус прежнему окну.
             if (expanded && changed && keyboard) TakeKeyboard();
+            if (expanded && changed) View.MarkPageShown(true);   // раскрыли: строки каскадом, лимиты наполняются
             if (!expanded) {
                 ReleaseKeyboard(); View.EndTyping();
                 if (View.UpdPhase == "done" || View.UpdPhase == "error") View.UpdPhase = "";   // сценка обновления досмотрена
