@@ -85,8 +85,13 @@ namespace ClaudeNotifier.Ui {
         float Hot(string id) { return id == null ? 0f : Anim("h:" + id, hover == id ? 1f : 0f, 22f); }
         float Press(string id) { return id == null ? 0f : Anim("p:" + id, pressed != null && pressed == id && hover == id ? 1f : 0f, pressed == id ? 45f : 14f); }
 
+        // Отрисовка просит следующий кадр (сценка обновления, каскад строк, пружины, волны): без этого таймер
+        // перерисовывал бы шторку только при движении значений Anim — и сценка шла бы рывками.
+        bool uiWantFrame;
+
         void WakeUi() {
             uiBusy = true;
+            uiWantFrame = true;
             if (!anim.Enabled && Visible) anim.Start();
             if (anim.Interval > 16) anim.Interval = 16;
         }
@@ -96,7 +101,8 @@ namespace ClaudeNotifier.Ui {
             DateTime now = DateTime.UtcNow;
             float dt = (float)Math.Max(0, Math.Min(0.1, (now - uiClock).TotalSeconds));
             uiClock = now;
-            bool busy = false;
+            bool busy = uiWantFrame;   // прошлый кадр попросил следующий
+            uiWantFrame = false;
             List<string> stale = null;
             foreach (KeyValuePair<string, AnimValue> kv in anims) {
                 AnimValue a = kv.Value;

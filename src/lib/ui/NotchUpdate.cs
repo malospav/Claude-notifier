@@ -21,7 +21,7 @@ namespace ClaudeNotifier.Ui {
         public static double UpdAutoCloseSeconds = 6.5;
         DateTime updPhaseAt = DateTime.UtcNow, updBorn = DateTime.UtcNow, updClock = DateTime.UtcNow;
         string updLast = "download", updPrevText = "";
-        double updPos, updPop, updPopVel, updShake, updLid, updLidVel, updTip;
+        double updPos, updVel, updPop, updPopVel, updShake, updLid, updLidVel, updTip;
         bool updClosed, updConfettiPending;
         readonly List<float[]> updConfetti = new List<float[]>();   // x, y, vx, vy, угол, вращение, жизнь, цвет
         readonly Random updRnd = new Random(11);
@@ -35,7 +35,7 @@ namespace ClaudeNotifier.Ui {
             phase = phase ?? "";
             if (phase != UpdPhase) {
                 if (UpdPhase.Length == 0) {
-                    updBorn = DateTime.UtcNow; updPos = phase == "done" ? 0.9 : 0; updTip = 0; updLid = 0; updLidVel = 0; updClosed = false; updConfetti.Clear();
+                    updBorn = DateTime.UtcNow; updPos = phase == "done" ? 0.9 : 0; updVel = 0; updTip = 0; updLid = 0; updLidVel = 0; updClosed = false; updConfetti.Clear();
                 }
                 updPrevText = UpdText(UpdPhase, UpdDetail);
                 if (phase != "error" && phase != "done" && phase.Length > 0) updLast = phase;
@@ -60,6 +60,8 @@ namespace ClaudeNotifier.Ui {
                 default: return "";
             }
         }
+
+        int UpdLabelW(string s) { return TextRenderer.MeasureText(s, fSmall, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width; }
 
         static int UpdStep(string phase) { switch (phase) { case "download": case "verify": case "extract": return 0; case "install": return 1; default: return 2; } }
 
@@ -93,7 +95,14 @@ namespace ClaudeNotifier.Ui {
             float dt = (float)Math.Max(0.001, Math.Min(0.05, (now - updClock).TotalSeconds)); updClock = now;
             float k = dt * 60f;
             double since = (now - updPhaseAt).TotalSeconds;
-            if (UpdPhase != "error") updPos += (UpdJourney() - updPos) * Math.Min(1, (UpdPhase == "done" ? 0.12 : 0.06) * k);   // ошибка — коробка остаётся, где упала
+            // Коробка едет за ходом обновления на критически демпфированной пружине: без ступенек от редких данных
+            // и без рывка при смене шага. Ошибка — остаётся, где упала.
+            if (UpdPhase != "error") {
+                double w = UpdPhase == "done" ? 7 : 3.2, target = UpdJourney();
+                int n = Math.Max(1, (int)Math.Ceiling(dt / 0.004)); double h = dt / n;
+                for (int i = 0; i < n; i++) { double acc = w * w * (target - updPos) - 2 * w * updVel; updVel += acc * h; updPos += updVel * h; }
+                if (updVel < 0 && UpdPhase != "done") updVel *= 0.5;   // назад не катится
+            } else updVel = 0;
             int steps = (int)Math.Max(1, Math.Round(k));
             bool fly = UpdPhase == "done";
             for (int i = 0; i < steps; i++) {
@@ -135,6 +144,19 @@ namespace ClaudeNotifier.Ui {
             return "flame";
         }
 
+        // Силуэт сфинкса — рисуется раз на размер (каждый кадр заново — лишняя работа и рывки).
+        static readonly Dictionary<int, Bitmap> updGlyphs = new Dictionary<int, Bitmap>();
+        static Bitmap UpdGlyph(int size) {
+            size = Math.Max(4, Math.Min(256, (size + 1) / 2 * 2));   // размеры с шагом 2 px — пружина значка не плодит картинок
+            Bitmap b;
+            lock (updGlyphs) {
+                if (!updGlyphs.TryGetValue(size, out b)) {
+                    if (updGlyphs.Count > 40) { foreach (Bitmap x in updGlyphs.Values) x.Dispose(); updGlyphs.Clear(); }
+                    b = TrayDot.Glyph(size, Color.White); updGlyphs[size] = b;
+                }
+            }
+            return b;
+        }
         // Плитка приложения: сине-фиолетовый градиент, белый силуэт сфинкса, бегущий блик.
         static void PaintAppTile(Graphics g, RectangleF tile, float t) {
             using (GraphicsPath p = UpdRound(tile, tile.Width * 0.26f))
@@ -149,7 +171,7 @@ namespace ClaudeNotifier.Ui {
                 }
             }
             int gs = Math.Max(4, (int)(tile.Width * 0.66f));
-            using (Bitmap glyph = TrayDot.Glyph(gs, Color.White)) g.DrawImage(glyph, tile.X + (tile.Width - gs) / 2f, tile.Y + (tile.Height - gs) / 2f + tile.Height * 0.02f, gs, gs);
+            g.DrawImage(UpdGlyph(gs), tile.X + (tile.Width - gs) / 2f, tile.Y + (tile.Height - gs) / 2f + tile.Height * 0.02f, gs, gs);
         }
 
         // Посылка: коробка цветов приложения с лентой и бантом; lid — крышка над коробкой (<0 — поднята).
@@ -204,7 +226,7 @@ namespace ClaudeNotifier.Ui {
             g.Restore(hs);
             int tx = (int)(tile.Right + theme.S(14));
             int stepsW = 0;
-            for (int i = 0; i < UpdSteps.Length; i++) stepsW += theme.S(9) + theme.S(6) + TextRenderer.MeasureText(UpdSteps[i], fSmall).Width + (i < UpdSteps.Length - 1 ? theme.S(16) : 0);
+            for (int i = 0; i < UpdSteps.Length; i++) stepsW += theme.S(9) + theme.S(6) + UpdLabelW(UpdSteps[i]) + (i < UpdSteps.Length - 1 ? theme.S(16) : 0);
             int tw = area.Right - pad - stepsW - theme.S(24) - tx;
             TextRenderer.DrawText(g, done ? "Claude Notifier обновлён" : err ? "Обновление не удалось" : "Обновление Claude Notifier", fTitle,
                 new Rectangle(tx, (int)tile.Y - theme.S(2), tw, theme.S(24)), Fg, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
@@ -215,7 +237,7 @@ namespace ClaudeNotifier.Ui {
                 TextRenderer.DrawText(g, updPrevText, fBody, new Rectangle(tx, (int)(ty - theme.S(8) * ch), tw, theme.S(22)), Draw.Mix(bg, Pal(0xAEAEB2), (float)(1 - ch)), TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             TextRenderer.DrawText(g, UpdText(phase, UpdDetail), fBody, new Rectangle(tx, (int)(ty + theme.S(8) * (1 - ch)), tw, theme.S(22)), Draw.Mix(bg, textCol, (float)ch), TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             int cur = done ? 3 : UpdStep(err ? updLast : phase);
-            float sx = area.Right - pad - stepsW, dd = theme.S(9), sy = tile.Y + tsz / 2 - dd / 2f;
+            float sx = area.Right - pad - theme.S(6) - stepsW, dd = theme.S(9), sy = tile.Y + tsz / 2 - dd / 2f;
             for (int i = 0; i < UpdSteps.Length; i++) {
                 bool doneStep = i < cur, now = i == cur;
                 Color dc = doneStep ? Color.FromArgb(48, 209, 88) : now ? acc : Pal(0x48484A);
@@ -224,9 +246,10 @@ namespace ClaudeNotifier.Ui {
                     using (SolidBrush halo = new SolidBrush(Color.FromArgb((int)(80 * pulse), acc))) g.FillEllipse(halo, sx - theme.S(4), sy - theme.S(4), dd + theme.S(8), dd + theme.S(8));
                 }
                 using (SolidBrush b = new SolidBrush(dc)) g.FillEllipse(b, sx, sy, dd, dd);
-                Size ls = TextRenderer.MeasureText(UpdSteps[i], fSmall);
-                TextRenderer.DrawText(g, UpdSteps[i], fSmall, new Point((int)(sx + dd + theme.S(6)), (int)(sy + dd / 2 - ls.Height / 2f)), doneStep || now ? Pal(0xE5E5EA) : Pal(0x6E6E73), TextFormatFlags.NoPrefix);
-                sx += dd + theme.S(6) + ls.Width + theme.S(16);
+                int lw = UpdLabelW(UpdSteps[i]), lh = theme.S(18);
+                TextRenderer.DrawText(g, UpdSteps[i], fSmall, new Rectangle((int)(sx + dd + theme.S(6)), (int)(sy + dd / 2 - lh / 2f), lw + theme.S(4), lh), doneStep || now ? Pal(0xE5E5EA) : Pal(0x6E6E73),
+                    TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoClipping);
+                sx += dd + theme.S(6) + lw + theme.S(16);
             }
 
             // --- Сцена: дорожка, посылка, маскоты ---
@@ -287,8 +310,8 @@ namespace ClaudeNotifier.Ui {
             // Посылка — где она на дорожке.
             float gsz = theme.S(64);
             bool pushing = phase == "download" || phase == "verify" || phase == "extract" || phase == "install" || phase == "restart";
-            float wobble = pushing ? (float)Math.Sin(t * 9) * 2.5f : 0f;
-            float hop = phase == "download" ? (float)Math.Abs(Math.Sin(t * 9)) * theme.S(2) : 0f;
+            float wobble = pushing ? (float)Math.Sin(t * 6.5) * 1.8f : 0f;   // плавное покачивание, без рывков
+            float hop = phase == "download" ? (float)(1 - Math.Cos(t * 13)) * 0.5f * theme.S(2) : 0f;   // мягкий подскок (без излома внизу)
             float gcx = Math.Max(x0 + gsz * 0.5f, Math.Min(bx, x1 - gsz * 0.6f));
             float gBottom = groundY - hop;
             PaintPusher(g, area, phase, gcx, gsz, groundY, trackH, t, since);
@@ -370,12 +393,12 @@ namespace ClaudeNotifier.Ui {
             CatMood mm = new CatMood { Play = true, HasLook = true, LookX = 1f, LookY = 0f, LookW = 1f, Friend = (float)Affection };
             string mstate = "waiting";
             if (phase == "download") {
-                float step = (float)Math.Abs(Math.Sin(t * 9));
+                float step = (float)(1 - Math.Cos(t * 13)) * 0.5f;   // шаг — гладкая волна
                 mm.Lean = 6f; mm.Lift = 0.03f * step; mm.SquashY = 1f - 0.04f * (1 - step); mm.Shear = 0.04f;
             } else if (phase == "verify") { mm.Brow = 0.6f; mm.Lean = 3f; mm.LookY = 0.3f; mstate = "waiting"; }
             else if (phase == "extract") { mm.Brow = (float)(0.5 + 0.5 * Math.Sin(t * 4)); mm.LookY = 0.5f; mm.AhaAge = (float)(since % 1.8); }
             else if (phase == "install" || phase == "restart") {
-                float knock = (float)Math.Max(0, Math.Sin(t * 10));
+                float knock = (float)Math.Pow(Math.Max(0, Math.Sin(t * 8)), 2);
                 mm.Lean = 6f + 6f * knock; mm.SquashY = 1f - 0.06f * knock;
             } else if (done) { mm.React = "joy"; mm.ReactAge = (float)(since % 2.5); mstate = "waiting"; mm.LookX = 0.6f; mm.LookY = 0.6f; }
             else if (err) { mm.React = "panic"; mm.ReactAge = (float)Math.Min(2.4, since % 3.2); mstate = "error"; }
