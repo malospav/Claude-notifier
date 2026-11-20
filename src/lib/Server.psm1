@@ -201,6 +201,8 @@ function ConvertFrom-NotifierHttpContext {
         Body     = $body
         TooLarge = $tooLarge
         Remote   = [string]$r.RemoteEndPoint.Address
+        Secure   = [bool]$r.IsSecureConnection
+        Host     = [string]$r.Url.Host
     }
 }
 
@@ -438,6 +440,14 @@ function Invoke-NotifierHttpRequest {
         return (New-HttpResponse 200 $script)
     }
 
+    # Шифрование настроено — браузер (страница и вход) только по https: иначе ключ входа шёл бы по сети открытым.
+    if ($Ctx['Tls'] -and $Request['Host'] -and -not [bool]$Request['Secure'] -and ($path -eq '/' -or $path -eq '/login') -and
+        -not ([string]$Request.Remote -eq '127.0.0.1' -or [string]$Request.Remote -eq '::1')) {
+        $resp = New-HttpResponse 302 ''
+        [void]$resp.Headers.Add(@('Location', "https://$([string]$Request.Host):$($Ctx.Tls.Port)/"))
+        return $resp
+    }
+
     if ($method -eq 'POST' -and $path -eq '/login') {
         $result = Test-NotifierPairingPin -Pairing $Ctx.Pairing -Pin (Get-FormValue $Request.Body 'pin') -Now $Now -Remote ([string]$Request.Remote)
         switch ($result) {
@@ -448,7 +458,7 @@ function Invoke-NotifierHttpRequest {
                 $Ctx.Paired = $added.Device
                 Write-NotifierLog -Level INFO -Message "network: подключено устройство $($added.Device.id) ($name)" -DataRoot $Ctx.DataRoot
                 $resp = New-HttpResponse 303 ''
-                [void]$resp.Headers.Add(@('Set-Cookie', "$($script:CookieName)=$($added.Token); Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"))
+                [void]$resp.Headers.Add(@('Set-Cookie', "$($script:CookieName)=$($added.Token); Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax$(if ([bool]$Request['Secure']) { '; Secure' })"))
                 [void]$resp.Headers.Add(@('Location', '/'))
                 return $resp
             }
@@ -518,6 +528,8 @@ function Invoke-NotifierHttpRequest {
         return (New-JsonResponse 200 @{ ok = $true })
     }
     if ($method -eq 'POST' -and $path -eq '/api/install-link') {
+        # Просроченные коды — убрать (иначе копились бы, пока работает трей).
+        foreach ($k in @($Ctx.InstallCodes.Keys)) { if ($Now -gt $Ctx.InstallCodes[$k].Expires) { $Ctx.InstallCodes.Remove($k) } }
         $code = New-NotifierToken
         $Ctx.InstallCodes[$code] = @{ DeviceId = [string]$device.id; Expires = $Now.AddMinutes($script:InstallCodeMinutes) }
         $command = "curl -fsSL $(Get-NotifierServerBaseUrl $Ctx)/install/$code | sh"

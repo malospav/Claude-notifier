@@ -86,41 +86,71 @@ namespace ClaudeNotifier.Ui {
             }
         }
 
-        // Отчёт за неделю: слева маскот вручает листок (листок вылетает к вам и покачивается), справа — итоги.
+        // Отчёт за неделю: слева маскот по центру, листок отчёта вылетает у него из лап, раскрываясь на пружинке,
+        // и парит над головой, мягко покачиваясь; маскот радуется, смотрит на листок, иногда машет. Пока страница
+        // открыта, кадры идут непрерывно (кадр ~4 мс) — без замираний и рывков.
         void PaintReport(Graphics g, Rectangle area) {
             int lw = Math.Min(theme.S(250), area.Width / 3);
             Rectangle left = new Rectangle(area.X, area.Y, lw, area.Height), right = new Rectangle(area.X + lw + theme.S(14), area.Y, area.Width - lw - theme.S(14), area.Height);
             Draw.Fill(g, left, theme.S(18), Pal(0x161618));
-            double t = PageShownSeconds;
-            if (Animate && t < 30) WakeUi();
-            float msz = Math.Min(theme.S(120), left.Height - theme.S(70));
-            RectangleF mr = new RectangleF(left.X + theme.S(18), left.Bottom - msz - theme.S(34), msz, msz);
-            CatMood md = new CatMood { Play = true, Friend = (float)Affection, Level = MascotLevel, HasLook = true, LookX = 0.8f, LookY = 0.2f, LookW = 1f };
+            double t = Animate ? PageShownSeconds : 10;
+            float tt = Animate ? T : 0f;
+            if (Animate) WakeUi();
+            float cx = left.X + left.Width / 2f;
+            float msz = Math.Max(theme.S(70), Math.Min(theme.S(124), left.Height - theme.S(150)));
+            float mBottom = left.Bottom - theme.S(40);
+            RectangleF mr = new RectangleF(cx - msz / 2, mBottom - msz, msz, msz);
+            // Мягкое сияние за маскотом.
+            using (GraphicsPath gp = new GraphicsPath()) {
+                RectangleF glow = RectangleF.Inflate(mr, msz * 0.35f, msz * 0.2f);
+                gp.AddEllipse(glow);
+                using (PathGradientBrush pg = new PathGradientBrush(gp)) {
+                    pg.CenterColor = Color.FromArgb(46, theme.Accent); pg.SurroundColors = new Color[] { Color.FromArgb(0, theme.Accent) };
+                    g.FillPath(pg, gp);
+                }
+            }
+            // Листок: из лап (у правого плеча) — вверх, над головой; масштаб 0.35 → 1 с перелётом.
+            float k = (float)Math.Max(0, Math.Min(1, (t - 0.25) / 0.75));
+            float e = EaseBack(k);
+            float pw = theme.S(74), ph = theme.S(92);
+            PointF from = new PointF(mr.Right - msz * 0.18f, mr.Y + msz * 0.55f);
+            PointF to = new PointF(cx + theme.S(10), Math.Max(left.Y + theme.S(12) + ph / 2, mr.Y + msz * 0.1f - ph / 2));
+            float bob = (float)Math.Sin(tt * 1.6) * theme.S(3) * k;
+            float px = from.X + (to.X - from.X) * e, py = from.Y + (to.Y - from.Y) * e + bob;
+            float sc = 0.35f + 0.65f * e, rot = -18f + 24f * e + (float)Math.Sin(tt * 1.3) * 2f * k;
+            // Маскот: первые секунды радуется, потом смотрит на листок и иногда машет.
+            CatMood md = new CatMood { Play = true, Friend = (float)Affection, Level = MascotLevel, HasLook = true, LookW = 1f };
+            md.LookX = Math.Max(-1f, Math.Min(1f, (px - cx) / theme.S(60))); md.LookY = 0.7f;
             if (t < 2.5) { md.React = "joy"; md.ReactAge = (float)t; }
-            else { double wp = (t - 2.5) % 5.0; if (wp < 1.6) md.Wave = (float)Math.Sin(Math.PI * wp / 1.6); }
-            try { Mascot.PaintKind(g, mr, Mascot.For(null), "waiting", T, 5, Animate, md); } catch { }
-            // Листок: вылетает из лап на пружинке, потом покачивается.
-            float k = Animate ? (float)Math.Max(0, Math.Min(1, (t - 0.3) / 0.7)) : 1f;
-            float e = 1 + 2.70158f * (float)Math.Pow(k - 1, 3) + 1.70158f * (float)Math.Pow(k - 1, 2);
-            float pw = theme.S(78), ph = theme.S(96);
-            float px = mr.Right - pw * 0.35f + (left.Right - theme.S(14) - pw - (mr.Right - pw * 0.35f)) * e;
-            float py = mr.Y + theme.S(10) - theme.S(26) * e + (float)Math.Sin(T * 2.2) * theme.S(3) * k;
-            GraphicsState st = g.Save();
-            g.TranslateTransform(px + pw / 2, py + ph / 2); g.RotateTransform(-8f + 14f * e + (float)Math.Sin(T * 1.7) * 2f * k); g.TranslateTransform(-pw / 2, -ph / 2);
+            else { double wp = (t - 2.5) % 6.0; if (wp < 1.6) md.Wave = (float)Math.Sin(Math.PI * wp / 1.6); }
+            try { Mascot.PaintKind(g, mr, Mascot.For(null), "waiting", tt, 5, Animate, md); } catch { }
             if (k > 0.02f) {
-                Draw.Fill(g, new RectangleF(theme.S(3), theme.S(4), pw, ph), theme.S(8), Color.FromArgb(70, 0, 0, 0));
+                GraphicsState st = g.Save();
+                g.TranslateTransform(px, py); g.RotateTransform(rot); g.ScaleTransform(sc, sc); g.TranslateTransform(-pw / 2, -ph / 2);
+                Draw.Fill(g, new RectangleF(theme.S(3), theme.S(5), pw, ph), theme.S(8), Color.FromArgb(60, 0, 0, 0));
                 Draw.Fill(g, new RectangleF(0, 0, pw, ph), theme.S(8), Color.FromArgb(250, 248, 244));
                 using (SolidBrush acc = new SolidBrush(theme.Accent)) g.FillRectangle(acc, theme.S(10), theme.S(12), pw * 0.5f, theme.S(5));
                 using (SolidBrush line = new SolidBrush(Color.FromArgb(200, 210, 210, 216)))
-                    for (int i = 0; i < 5; i++) g.FillRectangle(line, theme.S(10), theme.S(26) + i * theme.S(11), (pw - theme.S(20)) * (i % 2 == 0 ? 1f : 0.7f), theme.S(4));
-                // Столбики-график внизу листка.
+                    for (int i = 0; i < 4; i++) g.FillRectangle(line, theme.S(10), theme.S(26) + i * theme.S(10), (pw - theme.S(20)) * (i % 2 == 0 ? 1f : 0.7f), theme.S(4));
                 Color[] cols = { Color.FromArgb(48, 209, 88), Color.FromArgb(10, 132, 255), Color.FromArgb(255, 179, 64) };
                 for (int i = 0; i < 3; i++) {
-                    float bh = theme.S(8) + theme.S(6) * i;
-                    using (SolidBrush b = new SolidBrush(cols[i])) g.FillRectangle(b, pw - theme.S(36) + i * theme.S(9), ph - theme.S(10) - bh, theme.S(6), bh);
+                    // Столбики листка подрастают, когда он раскрылся.
+                    float grow = (float)Math.Max(0, Math.Min(1, (t - 0.9 - i * 0.12) / 0.4));
+                    float bh = (theme.S(8) + theme.S(6) * i) * EaseBack(grow);
+                    using (SolidBrush b = new SolidBrush(cols[i])) g.FillRectangle(b, pw - theme.S(34) + i * theme.S(9), ph - theme.S(10) - bh, theme.S(6), bh);
+                }
+                g.Restore(st);
+                // Раскрылся — звёздочки вокруг листка.
+                double sp = t - 1.0;
+                if (sp > 0 && sp < 0.9) {
+                    for (int i = 0; i < 6; i++) {
+                        double a = i * Math.PI / 3 + 0.4;
+                        float r = (float)(ph * 0.45 + sp * theme.S(36));
+                        using (SolidBrush sb = new SolidBrush(Color.FromArgb((int)(230 * (1 - sp / 0.9)), 255, 214, 10)))
+                            PaintStar(g, px + (float)Math.Cos(a) * r, py + (float)Math.Sin(a) * r * 0.8f, theme.S(5) * (float)(1 - sp / 0.9), sb);
+                    }
                 }
             }
-            g.Restore(st);
             TextRenderer.DrawText(g, "Отчёт за неделю", fBold, new Rectangle(left.X, left.Bottom - theme.S(30), left.Width, theme.S(22)), Fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
             PaintRows(g, right);
         }

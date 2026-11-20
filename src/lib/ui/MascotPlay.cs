@@ -76,6 +76,9 @@ namespace ClaudeNotifier.Ui {
                 if (m.Wave > 0.02f) Wave(g, new PointF(h.X + h.W + h.U * 0.05f, h.Face + h.U * 0.16f), h.U, m.Wave, t, PawColor(kind));
                 if (m.Reacting) Reaction(g, m.React, m.ReactAge, t, h);
                 if (m.IdlePlay >= 0) Ball(g, m.IdlePlay, t, h);
+                if (m.Dizzy >= 0 && m.Dizzy < 2.6f) DizzyStars(g, m.Dizzy, t, h);
+                if (m.OkAge >= 0 && m.OkAge < 1.3f) OkCheck(g, m.OkAge, h);
+                if (m.OpenAge >= 0.45f && m.OpenAge < 1.75f) OpenHeart(g, m.OpenAge - 0.45f, t, h);
             } finally { g.Restore(gs); g.SmoothingMode = sm; }
         }
 
@@ -258,6 +261,39 @@ namespace ClaudeNotifier.Ui {
                 g.FillPie(w, -d / 2, -d / 2, d, d, 180, 60);
             }
             g.Restore(st);
+        }
+
+        // Голова кружится: три звёздочки летают по эллипсу вокруг макушки.
+        static void DizzyStars(Graphics g, float age, float t, Head h) {
+            float u = h.U, fade = Math.Min(1f, Math.Min(age / 0.2f, (2.6f - age) / 0.5f));
+            float rx = Math.Max(h.W, u * 0.2f) * 1.2f, ry = u * 0.08f, cy = h.Top - u * 0.04f;
+            for (int i = 0; i < 3; i++) {
+                double a = t * 7 + i * Math.PI * 2 / 3;
+                float x = h.X + (float)Math.Cos(a) * rx, y = cy + (float)Math.Sin(a) * ry, s = u * (0.06f + 0.015f * (float)Math.Sin(a));
+                PointF[] p = new PointF[10];
+                for (int k = 0; k < 10; k++) { double b = k * Math.PI / 5 - Math.PI / 2; float rr = k % 2 == 0 ? s : s * 0.42f; p[k] = new PointF(x + (float)Math.Cos(b) * rr, y + (float)Math.Sin(b) * rr); }
+                using (SolidBrush br = new SolidBrush(Color.FromArgb(A(255 * fade * (0.6f + 0.4f * (float)Math.Sin(a))), 255, 214, 10))) g.FillPolygon(br, p);
+            }
+        }
+
+        // Раскрыли шторку — над головой всплывает сердечко: появляется с пружинкой, плывёт вверх, покачиваясь, и тает.
+        static void OpenHeart(Graphics g, float a, float t, Head h) {
+            float u = h.U, k = MascotMotion.EaseOutBack(Math.Min(1f, a / 0.3f)), fade = Math.Min(1f, (1.3f - a) / 0.45f);
+            if (fade <= 0) return;
+            float x = h.X + h.W * 0.85f + (float)Math.Sin(a * 5) * u * 0.03f, y = h.Top - u * (0.02f + 0.22f * a);
+            MascotSig.Heart(g, new PointF(x, y), u * 0.085f * k, Color.FromArgb(A(235 * fade), 255, 105, 140));
+        }
+
+        // Одобрил: над головой выскакивает зелёный кружок с галочкой и тает.
+        static void OkCheck(Graphics g, float age, Head h) {
+            float u = h.U, k = MascotMotion.EaseOutBack(Math.Min(1f, age / 0.35f)), fade = Math.Min(1f, (1.3f - age) / 0.35f);
+            float d = u * 0.2f * k, x = h.X + h.W * 0.9f, y = h.Top - u * (0.08f + 0.1f * Math.Min(1f, age / 0.5f));
+            if (d < 1) return;
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(A(240 * fade), 48, 209, 88))) g.FillEllipse(b, x - d / 2, y - d / 2, d, d);
+            using (Pen p = new Pen(Color.FromArgb(A(255 * fade), 255, 255, 255), Math.Max(1f, d * 0.12f))) {
+                p.StartCap = p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+                g.DrawLines(p, new PointF[] { new PointF(x - d * 0.24f, y + d * 0.02f), new PointF(x - d * 0.06f, y + d * 0.2f), new PointF(x + d * 0.26f, y - d * 0.18f) });
+            }
         }
 
         // Облачко пыли у ног при приземлении: два клубка расходятся в стороны и тают.

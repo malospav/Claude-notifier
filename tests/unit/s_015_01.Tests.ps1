@@ -88,7 +88,7 @@ Describe 's_015_01 · шторка вверху экрана' {
         $items = Get-NotifierNotchItems -Sessions @((New-S 'w' 'working' 'api'), (New-S 'p' 'permission'))
         $items.Count | Should -Be 2
         $items[0].Id | Should -Be 'p'   # ждущие решения — первыми
-        $items[0].Actions -join ';' | Should -Be 'allow|Разрешить|primary;allow30|На 30 мин|secondary;always|Всегда|secondary;deny|Запретить|destructive'
+        $items[0].Actions -join ';' | Should -Be 'allow|Разрешить|primary;always|Всегда|secondary;deny|Запретить|destructive'   # без папки проекта у запроса — без «На 30 мин»
         $items[0].RequestTitle | Should -Be 'Bash: npm i'
         $items[1].Actions.Length | Should -Be 0   # «Изменённые файлы» и «Папка проекта» — не в шторке
         # Сеансы других устройств — группой после сеансов этого ПК (у группы — имя устройства)

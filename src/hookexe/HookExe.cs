@@ -49,7 +49,7 @@ namespace ClaudeNotifier.Hook {
         public static bool TrayRunning() {
             // Есть ли канал трея: WaitNamedPipe сразу отвечает «нет такого» (ERROR_FILE_NOT_FOUND), если трей не запущен.
             try {
-                string name = @"\.\pipe\claude-notifier-" + (Environment.GetEnvironmentVariable("USERNAME") ?? Environment.UserName);
+                string name = @"\\.\pipe\claude-notifier-" + (Environment.GetEnvironmentVariable("USERNAME") ?? Environment.UserName);
                 bool ok = WaitNamedPipe(name, 1);
                 return ok || System.Runtime.InteropServices.Marshal.GetLastWin32Error() != 2;
             } catch { return true; }

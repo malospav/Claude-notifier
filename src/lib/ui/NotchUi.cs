@@ -1,4 +1,4 @@
-﻿// claude-notifier: отклик интерфейса шторки — всё плавно и сразу.
+// claude-notifier: отклик интерфейса шторки — всё плавно и сразу.
 //  • Наведение — подсветка нарастает за ~0,1 с, а не щёлкает; нажатие — кнопка и строка чуть «проседают».
 //  • Тумблер — ползунок едет, цвет перетекает; полоски лимитов — подъезжают к новому значению.
 //  • Прокрутка колёсиком — плавная; смена страницы и раздела настроек — содержимое въезжает и проявляется,
@@ -198,7 +198,7 @@ namespace ClaudeNotifier.Ui {
             RectangleF r = new RectangleF(br.X + inset, br.Y + inset, br.Width - inset * 2, br.Height - inset * 2);
             Draw.Fill(g, r, r.Height / 2f, fill);
             PaintRipple(g, id, r, r.Height / 2f);   // волна от нажатия (NotchJuice.cs)
-            Color tc = style == "destructive" && !sent ? Pal(0xFF6961) : Fg;
+            Color tc = style == "destructive" && !sent ? Pal(0xFF6961) : style == "primary" ? Color.White : Fg;   // на синем — белый и в светлой теме
             // С галочкой не помещается — одна галочка.
             string label = text;
             if (sent) label = TextRenderer.MeasureText("✓ " + text, fBold).Width <= br.Width - theme.S(8) ? "✓ " + text : "✓";

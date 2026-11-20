@@ -58,6 +58,7 @@ namespace ClaudeNotifier.Ui {
         // Задача готова — joy, ошибка — panic, лимит — nervous. id пустой или неизвестный — главный маскот.
         public void React(string id, string kind) {
             if (kind != "joy" && kind != "panic" && kind != "nervous" && kind != "fireworks" && kind != "tea") return;
+            if (!Animate) return;   // «меньше движения» — без прыжков, тряски и салюта
             string key = "";
             foreach (NotchItem x in items) if (x.Id == id) key = id;
             reactions[key] = new KeyValuePair<string, DateTime>(kind, DateTime.UtcNow);
@@ -156,6 +157,7 @@ namespace ClaudeNotifier.Ui {
             double dust = Since(dustAt);
             if (dust < 0.5) md.Dust = (float)dust;
             md.Sad = Missing && pet < 0.3f && !md.Grumpy;
+            UserMood(md, face);   // привет, головокружение, кивки, встреча, сальто (NotchReact.cs)
             // Любит вас — иногда машет и радуется: чаще, чем крепче дружба (раз в 60 с → раз в 15 с).
             if (Animate && !md.Sad && !md.Grumpy && Affection >= 10 && it != null && (it.State == "waiting" || it.State == "working")) {
                 double period = 60 - 0.45 * Math.Min(100, Affection);
@@ -180,10 +182,11 @@ namespace ClaudeNotifier.Ui {
             string tip = PlayTip(it);
             if (!string.IsNullOrEmpty(tip) && !dragging) { Rectangle tr = hr; tr.Offset(origin); tips.Insert(0, new KeyValuePair<Rectangle, string>(tr, tip)); }
             GraphicsState gs = null;
-            if (tossOff.X != 0 || tossOff.Y != 0 || tossSpin != 0) {
+            float spin = tossSpin + TrickAngle;   // сальто по двойному щелчку
+            if (tossOff.X != 0 || tossOff.Y != 0 || spin != 0) {
                 gs = g.Save();
                 float cx = at.X + at.Width / 2, cy = at.Y + at.Height / 2;
-                g.TranslateTransform(cx, cy); g.RotateTransform(tossSpin); g.TranslateTransform(-cx, -cy);
+                g.TranslateTransform(cx, cy); g.RotateTransform(spin); g.TranslateTransform(-cx, -cy);
             }
             try { DrawMascot(g, at, it, PlayState(it), seed, md, MotionFor(it)); }
             finally { if (gs != null) g.Restore(gs); }
@@ -221,6 +224,8 @@ namespace ClaudeNotifier.Ui {
                 return true;
             }
             if (hit == "mascot") {
+                TrackShake(e.Location);   // трясут курсором — голова кружится
+                if (Dizzy) return false;
                 // Гладят: чем больше водите курсором, тем приятнее.
                 float d = petPrev.IsEmpty ? 0 : (float)Math.Sqrt((e.X - petPrev.X) * (e.X - petPrev.X) + (e.Y - petPrev.Y) * (e.Y - petPrev.Y));
                 petPrev = e.Location;
@@ -294,6 +299,7 @@ namespace ClaudeNotifier.Ui {
                 Invalidate();
                 return;
             }
+            if (MascotDoubleClick()) return;   // двойной щелчок — сальто
             if (Asleep(it) && !Woken) { wakeAt = DateTime.UtcNow; MascotSound.Play("yawn", playKind); }
             else { pokeAt = DateTime.UtcNow; MascotSound.Play("boop", playKind); }
             WakePlay();
@@ -354,7 +360,8 @@ namespace ClaudeNotifier.Ui {
             if (quickId != null && now >= quickUntil) { quickId = null; EventHandler h = CollapsedResize; if (h != null) h(this, EventArgs.Empty); busy = true; }
             if (QuickActive || Since(pokeAt) < 3.4 || Since(wakeAt) < 3.5 || Angry) busy = true;
             foreach (KeyValuePair<string, DateTime> rv in reactions.Values) if (Since(rv.Value) < 2.6) busy = true;
-            if (Missing) busy = true;   // тучка с каплями
+            if (Missing && T % 60 < 6) busy = true;   // тучка с каплями: капает 6 с в минуту, остальное время — неподвижно (не 60 кадров/с сутками)
+            if (ReactTick()) busy = true;   // реакции на вас
             if (busy) { playActive = true; return true; }
             if (playActive) { playActive = false; UpdateTimer(); Invalidate(); }
             return false;
@@ -409,6 +416,7 @@ namespace ClaudeNotifier.Ui {
         void QuickAnswer(string action, Point p) {
             string id = quickId;
             MarkSent(action);
+            Approve();   // решение — маскот кивает
             quickId = null;
             EventHandler h0 = CollapsedResize; if (h0 != null) h0(this, EventArgs.Empty);
             Invalidate();

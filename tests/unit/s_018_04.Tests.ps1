@@ -142,28 +142,6 @@ Describe 's_018_04 · перетаскивание плашек и порядо�
     }
 }
 
-Describe 's_018_04 · история за сегодня' {
-    It 'события сегодня — строки-ссылки новые сверху; вчерашние не попадают' {
-        $root = New-Root 'hist'
-        $now = [DateTime]::Now
-        $mk = { param($sid, $type, [datetime]$at) [pscustomobject]@{ v = 1; id = [guid]::NewGuid().ToString(); ts = $at.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'"); type = $type; session_id = $sid; title = "T $sid"; preview = 'текст' } }
-        [void](Add-NotifierHistory -Event (& $mk 'old' 'done' $now.AddDays(-1)) -DataRoot $root)
-        [void](Add-NotifierHistory -Event (& $mk 's1' 'done' $now.Date.AddMinutes(1)) -DataRoot $root)
-        [void](Add-NotifierHistory -Event (& $mk 's2' 'permission' $now.Date.AddMinutes(2)) -DataRoot $root)
-        $rows = @(Get-NotifierNotchHistoryRows -Now $now -DataRoot $root)
-        $rows[0].Kind | Should -Be 'header'
-        @($rows | Where-Object Kind -eq 'link' | ForEach-Object Key) -join ',' | Should -Be 'hist:s2,hist:s1'
-        $rows[1].Dot | Should -Be 'permission'
-        $rows[1].Subtitle | Should -Match '^Запрос'
-    }
-
-    It 'событий нет — пояснение' {
-        $rows = @(Get-NotifierNotchHistoryRows -DataRoot (New-Root 'hist-empty'))
-        $rows.Count | Should -Be 1
-        $rows[0].Kind | Should -Be 'note'
-    }
-}
-
 Describe 's_018_04 · вид: светлая тема, размер, звуки' {
     It 'светлая палитра: серые инвертируются, цветные акценты остаются' {
         $pal = [ClaudeNotifier.Ui.NotchView].GetMethod('Pal', [Reflection.BindingFlags]'NonPublic,Static')

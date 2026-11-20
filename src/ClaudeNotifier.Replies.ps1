@@ -74,7 +74,7 @@ function Set-NotifierSessionState {
     $cur = @($sessions | Where-Object { [string]$_.session_id -eq $SessionId })[0]
     if ($null -eq $cur) { return $false }
     if ($OnlyFrom -and [string]$cur.state -ne $OnlyFrom) { return $false }
-    $ev = [pscustomobject]@{ type = $State; session_id = $SessionId; ts = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'") }
+    $ev = [pscustomobject]@{ type = $State; session_id = $SessionId; ts = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture) }
     $updated = Update-NotifierSessionList -Sessions $sessions -Event $ev
     Save-NotifierSessions -Sessions $updated -DataRoot $DataRoot
     $script:SessionsDirty = $true
@@ -107,7 +107,7 @@ function Add-NotifierCardRequest {
             default {
                 $acts += 'allow|Разрешить|primary'
                 # «На 30 мин»: такие же запросы в этом проекте полчаса разрешаются сами (Bash — по началу команды, без цепочек).
-                if ($null -ne (Get-NotifierAutoAllowPrefix -ToolName ([string]$req.tool_name) -ToolInput $req.tool_input) -and [string]$Session.project -ne '') { $acts += 'allow30|На 30 мин|secondary' }
+                if ($req.PSObject.Properties['cwd'] -and [string]$req.cwd -ne '' -and $null -ne (Get-NotifierAutoAllowPrefix -ToolName ([string]$req.tool_name) -ToolInput $req.tool_input)) { $acts += 'allow30|На 30 мин|secondary' }
                 if ($req.canAlways) { $acts += 'always|Разрешать всегда|secondary' }
                 $acts += 'deny|Запретить|destructive'
             }
@@ -150,7 +150,7 @@ function Invoke-NotifierCardAction {
         '^allow30$' {
             # Разрешить и полчаса разрешать такие же запросы этого проекта без вопросов.
             $rule = $null
-            if ($req) { $rule = Add-NotifierAutoAllowRule -Project ([string]$session.project) -ToolName ([string]$req.tool_name) -ToolInput $req.tool_input -Minutes 30 -DataRoot $DataRoot }
+            if ($req -and $req.PSObject.Properties['cwd']) { $rule = Add-NotifierAutoAllowRule -Cwd ([string]$req.cwd) -ToolName ([string]$req.tool_name) -ToolInput $req.tool_input -Minutes 30 -DataRoot $DataRoot }
             if ($req -and (Write-NotifierDecision -RequestId $req.id -Behavior allow -DataRoot $DataRoot)) {
                 [void](Set-NotifierSessionState -SessionId $sid -State working -DataRoot $DataRoot)
                 $notice = if ($rule) { "Разрешено — и ещё 30 минут: $($rule.title)" } else { 'Разрешено' }

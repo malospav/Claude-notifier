@@ -399,7 +399,7 @@ Describe 's_012_01 · контекст, подробности, напомина
         $d | Should -Match "\tClaude: Смотрю тесты\."
         $d | Should -Match "\tBash: npm test · 1 мин 35 с"
         $d | Should -Match "\tRead: a\.ps1 · 3 с"
-        Format-NotifierDuration 3900000 | Should -Be '1 ч 5 мин'
+        Format-NotifierDurationMs 3900000 | Should -Be '1 ч 5 мин'   # миллисекунды — своё имя (у Activity — секунды)
     }
 
     It 'клавиша ответов: сочетание, ждущие сеансы (окно впереди — первым), меню шаблонов и отправка' {

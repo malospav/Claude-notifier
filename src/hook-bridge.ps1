@@ -89,11 +89,9 @@ function Invoke-NotifierPermissionHook {
         if ($hook.PSObject.Properties['tool_name']) { $toolName = [string]$hook.tool_name }
         if ($hook.PSObject.Properties['tool_input']) { $toolInput = $hook.tool_input }
         if ($hook.PSObject.Properties['cwd']) { $cwd = [string]$hook.cwd }
-        $proj = ''
-        if ($cwd.TrimEnd('\', '/')) { $proj = @($cwd.TrimEnd('\', '/') -split '[\\/]')[-1] }   # как Get-ProjectName (Event.psm1)
-        $rule = Test-NotifierAutoAllow -Project $proj -ToolName $toolName -ToolInput $toolInput -DataRoot $DataRoot
+        $rule = Test-NotifierAutoAllow -Cwd $cwd -ToolName $toolName -ToolInput $toolInput -DataRoot $DataRoot   # правило — для этой папки проекта
         if ($rule) {
-            Write-NotifierLog -Level INFO -Message "bridge: $toolName разрешён по шаблону «$($rule.title)» ($proj)" -DataRoot $DataRoot
+            Write-NotifierLog -Level INFO -Message "bridge: $toolName разрешён по шаблону «$($rule.title)» ($($rule.project))" -DataRoot $DataRoot
             return (ConvertTo-NotifierDecisionOutput -Request ([pscustomobject]@{ kind = 'tool'; tool_input = $toolInput; suggestions = $null }) -Decision @{ behavior = 'allow' })
         }
         $req = New-NotifierPermissionRequest -HookInput $hook -WaitSeconds $wait -DataRoot $DataRoot

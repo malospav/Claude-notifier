@@ -782,7 +782,8 @@ function Clear-NotifierStaleFiles {
         @{ Dir = ''; Filter = '*.tmp-*'; Days = 1 },
         @{ Dir = 'stats'; Filter = '*.tmp-*'; Days = 1 },
         @{ Dir = 'activity'; Filter = '*.tmp-*'; Days = 1 },
-        @{ Dir = 'cache'; Filter = 'build.*.dll'; Days = 1 }
+        @{ Dir = 'cache'; Filter = 'build.*.dll'; Days = 1 },
+        @{ Dir = 'remote'; Filter = '*.json'; Days = 30 }
     )
     foreach ($t in $targets) {
         $dir = if ($t.Dir) { Join-Path $DataRoot $t.Dir } else { $DataRoot }
@@ -869,7 +870,7 @@ function Start-NotifierTray {
                 # Редкие дела — не чаще раза в секунду (таймер при событиях тикает 10 раз в секунду).
                 if ($now -ge $script:SlowTickAt) {
                     $script:SlowTickAt = $now.AddMilliseconds(950)
-                    try { Invoke-NotifierAutoTick -Now $now } catch { }   # очередь, продолжение после лимита, отчёт недели
+                    try { Invoke-NotifierAutoTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: автоматика: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }   # очередь, продолжение после лимита, отчёт недели
                     try { Invoke-NotifierLimitForecastTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: прогноз лимита: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Invoke-NotifierUsageTick -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: расход: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }
                     try { Update-NotifierLiveContext -Now $now } catch { Write-NotifierLog -Level WARN -Message "tray: контекст: $($_.Exception.Message)" -DataRoot $script:TrayDataRoot }

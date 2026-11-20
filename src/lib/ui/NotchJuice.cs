@@ -171,7 +171,7 @@ namespace ClaudeNotifier.Ui {
         // --- Блик по полоске лимита после раскрытия ---
         void PaintLimitShine(Graphics g, RectangleF fill) {
             double t = PageShownSeconds - 0.35;
-            if (!Animate || t < 0 || t > 1.1 || fill.Width < 4) { if (t >= 0 && t <= 1.1) WakeUi(); return; }
+            if (!Animate || t < 0 || t > 1.1 || fill.Width < 4) { if (Animate && t >= -0.35 && t <= 1.1) WakeUi(); return; }
             WakeUi();
             float w = Math.Max(theme.S(30), fill.Width * 0.3f);
             float x = fill.X - w + (float)(t / 1.1) * (fill.Width + w);

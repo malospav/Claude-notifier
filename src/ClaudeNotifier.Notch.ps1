@@ -193,7 +193,7 @@ function Save-NotifierFriendship {
         -not [int64]::TryParse($p[1], [ref]$ticks)) { return }
     $aff = [Math]::Max([double]0, [Math]::Min([double]100, $aff))
     $json = ConvertTo-Json -InputObject ([ordered]@{ affection = [Math]::Round($aff, 2); lastPet = $ticks }) -Compress
-    try { [IO.File]::WriteAllText((Join-Path $DataRoot 'friendship.json'), $json, (New-Object Text.UTF8Encoding $false)) }
+    try { Write-NotifierTextAtomic -Path (Join-Path $DataRoot 'friendship.json') -Text $json }
     catch { Write-NotifierLog -Level WARN -Message "notch: дружба не сохранена: $($_.Exception.Message)" -DataRoot $DataRoot }
 }
 
@@ -238,7 +238,7 @@ function Get-NotifierMascotProgress {
 function Save-NotifierMascotProgress {
     param([int]$Xp, [string]$DataRoot = $script:TrayDataRoot)
     $json = ConvertTo-Json -InputObject ([ordered]@{ xp = $Xp; level = (Get-NotifierLevelOf -Xp $Xp).Level }) -Compress
-    try { [IO.File]::WriteAllText((Join-Path $DataRoot 'progress.json'), $json, (New-Object Text.UTF8Encoding $false)) }
+    try { Write-NotifierTextAtomic -Path (Join-Path $DataRoot 'progress.json') -Text $json }
     catch { Write-NotifierLog -Level WARN -Message "notch: прогресс маскота не сохранён: $($_.Exception.Message)" -DataRoot $DataRoot }
 }
 
@@ -553,7 +553,7 @@ function Get-NotifierNotchLimits {
         if ($detail -eq 'окно обновилось') { $detail = 'сброшен' }
         # Прогноз: при таком темпе 5-часовой лимит кончится раньше сброса — когда.
         if ($pair[1] -eq '5' -and -not $r.Stale -and $script:LimitForecast) {
-            $detail = 'кончится к ' + $script:LimitForecast.ToLocalTime().ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture) + $(if ($detail) { ", $detail" } else { '' })
+            $detail = 'хватит до ' + $script:LimitForecast.ToLocalTime().ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)   # коротко: полоска узкая, сброс — в подсказке статистики
         }
         $r['Detail' + $pair[1]] = $detail
     }
@@ -772,7 +772,6 @@ function Update-NotifierNotch {
     [ClaudeNotifier.Ui.NotchHost]::SetUpdate([bool]$script:UpdateInfo)   # значок «Обновление» в верхней панели
     $script:NotchSessions = $Sessions
     if ($script:NotchExpanded -and $script:NotchPage -eq 'devices') { Push-NotifierNotchPage -Page devices }
-    if ($script:NotchExpanded -and $script:NotchPage -eq 'history') { Push-NotifierNotchPage -Page history }
     if ($script:NotchExpanded -and $script:NotchPage -eq 'answer' -and $script:NotchAnswerId) { Push-NotifierNotchAnswer -Id $script:NotchAnswerId }
 }
 
@@ -1033,41 +1032,6 @@ function Get-NotifierWeekTasks {
     return @{ Counts = $counts; Longest = @($long | Sort-Object Seconds -Descending | Select-Object -First $Max) }
 }
 
-function Get-NotifierNotchHistoryRows {
-    <#
-    .SYNOPSIS
-    Вкладка «История»: события за сегодня, новые сверху — что случилось (готово, запрос, ошибка, лимит), в каком
-    сеансе, когда. Щелчок по строке — открыть этот сеанс на главной.
-    #>
-    param([datetime]$Now = [DateTime]::Now, [string]$DataRoot = $script:TrayDataRoot, [int]$Max = 60)
-    $rows = @()
-    $dot = @{ done = 'waiting'; permission = 'permission'; error = 'error'; limit = 'alert' }
-    $label = @{ done = 'Готово'; permission = 'Запрос'; error = 'Ошибка'; limit = 'Лимит' }
-    $today = @()
-    foreach ($e in @(Get-NotifierHistory -DataRoot $DataRoot)) {
-        if ($null -eq $e) { continue }
-        $ts = [DateTimeOffset]::MinValue
-        if (-not [DateTimeOffset]::TryParse([string]$e.ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$ts)) { continue }
-        $local = $ts.ToLocalTime()
-        if ($local.Date -ne $Now.Date) { continue }
-        $today += [pscustomobject]@{ E = $e; At = $local }
-    }
-    if ($today.Count -eq 0) { return (New-NotifierNotchRow note -Title 'Сегодня событий пока не было: здесь появится всё, о чём шторка уведомляла.') }
-    $rows += New-NotifierNotchRow header -Title "Сегодня $([char]0x00B7) $($today.Count)"
-    foreach ($x in @($today | Sort-Object At -Descending | Select-Object -First $Max)) {
-        $e = $x.E; $type = [string]$e.type
-        $sid = if ($e.PSObject.Properties['session_id']) { [string]$e.session_id } else { '' }
-        $sub = ([string]$e.preview).Trim() -replace '\s+', ' '
-        if ($sub.Length -gt 110) { $sub = $sub.Substring(0, 109) + [char]0x2026 }
-        $kind = if ($label.ContainsKey($type)) { $label[$type] } else { $type }
-        if ($sub -eq '') { $sub = $kind } else { $sub = "$kind $([char]0x00B7) $sub" }
-        $r = New-NotifierNotchRow link "hist:$sid" ([string]$e.title) $sub -Value $x.At.ToString('HH:mm')
-        $r.Dot = if ($dot.ContainsKey($type)) { $dot[$type] } else { '' }
-        $rows += $r
-    }
-    return $rows
-}
-
 $script:NotchOrder = $null
 
 function Get-NotifierNotchOrder {
@@ -1092,7 +1056,7 @@ function Save-NotifierNotchOrder {
     $at = if ($Before) { $list.IndexOf($Before) } else { -1 }
     if ($at -lt 0) { $list.Add($Id) } else { $list.Insert($at, $Id) }
     $script:NotchOrder = @($list.ToArray())
-    try { [IO.File]::WriteAllText((Join-Path $DataRoot 'notch-order.json'), (ConvertTo-Json -InputObject @($script:NotchOrder) -Compress), (New-Object Text.UTF8Encoding $false)) }
+    try { Write-NotifierTextAtomic -Path (Join-Path $DataRoot 'notch-order.json') -Text (ConvertTo-Json -InputObject @($script:NotchOrder) -Compress) }
     catch { Write-NotifierLog -Level WARN -Message "notch: порядок не сохранён: $($_.Exception.Message)" -DataRoot $DataRoot }
     return , @($script:NotchOrder)
 }
@@ -1105,7 +1069,6 @@ function Push-NotifierNotchPage {
     switch ($Page) {
         'settings' { $rows = @(Get-NotifierNotchSettingsRows) }
         'devices' { $rows = @(Get-NotifierNotchDevicesRows -Sessions @($script:NotchSessions)) }
-        'history' { $rows = @(Get-NotifierNotchHistoryRows) }
         'update' { $rows = @(Get-NotifierNotchUpdateRows) }
         { $_ -in @('changes', 'queue', 'report') } { $rows = @(Get-NotifierNotchAutoRows -Page $Page -SessionId $script:NotchAnswerId) }   # ClaudeNotifier.Auto.ps1
         'stats' {
@@ -1794,9 +1757,10 @@ function Invoke-NotifierNotchCommand {
             }
             'row' {
                 $id = [string]$Event.Id
-                if ($id -like 'hist:*') {
-                    # Событие из истории — открыть его сеанс на главной (если он ещё в списке).
-                    $sid = $id.Substring(5)
+                if ($id -like 'hist:*' -or $id -eq 'hist') {
+                    # Событие из истории — открыть его сеанс на главной (если он ещё в списке). Шторка делит
+                    # «row:hist:<сеанс>» по первому двоеточию: id = hist, сеанс — в Action.
+                    $sid = if ($id -eq 'hist') { [string]$Event.Action } else { $id.Substring(5) }
                     if ($sid -and $script:NotchCards.ContainsKey($sid)) { [ClaudeNotifier.Ui.NotchHost]::Select($sid) }
                     $script:NotchPage = 'home'
                     return

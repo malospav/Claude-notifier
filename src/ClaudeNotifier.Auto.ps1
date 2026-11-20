@@ -20,17 +20,29 @@ $script:QueueFile = 'queue.json'
 $script:LimitWaitFile = 'limit-wait.json'
 $script:TimelineFile = 'timeline.jsonl'
 $script:ChangesShown = @()     # файлы на странице «Изменения» (строки — по номеру)
+$script:QueueRetryAt = @{}     # session_id → не раньше какого времени снова пробовать отдать задание
 $script:ConsoleTypeScript = Join-Path $PSScriptRoot 'console-type.ps1'
 
+$script:JsonMapCache = @{}   # путь → @{ Stamp; Map } — файл не менялся — не перечитывать
+
 function Read-NotifierJsonMap {
-    <# .SYNOPSIS JSON-объект из файла DataRoot → hashtable (ключ → значение); нет файла или битый — пустой. #>
+    <#
+    .SYNOPSIS
+    JSON-объект из файла DataRoot → hashtable (ключ → значение); нет файла или битый — пустой. Пока файл не
+    менялся (размер и время записи), берётся из памяти (копия — вызывающие меняют её и сохраняют).
+    #>
     param([string]$Name, [string]$DataRoot = $script:TrayDataRoot)
     $map = @{}
     $path = Join-Path $DataRoot $Name
-    if (-not (Test-Path -LiteralPath $path)) { return $map }
+    $fi = New-Object IO.FileInfo $path
+    if (-not $fi.Exists) { $script:JsonMapCache.Remove($path); return $map }
+    $stamp = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+    $c = $script:JsonMapCache[$path]
+    if ($c -and $c.Stamp -eq $stamp) { return $c.Map.Clone() }
     try {
         $o = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop
         if ($o) { foreach ($p in $o.PSObject.Properties) { $map[$p.Name] = $p.Value } }
+        $script:JsonMapCache[$path] = @{ Stamp = $stamp; Map = $map.Clone() }
     }
     catch { Write-NotifierLog -Level WARN -Message "auto: $Name не прочитан: $($_.Exception.Message)" -DataRoot $DataRoot }
     return $map
@@ -39,17 +51,14 @@ function Read-NotifierJsonMap {
 function Save-NotifierJsonMap {
     param([string]$Name, [hashtable]$Map, [string]$DataRoot = $script:TrayDataRoot)
     $json = if ($Map.Count -eq 0) { '{}' } else { ConvertTo-Json -InputObject ([pscustomobject]$Map) -Depth 5 -Compress }
-    try { [IO.File]::WriteAllText((Join-Path $DataRoot $Name), $json, (New-Object Text.UTF8Encoding $false)) }
+    try { Write-NotifierTextAtomic -Path (Join-Path $DataRoot $Name) -Text $json }   # целиком или никак
     catch { Write-NotifierLog -Level WARN -Message "auto: $Name не сохранён: $($_.Exception.Message)" -DataRoot $DataRoot }
 }
 
 function Format-NotifierSpan {
-    <# .SYNOPSIS Секунды → «40 мин», «1 ч 05 мин», «меньше минуты». #>
+    <# .SYNOPSIS Секунды → «40 мин», «1 ч 05 мин», «меньше минуты» (как Format-NotifierDuration из Activity). #>
     param([double]$Seconds)
-    if ($Seconds -lt 60) { return 'меньше минуты' }
-    $m = [int][Math]::Floor($Seconds / 60)
-    if ($m -lt 60) { return "$m мин" }
-    return ('{0} ч {1:00} мин' -f [int][Math]::Floor($m / 60), ($m % 60))
+    return (Format-NotifierDuration ([int64][Math]::Max(0, $Seconds)))
 }
 
 function Get-NotifierSessionById {
@@ -70,9 +79,9 @@ function Send-NotifierConsoleText {
     try { $null = Get-Process -Id $TargetPid -ErrorAction Stop } catch { return $false }
     try {
         $p = Start-Process powershell.exe -PassThru -WindowStyle Hidden -WorkingDirectory $env:TEMP -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-            '-File', ('"' + $script:ConsoleTypeScript + '"'), '-TargetPid', $TargetPid, '-Text', ('"' + ($Text -replace '"', "'") + '"'))
+            '-File', ('"' + $script:ConsoleTypeScript + '"'), '-TargetPid', $TargetPid, '-TextB64', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text)))
         $null = $p.Handle
-        if (-not $p.WaitForExit(8000)) { try { $p.Kill() } catch { }; return $false }
+        if (-not $p.WaitForExit(5000)) { try { $p.Kill() } catch { }; return $false }
         if ($p.ExitCode -ne 0) { Write-NotifierLog -Level WARN -Message "auto: ввод в консоль $TargetPid не удался (код $($p.ExitCode))" -DataRoot $DataRoot }
         return ($p.ExitCode -eq 0)
     }
@@ -158,8 +167,11 @@ function Invoke-NotifierQueueTick {
         if ([string]$s.state -ne 'waiting') { continue }
         $list = @(@($map[$sid]) | Where-Object { $_ -is [string] -and $_.Trim() -ne '' })
         if ($list.Count -eq 0) { $map.Remove($sid); $dirty = $true; continue }
+        # Не доставили — повтор не раньше чем через 30 с (а не каждую секунду: ввод в консоль — отдельный процесс).
+        if ($script:QueueRetryAt.ContainsKey($sid) -and [DateTime]::UtcNow -lt $script:QueueRetryAt[$sid]) { continue }
         $how = Send-NotifierSessionText -Session $s -Text $list[0] -DataRoot $DataRoot
-        if ($how -eq '') { continue }   # пока некуда — попробуем на следующем тике
+        if ($how -eq '') { $script:QueueRetryAt[$sid] = [DateTime]::UtcNow.AddSeconds(30); continue }
+        $script:QueueRetryAt.Remove($sid)
         $rest = @(); for ($i = 1; $i -lt $list.Count; $i++) { $rest += $list[$i] }
         if ($rest.Count -eq 0) { $map.Remove($sid) } else { $map[$sid] = $rest }
         $dirty = $true
@@ -294,15 +306,15 @@ function Add-NotifierTimelineMark {
     $path = Join-Path $DataRoot $script:TimelineFile
     try {
         [IO.File]::AppendAllText($path, $line + "`n", (New-Object Text.UTF8Encoding $false))
-        # Раз в сутки — только последние 3 дня.
+        # Вырос больше 400 КБ — оставить последние 2 суток (меньше порога: подрезка не на каждой записи).
         $fi = New-Object IO.FileInfo $path
         if ($fi.Length -gt 400KB) {
-            $cut = $Now.AddDays(-3).ToString('o')
+            $cut = $Now.AddDays(-2).ToString('o')
             $keep = @([IO.File]::ReadAllLines($path) | Where-Object { $_ -match '"t":"([^"]+)"' -and $Matches[1] -ge $cut })
-            [IO.File]::WriteAllLines($path, [string[]]$keep, (New-Object Text.UTF8Encoding $false))
+            Write-NotifierTextAtomic -Path $path -Text (($keep -join "`n") + "`n")
         }
     }
-    catch { }
+    catch { Write-NotifierLog -Level WARN -Message "auto: таймлайн не записан: $($_.Exception.Message)" -DataRoot $DataRoot }
 }
 
 function Get-NotifierTimeline {
@@ -314,14 +326,25 @@ function Get-NotifierTimeline {
     param([datetime]$Now = [DateTime]::Now, [string]$DataRoot = $script:TrayDataRoot)
     $midnight = $Now.Date
     $path = Join-Path $DataRoot $script:TimelineFile
+    # Строки — регулярным выражением (ConvertFrom-Json на каждую строку медленный), разобранное — в памяти, пока
+    # файл не менялся.
     $marks = @()
-    if (Test-Path -LiteralPath $path) {
-        foreach ($l in [IO.File]::ReadAllLines($path)) {
-            if ($l.Trim() -eq '') { continue }
-            try { $m = ConvertFrom-Json -InputObject $l -ErrorAction Stop } catch { continue }
-            $t = [DateTimeOffset]::MinValue
-            if (-not [DateTimeOffset]::TryParse([string]$m.t, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$t)) { continue }
-            $marks += [pscustomobject]@{ T = $t.LocalDateTime; Sid = [string]$m.sid; Project = [string]$m.project; State = [string]$m.state }
+    $fi = New-Object IO.FileInfo $path
+    if ($fi.Exists) {
+        $stamp = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+        if ($script:TimelineCache -and $script:TimelineCache.Stamp -eq $stamp) { $marks = $script:TimelineCache.Marks }
+        else {
+            $list = New-Object System.Collections.ArrayList
+            $rx = [regex]'"t":"([^"]+)","sid":"((?:[^"\\]|\\.)*)","project":"((?:[^"\\]|\\.)*)","state":"([a-z]+)"'
+            foreach ($l in [IO.File]::ReadAllLines($path)) {
+                $m = $rx.Match($l)
+                if (-not $m.Success) { continue }
+                $t = [DateTimeOffset]::MinValue
+                if (-not [DateTimeOffset]::TryParse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$t)) { continue }
+                [void]$list.Add([pscustomobject]@{ T = $t.LocalDateTime; Sid = [regex]::Unescape($m.Groups[2].Value); Project = [regex]::Unescape($m.Groups[3].Value); State = $m.Groups[4].Value })
+            }
+            $marks = @($list)
+            $script:TimelineCache = @{ Stamp = $stamp; Marks = $marks }
         }
     }
     $nowMin = ($Now - $midnight).TotalMinutes
@@ -404,7 +427,7 @@ function Get-NotifierWeekReport {
         $w = @($sum.Week | Sort-Object { -[double]$_.seconds }) | Select-Object -First 1
         if ($w) { $top = [string]$w.project; $topSec = [double]$w.seconds }
     }
-    catch { }
+    catch { Write-NotifierLog -Level WARN -Message "auto: статистика для отчёта недели: $($_.Exception.Message)" -DataRoot $DataRoot }
     return @{ From = $from; To = $to.AddDays(-1); Tasks = $tasks; Seconds = $sec; Cost = $cost; Top = $top; TopSeconds = $topSec; Longest = $longest }
 }
 

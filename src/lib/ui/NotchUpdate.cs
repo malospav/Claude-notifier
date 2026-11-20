@@ -203,13 +203,14 @@ namespace ClaudeNotifier.Ui {
 
         void PaintUpdateProgress(Graphics g, Rectangle area) {
             UpdTick();
-            WakeUi();   // 60 кадров/с, пока сценка видна
+            // 60 кадров/с, пока сценка идёт; ошибка — после встряски замирает; «меньше движения» — без анимации.
+            if (Animate && (UpdPhase != "error" || (DateTime.UtcNow - updPhaseAt).TotalSeconds < 2.5)) WakeUi();
             g.SmoothingMode = SmoothingMode.AntiAlias;
             string phase = UpdPhase;
             bool done = phase == "done", err = phase == "error";
             Color acc = err ? Color.FromArgb(255, 69, 58) : done ? Color.FromArgb(48, 209, 88) : theme.Accent;
-            float t = (float)(DateTime.UtcNow - updBorn).TotalSeconds;
-            double since = (DateTime.UtcNow - updPhaseAt).TotalSeconds;
+            float t = Animate ? (float)(DateTime.UtcNow - updBorn).TotalSeconds : 0f;   // «меньше движения» — всё на месте
+            double since = Animate ? (DateTime.UtcNow - updPhaseAt).TotalSeconds : 10;
             Color bg = Pal(0x161618);
             Draw.Fill(g, area, theme.S(18), bg);
             Region oldClip = g.Clip; g.SetClip(area, CombineMode.Intersect);
@@ -348,14 +349,14 @@ namespace ClaudeNotifier.Ui {
             float lidAlpha = done ? (float)Math.Max(0, 1 - since / 0.6) : 1f;
             PaintGift(g, gcx, gBottom, gsz, (float)updLid, lidAlpha);
             g.Restore(gst);
-            if (updConfettiPending) { updConfettiPending = false; UpdBurst(since < 0.3 ? 1.2f : 0.85f); }
+            if (updConfettiPending) { updConfettiPending = false; if (Animate) UpdBurst(since < 0.3 ? 1.2f : 0.85f); }
 
             // Над коробкой: лупа (проверка), искры (распаковка), шестерёнки (установка).
             float above = gBottom - gsz - theme.S(30);
             if (phase == "verify") {
                 float lx = gcx + (float)Math.Sin(t * 3.2) * gsz * 0.35f, ly = above + (float)Math.Cos(t * 6.4) * theme.S(3);
                 int ms = theme.S(26);
-                TextRenderer.DrawText(g, "", fIconSmall, new Rectangle((int)(lx - ms / 2f), (int)(ly - ms / 2f), ms, ms), Color.FromArgb(230, 255, 255, 255), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(g, "", fIconSmall, new Rectangle((int)(lx - ms / 2f), (int)(ly - ms / 2f), ms, ms), Color.FromArgb(230, Fg), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 float scanY = gBottom - gsz * 0.86f + (float)((Math.Sin(t * 4) + 1) / 2) * gsz * 0.8f;
                 using (Pen sp = new Pen(Color.FromArgb(170, 100, 210, 255), Math.Max(1f, theme.S(2)))) g.DrawLine(sp, gcx - gsz * 0.55f, scanY, gcx + gsz * 0.55f, scanY);
             } else if (phase == "extract") {
@@ -365,7 +366,7 @@ namespace ClaudeNotifier.Ui {
                     using (SolidBrush sb = new SolidBrush(Color.FromArgb((int)(220 * (1 - ph)), UpdColors[i % UpdColors.Length]))) PaintStar(g, ex, ey, theme.S(6) * (float)(1 - ph), sb);
                 }
             } else if (phase == "install" || phase == "restart") {
-                PaintGear(g, gcx - theme.S(11), above, theme.S(26), t * 140f, Color.FromArgb(225, 230, 230, 235));
+                PaintGear(g, gcx - theme.S(11), above, theme.S(26), t * 140f, Color.FromArgb(225, Pal(0xE6E6EB)));   // в светлой теме — тёмная
                 PaintGear(g, gcx + theme.S(12), above - theme.S(12), theme.S(18), -t * 200f + 15, Color.FromArgb(225, 120, 170, 255));
             }
 

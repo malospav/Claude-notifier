@@ -94,7 +94,7 @@ function Test-NotifierBudget {
     #>
     param([datetime]$Now = [DateTime]::UtcNow, $Summary = $script:ActivitySummary, $Config = (Get-NotifierConfig -DataRoot $script:TrayDataRoot))
     if (-not $Config.budget.enabled -or $null -eq $Summary) { return $false }
-    $day = $Now.ToLocalTime().ToString('yyyy-MM-dd')
+    $day = $Now.ToLocalTime().ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
     if ($script:BudgetNotifiedDay -eq $day) { return $false }
     $cost = Get-NotifierTodayCost -Summary $Summary
     $limit = [double]$Config.budget.daily

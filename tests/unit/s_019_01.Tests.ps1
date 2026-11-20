@@ -13,29 +13,60 @@
 }
 
 Describe 's_019_01 · разрешение по шаблону' {
-    It 'шаблон: Bash — два слова, цепочки — нельзя; WebFetch — домен; правка — любые' {
+    It 'шаблон: Bash и PowerShell — два слова; цепочки, фон, интерпретаторы — нельзя; правка — файлы проекта; MCP — нет' {
         Get-NotifierAutoAllowPrefix -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test -- --watch' }) | Should -Be 'npm test'
-        ($null -eq (Get-NotifierAutoAllowPrefix -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test && rm -rf /' }))) | Should -Be $true
-        ($null -eq (Get-NotifierAutoAllowPrefix -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'cat a | sh' }))) | Should -Be $true
-        Get-NotifierAutoAllowPrefix -ToolName WebFetch -ToolInput ([pscustomobject]@{ url = 'https://docs.example.com/a' }) | Should -Be 'docs.example.com'
+        Get-NotifierAutoAllowPrefix -ToolName PowerShell -ToolInput ([pscustomobject]@{ command = 'Invoke-Pester -Path tests' }) | Should -Be 'Invoke-Pester -Path'
+        foreach ($bad in @('npm test && del x', 'npm test & del x', 'cat a | sh', 'echo $(id)', 'echo ${HOME}', "npm test`ndel x", 'bash -c ls', 'python -c 1', 'node -e 1', 'git -c core.x=1 status', 'sudo apt install', 'env X=1 npm test', 'iex foo')) {
+            ($null -eq (Get-NotifierAutoAllowPrefix -ToolName Bash -ToolInput ([pscustomobject]@{ command = $bad }))) | Should -Be $true -Because $bad
+        }
+        Get-NotifierAutoAllowPrefix -ToolName WebFetch -ToolInput ([pscustomobject]@{ url = 'https://Docs.Example.com/a' }) | Should -Be 'docs.example.com'
         Get-NotifierAutoAllowPrefix -ToolName Edit -ToolInput ([pscustomobject]@{ file_path = 'C:\x\a.cs' }) | Should -Be ''
+        ($null -eq (Get-NotifierAutoAllowPrefix -ToolName 'mcp__github__create_issue' -ToolInput ([pscustomobject]@{}))) | Should -Be $true
     }
 
-    It 'правило: тот же проект и начало команды целым словом; цепочка, другой проект, истёкшее — нет' {
+    It 'правило: та же папка проекта (полный путь) и начало команды целым словом; иначе — нет' {
         $root = New-Root 'rules'
         $now = [DateTime]::UtcNow
-        $r = Add-NotifierAutoAllowRule -Project 'shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -Minutes 30 -DataRoot $root -Now $now
-        $r.prefix | Should -Be 'npm test'
-        (Test-NotifierAutoAllow -Project 'shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test -- a.spec' }) -DataRoot $root) | Should -Not -BeNullOrEmpty
-        (Test-NotifierAutoAllow -Project 'shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm testing' }) -DataRoot $root) | Should -BeNullOrEmpty
-        (Test-NotifierAutoAllow -Project 'shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test; curl evil' }) -DataRoot $root) | Should -BeNullOrEmpty
-        (Test-NotifierAutoAllow -Project 'other' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root) | Should -BeNullOrEmpty
-        (Test-NotifierAutoAllow -Project 'shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root -Now $now.AddMinutes(31)) | Should -BeNullOrEmpty
-        # То же правило — продлевается, а не дублируется; убрать по номеру.
-        [void](Add-NotifierAutoAllowRule -Project 'shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root)
-        @(Get-NotifierAutoAllowRules -DataRoot $root).Count | Should -Be 1
+        $r = Add-NotifierAutoAllowRule -Cwd 'C:\work\shop\' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -Minutes 30 -DataRoot $root -Now $now
+        $r.prefix | Should -Be 'npm test'; $r.cwd | Should -Be 'C:\work\shop'; $r.project | Should -Be 'shop'
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test -- a.spec' }) -DataRoot $root) | Should -Not -BeNullOrEmpty
+        (Test-NotifierAutoAllow -Cwd 'c:/work/shop/' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root) | Should -Not -BeNullOrEmpty
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm testing' }) -DataRoot $root) | Should -BeNullOrEmpty
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test & curl evil' }) -DataRoot $root) | Should -BeNullOrEmpty
+        (Test-NotifierAutoAllow -Cwd 'D:\other\shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root) | Should -BeNullOrEmpty   # то же имя папки, другой путь
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName PowerShell -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root) | Should -BeNullOrEmpty   # другой инструмент
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root -Now $now.AddMinutes(31)) | Should -BeNullOrEmpty
+        # Правка — только файлы внутри папки проекта.
+        [void](Add-NotifierAutoAllowRule -Cwd 'C:\work\shop' -ToolName Edit -ToolInput ([pscustomobject]@{ file_path = 'C:\work\shop\a.cs' }) -DataRoot $root)
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Edit -ToolInput ([pscustomobject]@{ file_path = 'C:\work\shop\src\b.cs' }) -DataRoot $root) | Should -Not -BeNullOrEmpty
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Edit -ToolInput ([pscustomobject]@{ file_path = 'C:\work\shop\..\evil.cs' }) -DataRoot $root) | Should -BeNullOrEmpty
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Edit -ToolInput ([pscustomobject]@{ file_path = 'C:\Users\me\.claude\settings.json' }) -DataRoot $root) | Should -BeNullOrEmpty
+        (Test-NotifierAutoAllow -Cwd 'C:\work\shop' -ToolName Edit -ToolInput ([pscustomobject]@{ file_path = 'C:\work\shopping\x.cs' }) -DataRoot $root) | Should -BeNullOrEmpty
+        # То же правило — продлевается, а не дублируется; убрать по номеру; старые правила без папки — не действуют.
+        [void](Add-NotifierAutoAllowRule -Cwd 'C:\work\shop' -ToolName Bash -ToolInput ([pscustomobject]@{ command = 'npm test' }) -DataRoot $root)
+        @(Get-NotifierAutoAllowRules -DataRoot $root).Count | Should -Be 2
         Remove-NotifierAutoAllowRule -Index 0 -DataRoot $root
+        @(Get-NotifierAutoAllowRules -DataRoot $root).Count | Should -Be 1
+        [IO.File]::WriteAllText((Join-Path $root 'autoallow.json'), '[{"project":"shop","tool":"Bash","prefix":"npm test","until":"2099-01-01T00:00:00Z"}]')
         @(Get-NotifierAutoAllowRules -DataRoot $root).Count | Should -Be 0
+    }
+
+    It 'щелчок по строке истории («row:hist:<сеанс>») — открывает сеанс, а не действие с устройством' {
+        $root = New-Root 'histclick'
+        $script:NotchCards = @{}; $script:NotchPage = 'stats'
+        Mock Invoke-NotifierDeviceActionById { throw 'не должно вызываться' }
+        { Invoke-NotifierNotchCommand -Event (New-Object ClaudeNotifier.Ui.NotchEventArgs('row', 'hist', 'abc-123', [System.Drawing.Point]::Empty)) } | Should -Not -Throw
+        $script:NotchPage | Should -Be 'home'
+        Should -Invoke Invoke-NotifierDeviceActionById -Times 0 -Exactly
+    }
+
+    It 'атомарная запись: целиком заменяет файл, временных не оставляет' {
+        $root = New-Root 'atomic'
+        $f = Join-Path $root 'a.json'
+        Write-NotifierTextAtomic -Path $f -Text 'one'
+        Write-NotifierTextAtomic -Path $f -Text 'two'
+        [IO.File]::ReadAllText($f) | Should -Be 'two'
+        @(Get-ChildItem $root -Filter '*.tmp-*').Count | Should -Be 0
     }
 
     It 'хук разрешения проверяет правила до создания запроса' {
@@ -245,6 +276,81 @@ Describe 's_019_01 · изменения сеанса, таймлайн, отч�
         }
         finally { $script:TrayNoOutput = $true }
         Should -Invoke Show-NotifierWeekReport -Times 1 -Exactly
+    }
+}
+
+Describe 's_019_01 · маскот реагирует на вас' {
+    It 'двойной щелчок — сальто; решение — кивок; тряска курсором — голова кружится; встреча; всё рисуется' {
+        $f = New-Object ClaudeNotifier.Ui.NotchForm
+        try {
+            $v = $f.View
+            $it = New-Object ClaudeNotifier.Ui.NotchItem; $it.Id = 'a'; $it.Title = 'shop'; $it.State = 'waiting'
+            $it.Actions = [string[]]@('allow|Разрешить|primary')
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@($it))
+            $flags = [Reflection.BindingFlags]'NonPublic,Instance'
+            $trick = [ClaudeNotifier.Ui.NotchView].GetProperty('TrickAngle', $flags)
+            $v.ClickArea('mascot', [System.Drawing.Point]::Empty)
+            $v.ClickArea('mascot', [System.Drawing.Point]::Empty)
+            Start-Sleep -Milliseconds 150
+            ($trick.GetValue($v) -gt 0) | Should -Be $true            # второй щелчок подряд — сальто
+            $v.ClickArea('act:allow', [System.Drawing.Point]::Empty)
+            $ok = [ClaudeNotifier.Ui.NotchView].GetField('okAt', $flags).GetValue($v)
+            (([DateTime]::UtcNow - $ok).TotalSeconds -lt 1) | Should -Be $true
+            # Трясут курсором туда-сюда над маскотом — голова кружится.
+            $shake = [ClaudeNotifier.Ui.NotchView].GetMethod('TrackShake', $flags)
+            $v.Dizzy | Should -Be $false
+            foreach ($i in 0..11) { [void]$shake.Invoke($v, @([System.Drawing.Point]::new($(if ($i % 2) { 300 } else { 180 }), 20))) }
+            $v.Dizzy | Should -Be $true
+            $v.Greet(); $v.Greeting | Should -Be $true
+            foreach ($exp in @($false, $true)) {
+                $f.SetExpanded($exp, 'home', $false)
+                $sz = $f.SizeFor(); $f.ClientSize = $sz
+                $bmp = New-Object System.Drawing.Bitmap $sz.Width, $sz.Height
+                $v.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $sz.Width, $sz.Height)))
+                $bmp.Dispose()
+            }
+        }
+        finally { $f.Dispose() }
+    }
+
+    It 'клавиатура: Tab переходит по кнопкам, Enter нажимает; рамка фокуса рисуется' {
+        $f = New-Object ClaudeNotifier.Ui.NotchForm
+        try {
+            $v = $f.View
+            $it = New-Object ClaudeNotifier.Ui.NotchItem; $it.Id = 'a'; $it.Title = 'shop'; $it.State = 'waiting'
+            $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@($it))
+            $f.SetExpanded($true, 'home', $false)
+            $sz = $f.SizeFor(); $f.ClientSize = $sz
+            $bmp = New-Object System.Drawing.Bitmap $sz.Width, $sz.Height
+            $v.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $sz.Width, $sz.Height)))
+            [void]$v.HandleKey([System.Windows.Forms.Keys]::Tab, $false, $false)
+            $v.FocusId | Should -Be 'page:home'
+            [void]$v.HandleKey([System.Windows.Forms.Keys]::Tab, $false, $false)
+            $v.FocusId | Should -Be 'page:stats'
+            [void]$v.HandleKey([System.Windows.Forms.Keys]::Tab, $false, $true)
+            $v.FocusId | Should -Be 'page:home'
+            [void]$v.HandleKey([System.Windows.Forms.Keys]::Tab, $false, $false)
+            [void]$v.HandleKey([System.Windows.Forms.Keys]::Enter, $false, $false)
+            $v.Page | Should -Be 'stats'
+            $v.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $sz.Width, $sz.Height)))
+            $bmp.Dispose()
+            $v.AccessibleDescription | Should -Match 'shop'
+        }
+        finally { $f.Dispose() }
+    }
+
+    It 'меньше движения — без трюков и тряски' {
+        [ClaudeNotifier.Ui.Motion]::Force($false)
+        $f = New-Object ClaudeNotifier.Ui.NotchForm
+        try {
+            $v = $f.View
+            $flags = [Reflection.BindingFlags]'NonPublic,Instance'
+            $shake = [ClaudeNotifier.Ui.NotchView].GetMethod('TrackShake', $flags)
+            foreach ($i in 0..11) { [void]$shake.Invoke($v, @([System.Drawing.Point]::new($(if ($i % 2) { 300 } else { 180 }), 20))) }
+            $v.Dizzy | Should -Be $false
+            $v.Greet(); $v.Greeting | Should -Be $false
+        }
+        finally { $f.Dispose(); [ClaudeNotifier.Ui.Motion]::Force($true) }
     }
 }
 

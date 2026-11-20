@@ -46,6 +46,9 @@ namespace ClaudeNotifier.Ui {
         public string DayMood;                       // настроение дня: cheer — празднует; tea — сочувствует (много ошибок)
         public int Level;                            // уровень маскота (растёт за выполненные задачи): открывает украшения
         public float IdlePlay = -1f;                 // секунд в игре с мячиком (задач нет — играет сам с собой); -1 — не играет
+        public float Dizzy = -1f;                    // секунд с тряски курсором: голова кружится (звёздочки); -1 — нет
+        public float OkAge = -1f;                    // секунд с вашего ответа или решения: кивает, над головой галочка
+        public float OpenAge = -1f;                  // секунд с раскрытия шторки: главный маскот рад вас видеть (сердечко)
         public bool HasMotion { get { return Math.Abs(SquashY - 1f) > 0.002f || Math.Abs(Shear) > 0.002f || Math.Abs(Lift) > 0.001f || Math.Abs(Lean) > 0.05f; } }
     }
 
@@ -351,6 +354,15 @@ namespace ClaudeNotifier.Ui {
                         case "squint":
                             g.DrawLine(ip, e.X - es * 0.5f, e.Y + es * 0.1f, e.X + es * 0.5f, e.Y + es * 0.1f);
                             break;
+                        case "spiral": {  // голова кружится — спиральки (у левого и правого — в разные стороны)
+                            int n = 14; PointF[] sp = new PointF[n];
+                            for (int k = 0; k < n; k++) {
+                                float a = k * 0.62f * (left ? 1 : -1), rr = es * 0.62f * k / (n - 1);
+                                sp[k] = new PointF(e.X + (float)Math.Cos(a) * rr, e.Y + (float)Math.Sin(a) * rr);
+                            }
+                            using (Pen thin = new Pen(ink, Math.Max(1f, ew * 0.75f))) { thin.StartCap = thin.EndCap = LineCap.Round; thin.LineJoin = LineJoin.Round; g.DrawLines(thin, sp); }
+                            break;
+                        }
                         case "x":
                             g.DrawLine(ip, e.X - es * 0.42f, e.Y - es * 0.42f, e.X + es * 0.42f, e.Y + es * 0.42f);
                             g.DrawLine(ip, e.X - es * 0.42f, e.Y + es * 0.42f, e.X + es * 0.42f, e.Y - es * 0.42f);

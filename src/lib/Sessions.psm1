@@ -54,8 +54,9 @@ function Get-NotifierSessions {
     if ($null -eq $text) { return }   # временно занят — не путать с повреждением
     try { $parsed = ConvertFrom-Json -InputObject $text -ErrorAction Stop }
     catch {
-        try { Remove-Item -LiteralPath $path -Force } catch { }
-        Write-NotifierLog -Level WARN -Message 'sessions: sessions.json повреждён и удалён' -DataRoot $DataRoot
+        # Повреждён: копия для разбора (как history.json и session-prefs.json), список начнётся заново.
+        try { Move-Item -LiteralPath $path -Destination "$path.corrupt" -Force } catch { }
+        Write-NotifierLog -Level WARN -Message 'sessions: sessions.json повреждён, переименован в sessions.json.corrupt' -DataRoot $DataRoot
         return
     }
     foreach ($x in @($parsed)) {

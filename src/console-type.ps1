@@ -11,7 +11,9 @@
 
 Код выхода: 0 — введено; 2 — к консоли не подключиться (процесса нет или у него нет консоли); 3 — не записать.
 #>
-param([Parameter(Mandatory = $true)][int]$TargetPid, [Parameter(Mandatory = $true)][string]$Text)
+# Текст — в Base64 (UTF-8): кавычки и обратные косые в аргументах командной строки не портятся.
+param([Parameter(Mandatory = $true)][int]$TargetPid, [string]$Text = '', [string]$TextB64 = '')
+if ($TextB64) { $Text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($TextB64)) }
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;

@@ -107,6 +107,7 @@ function New-NotifierPermissionRequest {
         detail      = $summary.detail
         options     = @($summary.options)
         canAlways   = $summary.canAlways
+        cwd         = [string](Get-Prop $HookInput 'cwd')   # папка проекта — для «На 30 мин»
         device      = $Device
     }
     Write-JsonAtomic (Join-Path (Get-RequestsDir $DataRoot) "perm-$($req.id).json") $req
@@ -290,7 +291,7 @@ function Write-NotifierReply {
     $dir = Get-RequestsDir $DataRoot
     $name = ConvertTo-SafeName $SessionId
     if (-not (Test-Path -LiteralPath (Join-Path $dir "reply-$name.json"))) { return $false }
-    [IO.File]::WriteAllText((Join-Path $dir "reply-$name.txt"), $text, $script:Utf8)
+    Write-NotifierTextAtomic -Path (Join-Path $dir "reply-$name.txt") -Text $text   # целиком: хук не прочтёт половину ответа
     return $true
 }
 
@@ -373,39 +374,78 @@ function Remove-NotifierReplyWait {
 }
 
 # --- Разрешение по шаблону: «Разрешать такие 30 минут» ---
-# DataRoot\autoallow.json — [{ project; tool; prefix; until (ISO UTC); title }]. Хук разрешения (hook-bridge) проверяет
-# правила до показа запроса: подходит — разрешает сам. Для Bash шаблон — начало команды (первые два слова,
-# «npm test»), и команда с цепочками (&&, ||, ;, |, перенаправления, подстановки) под шаблон не попадает никогда.
+# DataRoot\autoallow.json — [{ cwd; project; tool; prefix; until (ISO UTC); title }]. Хук разрешения (hook-bridge)
+# проверяет правила до показа запроса: подходит — разрешает сам. Правило привязано к папке проекта (полный путь).
+#   • Bash / PowerShell — шаблон — начало команды (первые два слова, «npm test»). Команда с цепочкой, фоном,
+#     перенаправлением или подстановкой (; & | ` < > $( ${ перевод строки) под шаблон не попадает никогда;
+#     для оболочек и интерпретаторов (bash -c, python -c, node -e, env, sudo…) правило не делается вовсе.
+#   • Edit / Write / MultiEdit / NotebookEdit — любые правки, но только файлов внутри папки проекта.
+#   • WebFetch — тот же домен.
+#   • Остальные инструменты (MCP и прочее) — правила нет: кнопка «На 30 мин» не показывается.
+$script:AutoAllowShellTools = @('Bash', 'PowerShell')
+$script:AutoAllowEditTools = @('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+# Оболочки, интерпретаторы и обёртки: «bash -c …» по шаблону открыл бы любой код.
+$script:AutoAllowNoPrefix = @('bash', 'sh', 'zsh', 'fish', 'dash', 'ksh', 'env', 'sudo', 'su', 'doas', 'xargs', 'eval', 'exec', 'source', '.',
+    'python', 'python3', 'py', 'node', 'deno', 'bun', 'npx', 'bunx', 'pnpx', 'ruby', 'perl', 'php', 'lua', 'pwsh', 'powershell', 'powershell.exe',
+    'pwsh.exe', 'cmd', 'cmd.exe', 'wsl', 'start', 'invoke-expression', 'iex', 'invoke-command', 'start-process', 'nohup', 'time', 'watch', 'timeout', 'nice')
+
+function Get-NotifierCommandText([string]$ToolName, $ToolInput) {
+    if ($ToolInput -and $ToolInput.PSObject.Properties['command']) { return ([string]$ToolInput.command).Trim() }
+    return ''
+}
+
+function ConvertTo-NotifierCwdKey([string]$Cwd) {
+    <# .SYNOPSIS Папка проекта для сравнения правил: полный путь без хвостового разделителя, «\» вместо «/». #>
+    if ([string]::IsNullOrWhiteSpace($Cwd)) { return '' }
+    return ($Cwd.Trim().Replace('/', '\')).TrimEnd('\')
+}
+
+function Test-NotifierPathInside([string]$Path, [string]$Cwd) {
+    <# .SYNOPSIS Файл внутри папки проекта (после нормализации «..» и «.»), без выхода наружу. #>
+    $root = ConvertTo-NotifierCwdKey $Cwd
+    if ($root -eq '' -or [string]::IsNullOrWhiteSpace($Path)) { return $false }
+    try {
+        $p = $Path.Replace('/', '\')
+        if (-not [IO.Path]::IsPathRooted($p)) { $p = Join-Path $root $p }
+        $full = [IO.Path]::GetFullPath($p)
+        $rootFull = [IO.Path]::GetFullPath($root + '\').TrimEnd('\')
+        return $full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch { return $false }
+}
 
 function Get-NotifierAutoAllowPrefix {
     <#
     .SYNOPSIS
-    Шаблон для правила из запроса: Bash — первые два слова команды; WebFetch — домен; правка файлов и прочее —
-    '' (любой вызов этого инструмента в проекте). $null — для такого запроса правило не делается (Bash с цепочкой).
+    Шаблон для правила из запроса: Bash / PowerShell — первые два слова команды; WebFetch — домен; правка
+    файлов — '' (любые правки внутри папки проекта). $null — для такого запроса правило не делается.
     #>
     param([string]$ToolName, $ToolInput)
-    if ($ToolName -eq 'Bash') {
-        $cmd = ''
-        if ($ToolInput -and $ToolInput.PSObject.Properties['command']) { $cmd = ([string]$ToolInput.command).Trim() }
+    if ($script:AutoAllowShellTools -contains $ToolName) {
+        $cmd = Get-NotifierCommandText $ToolName $ToolInput
         if ($cmd -eq '' -or (Test-NotifierShellChain $cmd)) { return $null }
         $words = @($cmd -split '\s+' | Where-Object { $_ -ne '' })
+        $first = ([IO.Path]::GetFileName($words[0])).ToLowerInvariant()
+        if ($script:AutoAllowNoPrefix -contains $first) { return $null }
+        if ($words.Count -gt 1 -and $words[1] -match '^-(c|e|-eval|-exec|command)$') { return $null }   # git -c, … -e / --eval
         return (@($words | Select-Object -First 2) -join ' ')
     }
     if ($ToolName -eq 'WebFetch') {
         $u = $null
-        if ($ToolInput -and $ToolInput.PSObject.Properties['url'] -and [Uri]::TryCreate([string]$ToolInput.url, [UriKind]::Absolute, [ref]$u)) { return $u.Host }
+        if ($ToolInput -and $ToolInput.PSObject.Properties['url'] -and [Uri]::TryCreate([string]$ToolInput.url, [UriKind]::Absolute, [ref]$u) -and $u.Host) { return $u.Host.ToLowerInvariant() }
         return $null
     }
-    return ''
+    if ($script:AutoAllowEditTools -contains $ToolName) { return '' }
+    return $null
 }
 
 function Test-NotifierShellChain([string]$Command) {
-    <# .SYNOPSIS В команде есть цепочка, перенаправление или подстановка — такую по шаблону не разрешаем. #>
-    return [bool]($Command -match '&&|\|\||[;|`<>]|\$\(|\r|\n')
+    <# .SYNOPSIS В команде есть цепочка, фон, перенаправление или подстановка — такую по шаблону не разрешаем. #>
+    return [bool]($Command -match '[;&|`<>\r\n]|\$\(|\$\{|\$''|\p{Cc}')
 }
 
 function Get-NotifierAutoAllowRules {
-    <# .SYNOPSIS Действующие правила (истёкшие отброшены). #>
+    <# .SYNOPSIS Действующие правила (истёкшие и без папки проекта отброшены). #>
     [CmdletBinding()]
     param([string]$DataRoot, [datetime]$Now = [DateTime]::UtcNow)
     $path = Join-Path $DataRoot 'autoallow.json'
@@ -414,7 +454,7 @@ function Get-NotifierAutoAllowRules {
     try { $list = @(ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) -ErrorAction Stop | ForEach-Object { $_ }) } catch { return @() }
     $out = @()
     foreach ($r in $list) {
-        if ($null -eq $r) { continue }
+        if ($null -eq $r -or -not $r.PSObject.Properties['cwd'] -or [string]$r.cwd -eq '') { continue }   # правила до привязки к папке — не действуют
         $until = [DateTimeOffset]::MinValue
         if (-not [DateTimeOffset]::TryParse([string]$r.until, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$until)) { continue }
         if ($until.UtcDateTime -le $Now) { continue }
@@ -428,22 +468,25 @@ function Save-NotifierAutoAllowRules {
     param([AllowEmptyCollection()][object[]]$Rules, [string]$DataRoot)
     $json = if ($Rules.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject @($Rules) -Depth 4 -Compress }
     if (-not $json.StartsWith('[')) { $json = "[$json]" }
-    [IO.File]::WriteAllText((Join-Path $DataRoot 'autoallow.json'), $json, (New-Object Text.UTF8Encoding $false))
+    Write-NotifierTextAtomic -Path (Join-Path $DataRoot 'autoallow.json') -Text $json
 }
 
 function Add-NotifierAutoAllowRule {
     <#
     .SYNOPSIS
-    Новое правило «разрешать такие» на Minutes минут (то же правило — продлевается). Возвращает правило или $null.
+    Новое правило «разрешать такие» на Minutes минут для папки проекта Cwd (то же правило — продлевается).
+    Возвращает правило или $null (для такого запроса правило не делается).
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Project, [Parameter(Mandatory = $true)][string]$ToolName, $ToolInput, [int]$Minutes = 30,
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Cwd, [Parameter(Mandatory = $true)][string]$ToolName, $ToolInput, [int]$Minutes = 30,
         [string]$DataRoot, [datetime]$Now = [DateTime]::UtcNow)
+    $key = ConvertTo-NotifierCwdKey $Cwd
     $prefix = Get-NotifierAutoAllowPrefix -ToolName $ToolName -ToolInput $ToolInput
-    if ($null -eq $prefix -or $Project -eq '') { return $null }
-    $title = if ($prefix) { "$ToolName $([char]0x00B7) $prefix" } else { "$ToolName $([char]0x00B7) любые" }
-    $rule = [pscustomobject][ordered]@{ project = $Project; tool = $ToolName; prefix = $prefix; until = $Now.AddMinutes($Minutes).ToString('o'); title = $title }
-    $rules = @(Get-NotifierAutoAllowRules -DataRoot $DataRoot -Now $Now | Where-Object { -not ($_.project -eq $Project -and $_.tool -eq $ToolName -and [string]$_.prefix -eq $prefix) })
+    if ($null -eq $prefix -or $key -eq '') { return $null }
+    $project = @($key -split '\\')[-1]
+    $title = if ($prefix) { "$ToolName $([char]0x00B7) $prefix" } elseif ($script:AutoAllowEditTools -contains $ToolName) { "$ToolName $([char]0x00B7) файлы проекта" } else { "$ToolName $([char]0x00B7) любые" }
+    $rule = [pscustomobject][ordered]@{ cwd = $key; project = $project; tool = $ToolName; prefix = $prefix; until = $Now.AddMinutes($Minutes).ToString('o'); title = $title }
+    $rules = @(Get-NotifierAutoAllowRules -DataRoot $DataRoot -Now $Now | Where-Object { -not ([string]$_.cwd -eq $key -and $_.tool -eq $ToolName -and [string]$_.prefix -eq $prefix) })
     $rules += $rule
     Save-NotifierAutoAllowRules -Rules $rules -DataRoot $DataRoot
     return $rule
@@ -462,30 +505,54 @@ function Remove-NotifierAutoAllowRule {
 function Test-NotifierAutoAllow {
     <#
     .SYNOPSIS
-    Подходит ли запрос под действующее правило: тот же проект и инструмент; Bash — команда начинается с шаблона
-    (целым словом) и без цепочек; WebFetch — тот же домен. Возвращает правило или $null.
+    Подходит ли запрос под действующее правило: та же папка проекта и инструмент; Bash / PowerShell — команда
+    начинается с шаблона (целым словом) и без цепочек; правка — файл внутри папки проекта; WebFetch — тот же
+    домен. Возвращает правило или $null.
     #>
     [CmdletBinding()]
-    param([string]$Project, [string]$ToolName, $ToolInput, [string]$DataRoot, [datetime]$Now = [DateTime]::UtcNow)
-    if ($Project -eq '' -or $ToolName -eq '') { return $null }
+    param([string]$Cwd, [string]$ToolName, $ToolInput, [string]$DataRoot, [datetime]$Now = [DateTime]::UtcNow)
+    $key = ConvertTo-NotifierCwdKey $Cwd
+    if ($key -eq '' -or $ToolName -eq '') { return $null }
     foreach ($r in @(Get-NotifierAutoAllowRules -DataRoot $DataRoot -Now $Now)) {
-        if ([string]$r.project -ne $Project -or [string]$r.tool -ne $ToolName) { continue }
+        if (-not [string]::Equals([string]$r.cwd, $key, [StringComparison]::OrdinalIgnoreCase) -or [string]$r.tool -ne $ToolName) { continue }
         $prefix = [string]$r.prefix
-        if ($ToolName -eq 'Bash') {
-            $cmd = ''
-            if ($ToolInput -and $ToolInput.PSObject.Properties['command']) { $cmd = ([string]$ToolInput.command).Trim() }
+        if ($script:AutoAllowShellTools -contains $ToolName) {
+            $cmd = Get-NotifierCommandText $ToolName $ToolInput
             if ($cmd -eq '' -or (Test-NotifierShellChain $cmd) -or $prefix -eq '') { continue }
-            if ($cmd -eq $prefix -or $cmd.StartsWith($prefix + ' ')) { return $r }
+            if ($cmd -ceq $prefix -or $cmd.StartsWith($prefix + ' ', [StringComparison]::Ordinal)) { return $r }
             continue
         }
         if ($ToolName -eq 'WebFetch') {
             $u = $null
-            if ($ToolInput -and $ToolInput.PSObject.Properties['url'] -and [Uri]::TryCreate([string]$ToolInput.url, [UriKind]::Absolute, [ref]$u) -and $u.Host -eq $prefix) { return $r }
+            if ($ToolInput -and $ToolInput.PSObject.Properties['url'] -and [Uri]::TryCreate([string]$ToolInput.url, [UriKind]::Absolute, [ref]$u) -and $u.Host.ToLowerInvariant() -eq $prefix) { return $r }
             continue
         }
-        return $r
+        if ($script:AutoAllowEditTools -contains $ToolName) {
+            $fp = ''
+            if ($ToolInput -and $ToolInput.PSObject.Properties['file_path']) { $fp = [string]$ToolInput.file_path }
+            elseif ($ToolInput -and $ToolInput.PSObject.Properties['notebook_path']) { $fp = [string]$ToolInput.notebook_path }
+            if (Test-NotifierPathInside -Path $fp -Cwd $key) { return $r }
+            continue
+        }
     }
     return $null
 }
 
-Export-ModuleMember -Function Get-NotifierAutoAllowPrefix, Test-NotifierShellChain, Get-NotifierAutoAllowRules, Add-NotifierAutoAllowRule, Remove-NotifierAutoAllowRule, Test-NotifierAutoAllow, Get-NotifierRequestSummary, New-NotifierPermissionRequest, ConvertTo-NotifierDecisionOutput, Wait-NotifierDecision, New-NotifierReplyWait, Wait-NotifierReply, Get-NotifierPendingRequests, Write-NotifierDecision, Write-NotifierReply, Remove-NotifierReplyWait, Get-NotifierRemoteDecision, Remove-NotifierRequest, Get-NotifierRemoteReply
+function Write-NotifierTextAtomic {
+    <#
+    .SYNOPSIS
+    Записать текст в файл целиком или никак: во временный файл рядом, затем замена ([IO.File]::Replace —
+    атомарно на NTFS). Оборванная запись (сбой, выключение) не оставляет пустой или половинный файл.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path, [AllowEmptyString()][string]$Text, [switch]$Bom)
+    $tmp = "$Path.tmp-$PID-$([Environment]::TickCount)"
+    [IO.File]::WriteAllText($tmp, $Text, (New-Object Text.UTF8Encoding ([bool]$Bom)))
+    if (Test-Path -LiteralPath $Path) {
+        try { [IO.File]::Replace($tmp, $Path, $null); return } catch { }
+        # Replace недоступен (файл занят) — удалить и переименовать.
+        try { [IO.File]::Delete($Path) } catch { }
+    }
+    [IO.File]::Move($tmp, $Path)
+}
+
+Export-ModuleMember -Function Write-NotifierTextAtomic, Test-NotifierPathInside, ConvertTo-NotifierCwdKey, Get-NotifierAutoAllowPrefix, Test-NotifierShellChain, Get-NotifierAutoAllowRules, Add-NotifierAutoAllowRule, Remove-NotifierAutoAllowRule, Test-NotifierAutoAllow, Get-NotifierRequestSummary, New-NotifierPermissionRequest, ConvertTo-NotifierDecisionOutput, Wait-NotifierDecision, New-NotifierReplyWait, Wait-NotifierReply, Get-NotifierPendingRequests, Write-NotifierDecision, Write-NotifierReply, Remove-NotifierReplyWait, Get-NotifierRemoteDecision, Remove-NotifierRequest, Get-NotifierRemoteReply

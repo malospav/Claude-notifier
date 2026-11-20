@@ -69,6 +69,9 @@ namespace ClaudeNotifier.Ui {
                 if (searchOn && search.Length > 0) { search = search.Substring(0, search.Length - 1); Invalidate(); return true; }
                 return false;
             }
+            // Tab / Shift+Tab — по кнопкам, вкладкам, строкам (рамка фокуса); Enter или пробел — нажать.
+            if (k == Keys.Tab && !replyOn) { MoveFocus(shift ? -1 : 1); return true; }
+            if ((k == Keys.Enter || k == Keys.Space) && FocusId != null && !replyOn && !searchOn) { PressFocus(); return true; }
             if (k == Keys.Enter) {
                 if (replyOn) { SendReply(); return true; }
                 if (Page == "home" && Selected != null) { ClickArea("answer", Point.Empty); return true; }
@@ -76,8 +79,9 @@ namespace ClaudeNotifier.Ui {
                 return false;
             }
             if (replyOn) return false;   // печатают ответ — стрелки и цифры как текст
-            if (k == Keys.Left || k == Keys.Up) { SelectRelative(-1); return true; }
-            if (k == Keys.Right || k == Keys.Down) { SelectRelative(1); return true; }
+            // Стрелки выбирают сеанс — только там, где сеансы видны (на «Настройках» выбор не менялся бы незаметно).
+            if ((Page == "home" || Page == "answer") && (k == Keys.Left || k == Keys.Up)) { SelectRelative(-1); return true; }
+            if ((Page == "home" || Page == "answer") && (k == Keys.Right || k == Keys.Down)) { SelectRelative(1); return true; }
             if (!ctrl && !searchOn && (Page == "home" || Page == "answer") && k >= Keys.D1 && k <= Keys.D9) {
                 NotchItem it = Selected;
                 int n = k - Keys.D1;
@@ -89,14 +93,59 @@ namespace ClaudeNotifier.Ui {
         // Символ: в поле ответа, в поиск (на главной начать печатать — уже поиск).
         public bool HandleChar(char c) {
             if (!Expanded || char.IsControl(c)) return false;
-            if (replyOn) { if (reply.Length < 2000) reply += c; Invalidate(); return true; }
-            if (Page == "answer" && CanTextReply(Selected)) { replyOn = true; reply += c; Invalidate(); return true; }
+            if (replyOn) { if (reply.Length < 2000) reply += c; UserKey(); Invalidate(); return true; }   // маскот кивает на каждую клавишу
+            if (Page == "answer" && CanTextReply(Selected)) { replyOn = true; reply += c; UserKey(); Invalidate(); return true; }
             if (Page == "home") { searchOn = true; if (search.Length < 60) search += c; Invalidate(); return true; }
             return false;
         }
 
-        // Свернули шторку: поиск закрыт (черновик ответа остаётся).
-        public void EndTyping() { searchOn = false; search = ""; replyOn = false; }
+        // Свернули шторку: поиск закрыт (черновик ответа остаётся), фокус клавиатуры снят.
+        public void EndTyping() { searchOn = false; search = ""; replyOn = false; FocusId = null; }
+
+        // --- Фокус клавиатуры: Tab по местам щелчка (в порядке отрисовки), рамка вокруг выбранного ---
+        public string FocusId;
+
+        List<KeyValuePair<Rectangle, string>> FocusOrder() {
+            List<KeyValuePair<Rectangle, string>> list = new List<KeyValuePair<Rectangle, string>>();
+            HashSet<string> seen = new HashSet<string>();
+            foreach (KeyValuePair<Rectangle, string> h in hits) {
+                string id = h.Value;
+                if (id == null || id == "answer" || id == "mascot" || id == "reply-field" || id.StartsWith("remove:") || !seen.Add(id)) continue;
+                list.Add(h);
+            }
+            return list;
+        }
+
+        void MoveFocus(int d) {
+            List<KeyValuePair<Rectangle, string>> l = FocusOrder();
+            if (l.Count == 0) return;
+            int i = l.FindIndex(delegate (KeyValuePair<Rectangle, string> h) { return h.Value == FocusId; });
+            i = i < 0 ? (d > 0 ? 0 : l.Count - 1) : ((i + d) % l.Count + l.Count) % l.Count;
+            FocusId = l[i].Value; searchOn = false;
+            WakeUi(); Invalidate();
+        }
+
+        void PressFocus() {
+            foreach (KeyValuePair<Rectangle, string> h in FocusOrder()) {
+                if (h.Value != FocusId) continue;
+                Point c = PointToScreen(new Point(h.Key.X + h.Key.Width / 2, h.Key.Y + h.Key.Height / 2));
+                ClickArea(FocusId, c);
+                return;
+            }
+        }
+
+        // Рамка фокуса (после отрисовки страницы — места щелчка этого кадра уже известны).
+        void PaintFocusRing(Graphics g) {
+            if (FocusId == null) return;
+            foreach (KeyValuePair<Rectangle, string> h in hits) {
+                if (h.Value != FocusId) continue;
+                RectangleF r = h.Key; r.Offset(-origin.X, -origin.Y); r.Inflate(theme.S(2), theme.S(2));
+                float rad = Math.Min(r.Height / 2f, theme.S(16));
+                using (System.Drawing.Drawing2D.GraphicsPath p = Draw.Round(r, rad))
+                using (Pen ring = new Pen(theme.Accent, Math.Max(1.5f, theme.S(2)))) g.DrawPath(ring, p);
+                return;
+            }
+        }
 
         void SendReply() {
             NotchItem it = Selected;
@@ -105,6 +154,7 @@ namespace ClaudeNotifier.Ui {
             EventHandler<NotchEventArgs> h = Command;
             if (h != null) h(this, new NotchEventArgs("text", it.Id, text, Point.Empty));
             reply = ""; replyOn = false; replySentAt = DateTime.UtcNow;
+            Approve();   // отправили — маскот кивает
             WakeUi(); Invalidate();
         }
 
@@ -147,6 +197,18 @@ namespace ClaudeNotifier.Ui {
             return h + theme.S(8);
         }
 
+        // Конец ответа, который помещается в ширину: двоичный поиск начала (log n замеров, а не по символу —
+        // длинный ответ иначе тормозил бы каждый кадр, пока печатают).
+        string ReplyTail(int width) {
+            if (TextRenderer.MeasureText(reply, fBody).Width <= width) return reply;
+            int lo = 1, hi = reply.Length - 1;
+            while (lo < hi) {
+                int mid = (lo + hi) / 2;
+                if (TextRenderer.MeasureText(reply.Substring(mid), fBody).Width <= width) hi = mid; else lo = mid + 1;
+            }
+            return reply.Substring(Math.Min(lo, reply.Length - 1));
+        }
+
         // Поле «Ответить текстом» в нижней строке страницы ответа (правее кнопок).
         void PaintReplyField(Graphics g, Rectangle f) {
             if (f.Width < theme.S(120)) return;
@@ -161,8 +223,7 @@ namespace ClaudeNotifier.Ui {
             else if (reply.Length == 0) TextRenderer.DrawText(g, queue ? (replyOn ? "Следующее задание — уйдёт, когда Claude закончит (Enter)" : "Добавить задание в очередь…") : replyOn ? "Напишите ответ и нажмите Enter" : "Ответить текстом…", fBody, tr, theme.Muted, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             else {
                 // Длинный текст — видно конец (где печатают).
-                string shown = reply;
-                while (shown.Length > 1 && TextRenderer.MeasureText(shown, fBody).Width > tr.Width - theme.S(6)) shown = shown.Substring(1);
+                string shown = ReplyTail(tr.Width - theme.S(6));
                 TextRenderer.DrawText(g, shown, fBody, tr, Fg, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
                 int cw = Math.Min(tr.Width - theme.S(2), TextRenderer.MeasureText(shown, fBody).Width - theme.S(4));
                 using (Pen caret = new Pen(theme.Accent, Math.Max(1f, theme.S(1.5f)))) g.DrawLine(caret, tr.X + cw + theme.S(2), f.Y + theme.S(8), tr.X + cw + theme.S(2), f.Bottom - theme.S(8));

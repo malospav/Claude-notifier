@@ -1,4 +1,4 @@
-﻿// claude-notifier: сеансы в раскрытой шторке — мелочи, которые помогают каждый день.
+// claude-notifier: сеансы в раскрытой шторке — мелочи, которые помогают каждый день.
 //   * Лента сеанса под полным ответом: ваши сообщения, ответы Claude и его действия (последние 5).
 //   * Закреплённые сеансы — со звёздочкой, всегда первыми.
 //   * Сколько сеанс ждёт вас: «12 мин» на плашке; со временем плашка мягко краснеет.
@@ -83,17 +83,20 @@ namespace ClaudeNotifier.Ui {
         }
 
         // Значок «ждёт N мин» на карточке выбранного сеанса (левее стрелки «перейти»).
-        void PaintMainWait(Graphics g, NotchItem it, int right, int y) {
+        // Плашка «ждёт 9 мин» у правого края строки заголовка. Возвращает её ширину (0 — не ждёт), чтобы заголовок
+        // и «Терминал / Приложение» не заезжали под неё.
+        int PaintMainWait(Graphics g, NotchItem it, int right, int y) {
             int m = WaitMinutes(it, DateTime.UtcNow);
             string t = WaitText(m);
-            if (t.Length == 0) return;
+            if (t.Length == 0) return 0;
             t = "ждёт " + t;
             float u = WaitUrgency(m);
-            int w = TextRenderer.MeasureText(t, fSmall).Width + theme.S(16), h = theme.S(22);
+            int w = TextRenderer.MeasureText(t, fSmall, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + theme.S(22), h = theme.S(24);
             Rectangle r = new Rectangle(right - w, y, w, h);
             Draw.Fill(g, r, h / 2f, Color.FromArgb(40 + (int)(u * 80), 255, 69, 58));
             TextRenderer.DrawText(g, t, fSmall, r, Draw.Mix(Pal(0xE5E5EA), Color.FromArgb(255, 160, 150), u),
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            return w;
         }
 
         // --- «Разрешить все» ---

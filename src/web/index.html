@@ -246,7 +246,8 @@
   document.getElementById('mac-copy').onclick = copy;
 
   load();
-  setInterval(function () { if (!typing) load(); }, 3000);
+  setInterval(function () { if (!typing && !document.hidden) load(); }, 3000);   // скрытая вкладка не нагружает ПК
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && !typing) load(); });
 })();
 </script>
 </body>

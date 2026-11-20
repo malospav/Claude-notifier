@@ -134,21 +134,21 @@ Describe 's_018_03 · маскоты в шторке: переход, появл
         finally { [ClaudeNotifier.Ui.NotchView]::LeaveSeconds = 0.6; $f.Dispose() }
     }
 
-    It 'раскрытие: главный маскот перелетает из свёрнутой; пружины успокаиваются — 60 кадров только пока движется' {
+    It 'раскрытие: главный маскот сразу на своём месте (без перелёта), маскоты рады вас видеть; потом — без кадров' {
         $f = New-Object ClaudeNotifier.Ui.NotchForm
         try {
             $v = $f.View
             $v.SetItems([ClaudeNotifier.Ui.NotchItem[]]@((New-It 'a' 'waiting')))
             $f.SetExpanded($false, $null); Invoke-Draw $f
             $f.SetExpanded($true, 'home'); $v.Page = 'home'; Invoke-Draw $f
-            $v.FlyActive | Should -Be $true
+            $v.FlyActive | Should -Be $false      # не летит по диагонали через шторку
+            $v.OpenGreeting | Should -Be $true    # «ой!», улыбка, сердечко
             $step = $v.GetType().GetMethod('StepMotions', [Reflection.BindingFlags]'NonPublic,Instance')
-            [ClaudeNotifier.Ui.NotchView]::FlySeconds = 0
             $busy = $true
-            for ($i = 0; $i -lt 100 -and $busy; $i++) { Start-Sleep -Milliseconds 20; $busy = [bool]$step.Invoke($v, @()) }
-            $busy | Should -Be $false
+            for ($i = 0; $i -lt 200 -and $busy; $i++) { Start-Sleep -Milliseconds 20; $busy = [bool]$step.Invoke($v, @()) }
+            $busy | Should -Be $false             # реакция кончилась — 60 кадров/с больше не нужны
         }
-        finally { [ClaudeNotifier.Ui.NotchView]::FlySeconds = 0.45; $f.Dispose() }
+        finally { $f.Dispose() }
     }
 
     It 'сценки в простое: долго ждёт — потягивается, чешет ухо, дремлет или прыгает к соседу (кадры рисуются)' {

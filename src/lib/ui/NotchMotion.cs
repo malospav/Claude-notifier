@@ -32,10 +32,7 @@ namespace ClaudeNotifier.Ui {
         bool motionsPrimed, motionBusy;
         // Перелёт главного маскота при раскрытии.
         RectangleF lastMainWin;
-        string lastMainId;
-        bool expandedPainted;
         DateTime flyAt = DateTime.MinValue;
-        RectangleF flyFrom;
 
         public int MotionCount { get { return motions.Count; } }
         public int LeavingCount { get { return leaving.Count; } }
@@ -109,7 +106,7 @@ namespace ClaudeNotifier.Ui {
             foreach (FaceMotion fm in motions.Values) busy |= StepOne(fm, dt);
             foreach (FaceMotion fm in leaving) StepOne(fm, dt);
             leaving.RemoveAll(delegate (FaceMotion f) { return (now - f.LeftAt).TotalSeconds > LeaveSeconds; });
-            if (leaving.Count > 0 || Since(flyAt) < FlySeconds) busy = true;
+            if (leaving.Count > 0 || Since(flyAt) < FlySeconds || OpenGreeting) busy = true;
             motionBusy = busy && Animate;
             return motionBusy;
         }
@@ -127,8 +124,11 @@ namespace ClaudeNotifier.Ui {
         // Настроение от движения: пружины, выпрыгивание, брови, глаза к носу, сценки, взгляды на соседей.
         void MotionMood(FaceMotion fm, NotchItem it, CatMood md, RectangleF r, int seed) {
             if (!Animate) return;
-            // Сдвинулся вбок (перестроился ряд) — верх догоняет низ.
-            if (!float.IsNaN(fm.LastX) && Math.Abs(r.X - fm.LastX) > 0.5f && r.Height > 0) fm.Shear.Kick(-(r.X - fm.LastX) / r.Height * 3f);
+            // Сдвинулся вбок (перестроился ряд) — верх догоняет низ. Но не когда шторку раскрывают или сворачивают
+            // и не при скачке на другое место раскладки: там маскот просто стоит на новом месте (иначе — качка и растяжка).
+            bool jump = !float.IsNaN(fm.LastX) && Math.Abs(r.X - fm.LastX) > r.Width * 0.8f;
+            if (!float.IsNaN(fm.LastX) && Math.Abs(r.X - fm.LastX) > 0.5f && r.Height > 0 && !jump && !Morphing && !FlyActive && Since(openedAt) > 0.8)
+                fm.Shear.Kick(-(r.X - fm.LastX) / r.Height * 3f);
             fm.LastX = r.X; fm.Rect = r;
             double born = Since(fm.Born);
             if (born < EnterSeconds) {
@@ -147,6 +147,7 @@ namespace ClaudeNotifier.Ui {
             }
             if (md.Deep && ((T + seed * 0.7f) % 9f) < 2.2f) md.Cross = true;
             IdleScene(fm, it, md, r, seed);
+            OpenGreetMood(it, md);   // раскрыли шторку — заметили вас и улыбнулись (NotchReact.cs)
             // Без курсора иногда поглядывает на соседей (к середине шторки).
             if (!md.HasLook && items.Count > 1) {
                 float ph = (T + seed * 1.9f) % 13f;
@@ -257,22 +258,20 @@ namespace ClaudeNotifier.Ui {
         // Свёрнутая запоминает, где стоял главный маскот (в координатах окна).
         void NoteCollapsedMain(RectangleF r, NotchItem it) {
             lastMainWin = r; lastMainWin.Offset(origin.X, origin.Y);
-            lastMainId = it != null ? it.Id : null;
-            expandedPainted = false;
         }
 
-        // Раскрытая: главный маскот перелетает со своего места в свёрнутой (с перелётом через цель).
-        RectangleF FlyRect(NotchItem it, RectangleF target) {
-            if (!expandedPainted) {
-                expandedPainted = true;
-                if (Animate && it != null && it.Id == lastMainId && lastMainWin.Width > 0) { flyAt = DateTime.UtcNow; flyFrom = lastMainWin; }
+        // Раскрыли или свернули шторку — пружины всех маскотов успокоить: ни раскачки, ни сжатия-растяжения.
+        void SettleMotions() {
+            foreach (FaceMotion fm in motions.Values) {
+                fm.Squash.X = 1f; fm.Squash.V = 0; fm.Shear.X = 0; fm.Shear.V = 0; fm.Lift.X = 0; fm.Lift.V = 0;
+                fm.LastX = float.NaN;
             }
-            double s = Since(flyAt);
-            if (s >= FlySeconds) return target;
-            float k = MascotMotion.EaseOutBack((float)(s / FlySeconds));
-            RectangleF from = flyFrom; from.Offset(-origin.X, -origin.Y);
-            return new RectangleF(from.X + (target.X - from.X) * k, from.Y + (target.Y - from.Y) * k,
-                from.Width + (target.Width - from.Width) * k, from.Height + (target.Height - from.Height) * k);
+        }
+
+        // Раскрытая: главный маскот сразу стоит на своём месте на карточке — без перелёта (по диагонали через
+        // шторку смотрелось плохо). Шторка проявляется кругом от того места, где он стоял в свёрнутой.
+        RectangleF FlyRect(NotchItem it, RectangleF target) {
+            return target;
         }
 
         public bool FlyActive { get { return Since(flyAt) < FlySeconds; } }

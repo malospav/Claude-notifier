@@ -490,7 +490,7 @@ function Format-NotifierSessionDetails {
                 'claude' { $text = "Claude: $text" }
                 'tool' {
                     $ms = [int64]$it.ms
-                    if ($ms -ge 1000) { $text += "${dot}$(Format-NotifierDuration $ms)" }
+                    if ($ms -ge 1000) { $text += "${dot}$(Format-NotifierDurationMs $ms)" }
                     elseif ($ms -lt 0 -and $i -eq $feed.Count - 1 -and [string]$Session.state -eq 'working') { $text += "${dot}идёт" }
                 }
             }
@@ -500,7 +500,7 @@ function Format-NotifierSessionDetails {
     return ($lines -join "`n")
 }
 
-function Format-NotifierDuration([int64]$Ms) {
+function Format-NotifierDurationMs([int64]$Ms) {
     # 3 400 → «3 с», 95 000 → «1 мин 35 с», 3 900 000 → «1 ч 5 мин».
     $s = [int64][Math]::Floor($Ms / 1000)
     if ($s -lt 60) { return "$s с" }
@@ -674,4 +674,4 @@ function Format-NotifierApiError {
     return $Text
 }
 
-Export-ModuleMember -Function Get-NotifierTranscriptChanges, Test-NotifierHelperTranscript, Get-NotifierLastAnswer,Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierDuration, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError
+Export-ModuleMember -Function Get-NotifierTranscriptChanges, Test-NotifierHelperTranscript, Get-NotifierLastAnswer,Test-NotifierAnswerAsks, Get-NotifierAnswerQuestion, Get-NotifierSessionQuestion, Test-NotifierSessionAsks, Get-NotifierTranscriptStats, Format-NotifierTokens, Format-NotifierSessionDetails, Format-NotifierDurationMs, Format-NotifierAgentLines, Get-NotifierContextWindow, Get-NotifierJournalWriteTime, Format-NotifierApiError
